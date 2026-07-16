@@ -1,404 +1,64 @@
-<p align="center">
-  <img src="android/app/src/main/res/mipmap-xxhdpi/ic_launcher.png" width="120" alt="AppIcon">
-</p>
-
 # WeiMi（微密）
 
-一款开源跨平台高性能文件加密GUI客户端。**加密器支持对任意类型的文件进行加密保护**,内置的查看器支持视频、图片、音频、文本和PDF文件的查看。用户可以对文件设置密码加密,选择已加密的文件进行查看时,输入正确密码即可直接查看,也可以将加密文件还原为普通文件。
+开源跨平台文件加密工具。支持任意类型文件加密保护，内置视频/图片/音频/文本/PDF 查看器，加密文件可在输入密码后直接查看，也可解密还原。
 
-###  [前往下载](https://github.com/weimi95/WeiMi/releases) 
+### [网盘下载](https://pan.quark.cn/s/355fd17a414b?pwd=GpYp)
 
-已支持：Windows、macOS(arm64)、Linux、Android
-
-## 应用截图 
-
-<div align="center">
-<img src="RES/screenshoot_android.png" alt="Android截图" width="30%" />
-<img src="RES/screenshoot_windows.png" alt="Windows截图" width="60%" />
-</div>
+已支持：Windows · macOS(arm64) · Linux · Android
 
 ## 核心功能
 
-### 1. 多语言支持
-- 支持**中文**和**English**两种语言
-- 应用启动时自动检测设备语言
-  - 设备语言为中文（包括简体、繁体等）时，应用使用中文
-  - 设备语言为其他语言时，应用使用英文
-- 用户可通过左侧抽屉栏的"中文/English"菜单手动切换语言
-- 手动设置后，应用将记住用户选择，不再跟随设备语言变化
+- **加密**：选择任意类型文件，AES-256-GCM 加密，可添加密码提示词
+- **解密**：批量解密 .kyl 文件，一次输入密码，自动跳过失败项
+- **查看**：加密文件输入密码后直接预览，支持视频/图片/音频/文本/PDF
+- **多语言**：中英文自动检测 + 手动切换，记住用户偏好
+- **文件关联**：Windows 注册 .kyl 默认打开；Android 通过分享菜单打开
 
-### 2. 文件关联
-- **Windows**: 应用首次启动时自动注册为.kyl文件的默认打开程序
-  - 双击.kyl加密文件即可自动启动应用并打开
-- **Linux**: 使用应用内的"打开文件"功能手动选择.kyl文件
-  - 暂不支持桌面环境文件关联（规划中）
-- **Android**: 由于系统限制(尤其是Android 13+和部分定制ROM如ColorOS),无法直接关联.kyl文件
-  - 推荐方式: 在文件管理器中**长按.kyl文件** → 选择**"分享"** → 选择本应用打开
-  - 或在应用内使用"打开文件"功能手动选择.kyl文件
+## 技术亮点
 
-### 2. 打开文件
-- 用户选择文件,系统自动检测文件是否已加密
-- 若是普通文件且是内置查看器支持的文件类型，可直接打开查看
-- 若是加密文件,输入正确密码正确后可打开查看
+- **Rust 加密引擎**：AES-256-GCM 认证加密 + SHA-256 密钥派生，AES-NI 硬件加速
+- **零拷贝架构**：文件 I/O 全程在 Rust 侧，消除 FFI 数据拷贝，1GB 文件加密仅 1.5 秒
+- **并行处理**：Rayon 多线程 + 流水线并行，动态适配 CPU 核心数
+- **流式大文件**：三级分块策略（128MB~256MB/chunk），支持 GB 级文件，无 OOM 风险
+- **安全清理**：临时文件自动删除，file_picker 缓存管理，防止数据残留
 
-### 3. 加密文件
-- 用户可选择单个或多个**任意类型**的文件,填写密码,以及可选的提示词
-- 系统开始逐一加密文件
-- 用户选择加密后的文件保存路径,文件自动重命名新增".kyl"扩展名
+## 构建
 
-### 4. 解密文件
-- 用户可选择单个或多个.kyl文件进行批量解密
-- 若选择多个文件，提示词仅显示第一个文件的提示词
-- 用户只需输入一次密码，系统使用该密码逐一尝试解密所有文件
-- 用户选择解密文件的保存目录，系统开始解密
-- 解密成功的文件自动删除".kyl"扩展名并保存
-- 若某文件密码错误或解密失败，自动跳过该文件继续解密下一个
-
-## 内置查看器支持的文件类型
-
-- **视频**: mp4, avi, mkv, mov, wmv, flv
-- **图片**: jpg, jpeg, png, gif, bmp, webp
-- **音频**: mp3, wav, flac, aac, m4a, ogg
-- **文本**: txt, md, json, xml, csv
-- **PDF**: pdf
-
-**注意**: 对于查看器不支持的文件类型(如Office文档等)的.kyl文件,您可以通过"解密文件"功能将其解密,然后使用对应的第三方软件打开查看。
-
-## 技术架构
-
-项目使用Flutter统一开发，采用分层架构设计:
-
-### 加密/解密层
-- **文件类型无关**的二进制流处理,支持任意文件类型
-- **Rust高性能加密引擎**
-  - **AES-256-GCM加密算法**（使用Rust原生实现，提供认证加密）
-  - SHA-256密钥派生（基于RustCrypto生态）
-  - **并行加密/解密**（使用Rayon并行处理，充分利用多核CPU）
-  - 编译器优化（LTO、单代码单元、O3级别优化）
-  - 零成本抽象，提供接近硬件的性能
-  - **文件I/O全程在Rust侧**（消除FFI跨语言开销和内存拷贝）
-- **大文件智能处理策略**
-  - **三级处理策略**：
-    - 小文件（≤128/256MB）：单chunk串行加密
-    - 中等文件（≤512MB/1GB）：全并行加密，一次性处理所有chunks
-    - 大文件（>512MB/1GB）：流式+批量并行，移动端4 chunks/批，桌面端8 chunks/批
-  - 分块大小：移动端128MB，桌面端256MB
-  - 流式读写，避免内存溢出
-  - 支持GB级大文件的加密和解密
-  - 自动块长度记录，确保精确解密
-  - **每个chunk使用独立nonce**，符合GCM安全要求
-- **极致性能架构**
-  - 文件读取、加密、写入全程在Rust侧完成
-  - 零FFI边界数据传输（仅传递文件路径和密码）
-  - 消除Dart/Rust间的GB级数据拷贝
-  - 流水线并行：I/O与加密并发执行
-- 自定义文件头格式：
-  - 小文件：`Header | Hint | Nonce(12) | EncryptedData`
-  - 多chunk文件：`Header | Hint | (Nonce(12) | Length(4) | EncryptedChunk)*`
-
-### 查看器层
-- **文件类型感知**的展示逻辑,仅支持特定文件类型
-- 根据文件扩展名自动选择合适的查看器
-- 支持加密文件的透明解密查看
-- 对不支持的文件类型提示用户通过解密功能处理
-- **智能内存管理**
-  - **小文件（单chunk）**：直接在内存中解密，零临时文件开销
-    - 图片查看器：Image.memory直接加载
-    - 文本查看器：String.fromCharCodes直接加载
-    - 视频/音频/PDF查看器：内存写入应用缓存目录临时文件后播放
-  - **大文件（多chunk）**：流式解密到临时文件，避免内存溢出
-    - 解密过程峰值内存：移动端512MB（4×128MB批处理），桌面端2GB（8×256MB批处理）
-    - 视频/音频/PDF查看器：直接使用临时文件，无额外内存占用
-    - 图片/文本查看器：读取临时文件后立即删除
-  - **临时文件自动清理**：查看器关闭时自动删除所有临时文件，使用应用缓存目录而非系统临时目录
-  - **Android文件选择器缓存管理**：
-    - file_picker在Android上选择文件时会复制到应用缓存目录
-    - 查看器关闭时自动清理file_picker缓存，防止缓存累积
-    - 应用退出时执行最终清理，确保缓存不残留
-
-### 平台集成层
-- **Windows文件关联**
-  - 通过Windows Registry API注册.kyl文件扩展名
-  - 创建ProgID和文件类型关联
-  - 支持命令行参数接收文件路径
-  - 使用MethodChannel与Dart层通信
-- **Linux平台支持**
-  - 使用Zenity作为GTK文件选择器对话框
-  - 支持中文字体显示（需安装CJK字体包）
-  - 完整的加密/解密功能支持
-  - 桌面环境文件关联功能规划中
-- **Android分享集成**
-  - 通过AndroidManifest.xml配置ACTION_SEND intent-filter
-  - 支持从文件管理器分享文件到应用
-  - 处理content URI并自动转换为可访问的文件路径
-  - Kotlin原生代码与Flutter通信
-  - **largeHeap支持**：启用大堆内存以支持并行加密大文件
-  - **注意**: 由于Android 13+及部分定制ROM(如ColorOS)的限制,不支持直接双击打开.kyl文件,需使用分享方式
-
-## 安全特性
-
-- **AES-256-GCM认证加密**，同时提供机密性和完整性保护
-- SHA-256密钥派生,防止暴力破解
-- **每个chunk独立nonce**，消除GCM模式下的nonce重用风险
-- **Rust内存安全保证**：防止缓冲区溢出、空指针等安全漏洞
-- **临时文件自动清理**：查看加密文件时创建的临时文件在查看器关闭时自动删除
-  - 视频播放器：在dispose时自动删除临时视频文件
-  - 音频播放器：在dispose时自动删除临时音频文件
-  - PDF查看器：在dispose时自动删除临时PDF文件
-  - 图片/文本查看器：小文件无需临时文件，大文件读取后立即删除
-  - 使用应用缓存目录（getTemporaryDirectory）而非系统临时目录
-  - **Android文件选择器缓存管理**：查看器关闭时自动清理file_picker缓存，防止缓存累积
-  - 防止敏感数据残留和缓存无限增长
-- 密码提示词帮助用户记忆密码
-- 版本控制支持未来的兼容性扩展
-
-## 性能优化
-
-- **Rust高性能加密引擎**
-  - 原生性能，比纯Dart实现显著提升
-  - 编译期优化：LTO（链接时优化）
-  - **AES-NI硬件加速**：通过target-cpu=native启用CPU原生AES指令集
-  - 零成本抽象，无运行时开销
-- **零拷贝架构（重大性能突破）**
-  - **文件I/O完全在Rust侧执行**：读取→加密→写入全程无需跨FFI边界
-  - **消除GB级数据传输**：仅传递文件路径和密码，而非文件内容
-  - **性能提升95%+**：1GB文件加密从29秒降至1.5秒（Windows）
-  - **实测吞吐量**：
-    - Windows: ~750 MB/s (加密) / ~795 MB/s (解密)
-    - Android: ~207 MB/s (加密) / ~211 MB/s (解密)
-- **并行加密/解密**
-  - 使用Rayon库实现多线程并行处理
-  - **动态批处理大小**：根据CPU核心数自适应调整
-    - 移动端：cores × 0.5，范围2-8（保守策略避免OOM）
-    - 桌面端：cores × 0.75，范围4-16（充分利用多核性能）
-  - **流水线并行**：Rust侧实现读取-加密-写入流水线并发
-  - 充分利用多核CPU，提升大文件处理速度
-- **智能三级处理策略**
-  - 小文件（≤128/256MB）：单chunk快速处理
-  - 中等文件（≤512MB/1GB）：全并行处理，性能最优
-  - 大文件（>512MB/1GB）：流式+批量并行，平衡性能与内存
-- **大文件流式处理**
-  - 移动端128MB分块，桌面端256MB分块
-  - 流式读写，内存占用可控
-  - 支持1GB+大文件加密/解密，无OOM风险
-  - **性能实测**：
-    - 1GB文件加密：Windows 1.5秒，Android 5.4秒
-    - 1GB文件解密：Windows 1.4秒，Android 5.4秒
-- **智能解密策略**
-  - 小文件（单chunk）：内存直接解密，性能最优
-  - 大文件（多chunk）：自动切换到临时文件模式，避免OOM
-  - Android移动设备上可流畅打开GB级加密视频文件
-- **提示词读取优化**
-  - Rust侧直接读取文件头部必要字节（约271字节）
-  - 大文件提示词显示无延迟
-
-## 开发路线
-
-- [x] 核心加密功能开发
-  - [x] 实现加密算法核心模块(AES-256加密,SHA-256密钥派生)
-  - [x] 实现文件加密功能(包含Magic String: KYRIE_LOCK和版本号)
-  - [x] 实现文件解密功能(支持密码验证和版本兼容)
-- [x] 文件查看器开发
-  - [x] 实现视频播放器(支持普通视频和加密视频解密播放)
-  - [x] 实现图片查看器(支持缩放、平移)
-  - [x] 实现音频播放器(支持播放控制)
-  - [x] 实现文本查看器(支持滚动、选择)
-  - [x] 实现PDF查看器(支持翻页)
-- [x] 用户界面开发
-  - [x] 主页菜单
-  - [x] 文件选择器
-  - [x] 密码输入对话框
-- [x] 集成测试并成功构建Windows平台应用程序
-- [x] 批量加密功能
-  - [x] 支持选择多个文件进行批量加密
-  - [x] 自动跳过已加密的文件
-  - [x] 实时显示加密进度(当前进度/总数,当前文件名)
-- [x] 批量解密功能
-  - [x] 支持选择多个文件进行批量解密
-  - [x] 仅显示第一个文件的密码提示词
-  - [x] 一次密码输入解密所有文件
-  - [x] 自动跳过解密失败的文件并清理残留空文件
-  - [x] 实时显示解密进度(当前进度/总数,当前文件名)
-- [x] 加密/解密进度显示
-  - [x] 创建通用进度对话框组件
-  - [x] 加密时显示批量处理进度
-  - [x] 解密时显示批量处理进度
-- [x] 性能优化
-  - [x] 使用Rust实现核心加密模块
-  - [x] FFI集成（Dart ↔ Rust）
-  - [x] 编译器优化（LTO、O3优化级别）
-  - [x] 大文件流式加密/解密（支持GB级文件）
-  - [x] 内存优化（避免OOM，分块处理）
-  - [x] 智能解密策略（小文件内存解密，大文件临时文件解密）
-  - [x] Android移动设备大文件打开优化（解决1GB+文件OOM问题）
-  - [x] **并行加密/解密**（使用Rayon多线程并行处理）
-  - [x] **AES-GCM加密升级**（从CBC升级到GCM认证加密）
-  - [x] **独立nonce机制**（每个chunk使用独立nonce，消除安全风险）
-  - [x] **三级处理策略**（小/中/大文件智能分流处理）
-  - [x] **提示词读取优化**（大文件提示词显示无延迟）
-  - [x] **AES-NI硬件加速**（启用CPU原生AES指令集）
-  - [x] **动态批处理优化**（根据CPU核心数自适应调整并行度）
-  - [x] **流水线并行架构**（Rust侧I/O与加密流水线并发）
-  - [x] **文件I/O Rust侧迁移**（消除FFI开销，性能提升95%+）
-- [x] 文件关联功能
-  - [x] Windows平台注册.kyl文件默认打开程序
-  - [x] Android平台分享打开支持(通过ACTION_SEND)
-  - [x] 跨平台MethodChannel通信实现
-- [x] 适配Linux系统
-  - [x] 编译Rust加密库Linux版本（.so）
-  - [x] 构建Linux GUI应用
-  - [x] 集成Zenity文件选择器
-  - [x] 验证加密/解密功能
-  - [x] 中文字体支持测试
-- [x] 多语言支持
-  - [x] 实现LocalizationService语言管理服务
-  - [x] 添加中英文翻译字符串
-  - [x] 创建语言选择界面
-  - [x] 实现语言切换和本地存储
-  - [x] 自动检测设备语言
-  - [x] 首次启动默认语言跟随设备语言
-- [ ] 适配macOS系统
-- [ ] 适配iOS系统
-
-## 未来规划
-
-1. **性能优化**
-   - ~~大文件流式加解密~~（已实现：移动端128MB、桌面端256MB分块流式处理）
-   - ~~内存优化~~（已实现：避免OOM，支持GB级文件）
-   - ~~多线程并行处理大文件~~（已实现：Rayon并行加密/解密）
-   - ~~消除FFI性能瓶颈~~（已实现：文件I/O迁移至Rust侧，性能提升95%+）
-
-2. **功能增强**
-   - ~~文件批量加密~~（已实现）
-   - ~~文件批量解密~~（已实现）
-   - ~~文件关联(Windows)~~（已实现）
-   - ~~文件分享打开(Android)~~（已实现）
-   - 最近使用记录
-   - Linux/macOS文件关联支持
-   - Android直接打开.kyl文件支持(需等待系统限制解除)
-
-## 开发环境
-
-### 必需工具
-- Flutter SDK (3.10.1+)
-- Rust工具链 (1.70+)
-- 对应平台的构建工具
-  - Windows: Visual Studio 2022或MSVC构建工具
-  - macOS: Xcode
-  - Linux: GCC/Clang、GTK 3开发库
-
-### 构建步骤
-
-#### Windows平台
-
-1. 安装依赖
+### Windows
 ```bash
 flutter pub get
-```
-
-2. 编译Rust加密库
-```bash
-cd rust_crypto
-cargo build --release
-cd ..
+cd rust_crypto && cargo build --release && cd ..
 cp rust_crypto/target/release/rust_crypto.dll .
-```
-
-3. 构建应用
-```bash
 flutter build windows --release
 ```
 
-#### Linux平台
-
-1. 安装系统依赖
+### Android
 ```bash
-# 安装构建工具和GTK开发库
-sudo apt-get install -y clang cmake ninja-build pkg-config libgtk-3-dev
-
-# 安装中文字体支持
-sudo apt-get install -y fonts-noto-cjk fonts-wqy-microhei fonts-wqy-zenhei
-
-# 安装文件选择器对话框
-sudo apt-get install -y zenity
-```
-
-2. 安装Flutter依赖
-```bash
-flutter pub get
-```
-
-3. 编译Rust加密库
-```bash
-cd rust_crypto
-cargo build --release
-cd ..
-cp rust_crypto/target/release/librust_crypto.so .
-```
-
-4. 构建应用
-```bash
-flutter build linux --release
-```
-
-5. 运行应用
-```bash
-./build/linux/x64/release/bundle/kyrie_lock
-```
-
-**注意事项**：
-- Linux版本需要安装中文字体包（fonts-noto-cjk等），否则中文显示为方框
-- 需要安装zenity作为文件选择器，否则无法打开文件对话框
-- 构建产物位于：`build/linux/x64/release/bundle/`
-
-#### Android平台
-
-当rust有修改后，运行脚本build_android_rust.ps1为Android平台构建依赖
-
-```bash
+# Rust 库有修改时先运行
+./build_android_rust.ps1
 flutter build apk --release
 ```
 
-#### macOS
-
-1. 安装系统依赖
+### Linux
 ```bash
-# 安装CocoaPods
-brew install cocoapods
-pod setup
-```
-
-2. 安装rust
-```bash
-curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
-```
-
-3. 编译Rust加密库
-```bash
-cd rust_crypto
-
-# 添加macOS编译目标
-rustup target add aarch64-apple-darwin  # Apple Silicon
-
-# 编译Release版本
-cargo build --release --target aarch64-apple-darwin # Apple Silicon Mac
-
-cd ..
-```
-
-4. Build macOS
-```bash
+sudo apt-get install -y clang cmake ninja-build pkg-config libgtk-3-dev fonts-noto-cjk zenity
 flutter pub get
-flutter build macos --release
+cd rust_crypto && cargo build --release && cd ..
+cp rust_crypto/target/release/librust_crypto.so .
+flutter build linux --release
 ```
 
-5. Copy Rust library
+### macOS
 ```bash
-cp rust_crypto/target/aarch64-apple-darwin/release/librust_crypto.dylib build/macos/Build/Products/Release/kyrie_lock.app/Contents/Resources/
+brew install cocoapods && pod setup
+rustup target add aarch64-apple-darwin
+cd rust_crypto && cargo build --release --target aarch64-apple-darwin && cd ..
+flutter pub get && flutter build macos --release
+cp rust_crypto/target/aarch64-apple-darwin/release/librust_crypto.dylib build/macos/Build/Products/Release/weimi.app/Contents/Resources/
+```
 
 ---
 
 ## 致谢
 
-本项目基于 [KyrieLock](https://github.com/walkingon/KyrieLock) 修改而来，感谢原作者的优秀工作。KyrieLock 提供了完整的跨平台文件加密架构、Rust 高性能加密引擎、AES-256-GCM 认证加密、多语言支持等核心能力，WeiMi 在此基础上进行了个性化调整与优化。
-```
+本项目基于 [KyrieLock](https://github.com/walkingon/KyrieLock) 修改而来，感谢原作者的优秀工作。

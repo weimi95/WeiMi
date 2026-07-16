@@ -1,4 +1,4 @@
-package com.walkingon.weimi
+package com.weimi95.weimi
 
 import android.content.Context
 import android.content.Intent
@@ -13,7 +13,7 @@ import java.io.File
 import java.io.FileOutputStream
 
 class MainActivity : FlutterActivity() {
-    private val CHANNEL = "com.walkingon.weimi/file_association"
+    private val CHANNEL = "com.weimi95.weimi/file_association"
     private var initialFilePath: String? = null
 
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {

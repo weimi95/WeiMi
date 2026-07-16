@@ -4,7 +4,7 @@ import 'package:flutter/foundation.dart';
 
 class FileAssociationService {
   static const MethodChannel _channel =
-      MethodChannel('com.walkingon.weimi/file_association');
+      MethodChannel('com.weimi95.weimi/file_association');
 
   static Future<void> registerFileAssociation() async {
     if (Platform.isWindows) {

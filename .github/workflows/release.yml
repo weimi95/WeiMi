@@ -75,16 +75,16 @@ jobs:
       - name: Rename and generate APK checksum
         run: |
           VERSION=${GITHUB_REF#refs/tags/}
-          mv build/app/outputs/flutter-apk/app-release.apk kyrie-lock-${VERSION}-android.apk
-          sha256sum kyrie-lock-${VERSION}-android.apk > kyrie-lock-${VERSION}-android.apk.sha256
+          mv build/app/outputs/flutter-apk/app-release.apk weimi-${VERSION}-android.apk
+          sha256sum weimi-${VERSION}-android.apk > weimi-${VERSION}-android.apk.sha256
       
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
           name: android-apk
           path: |
-            kyrie-lock-*-android.apk
-            kyrie-lock-*-android.apk.sha256
+            weimi-*-android.apk
+            weimi-*-android.apk.sha256
 
   build-windows:
     runs-on: windows-latest
@@ -115,21 +115,21 @@ jobs:
         run: |
           cd build/windows/x64/runner/Release
           $VERSION = $env:GITHUB_REF -replace 'refs/tags/', ''
-          Compress-Archive -Path * -DestinationPath "../../../../../kyrie-lock-$VERSION-windows.zip"
+          Compress-Archive -Path * -DestinationPath "../../../../../weimi-$VERSION-windows.zip"
       
       - name: Generate Windows checksum
         run: |
           $VERSION = $env:GITHUB_REF -replace 'refs/tags/', ''
-          $hash = Get-FileHash -Algorithm SHA256 "kyrie-lock-$VERSION-windows.zip"
-          "$($hash.Hash.ToLower())  kyrie-lock-$VERSION-windows.zip" | Out-File -Encoding ASCII "kyrie-lock-$VERSION-windows.zip.sha256"
+          $hash = Get-FileHash -Algorithm SHA256 "weimi-$VERSION-windows.zip"
+          "$($hash.Hash.ToLower())  weimi-$VERSION-windows.zip" | Out-File -Encoding ASCII "weimi-$VERSION-windows.zip.sha256"
       
       - name: Upload Windows
         uses: actions/upload-artifact@v4
         with:
           name: windows-zip
           path: |
-            kyrie-lock-*-windows.zip
-            kyrie-lock-*-windows.zip.sha256
+            weimi-*-windows.zip
+            weimi-*-windows.zip.sha256
 
   build-macos:
     runs-on: macos-latest
@@ -158,30 +158,30 @@ jobs:
 
       - name: Copy Rust library
         run: |
-          cp rust_crypto/target/aarch64-apple-darwin/release/librust_crypto.dylib build/macos/Build/Products/Release/kyrie_lock.app/Contents/Resources/
+          cp rust_crypto/target/aarch64-apple-darwin/release/librust_crypto.dylib build/macos/Build/Products/Release/weimi.app/Contents/Resources/
       
       - name: Create macOS DMG
         run: |
           VERSION=${GITHUB_REF#refs/tags/}
           brew install create-dmg
           create-dmg \
-            --volname "KyrieLock" \
+            --volname "WeiMi" \
             --window-pos 200 120 \
             --window-size 600 400 \
             --icon-size 100 \
             --app-drop-link 450 185 \
-            kyrie-lock-${VERSION}-macos.dmg \
-            build/macos/Build/Products/Release/kyrie_lock.app || \
-          (cd build/macos/Build/Products/Release && zip -r ../../../../../kyrie-lock-${VERSION}-macos.zip kyrie_lock.app)
+            weimi-${VERSION}-macos.dmg \
+            build/macos/Build/Products/Release/weimi.app || \
+          (cd build/macos/Build/Products/Release && zip -r ../../../../../weimi-${VERSION}-macos.zip weimi.app)
       
       - name: Generate macOS checksums
         run: |
           VERSION=${GITHUB_REF#refs/tags/}
-          if [ -f kyrie-lock-${VERSION}-macos.dmg ]; then
-            shasum -a 256 kyrie-lock-${VERSION}-macos.dmg > kyrie-lock-${VERSION}-macos.dmg.sha256
+          if [ -f weimi-${VERSION}-macos.dmg ]; then
+            shasum -a 256 weimi-${VERSION}-macos.dmg > weimi-${VERSION}-macos.dmg.sha256
           fi
-          if [ -f kyrie-lock-${VERSION}-macos.zip ]; then
-            shasum -a 256 kyrie-lock-${VERSION}-macos.zip > kyrie-lock-${VERSION}-macos.zip.sha256
+          if [ -f weimi-${VERSION}-macos.zip ]; then
+            shasum -a 256 weimi-${VERSION}-macos.zip > weimi-${VERSION}-macos.zip.sha256
           fi
       
       - name: Upload macOS
@@ -189,10 +189,10 @@ jobs:
         with:
           name: macos-dmg
           path: |
-            kyrie-lock-*-macos.dmg
-            kyrie-lock-*-macos.dmg.sha256
-            kyrie-lock-*-macos.zip
-            kyrie-lock-*-macos.zip.sha256
+            weimi-*-macos.dmg
+            weimi-*-macos.dmg.sha256
+            weimi-*-macos.zip
+            weimi-*-macos.zip.sha256
 
   build-linux:
     runs-on: ubuntu-latest
@@ -228,20 +228,20 @@ jobs:
         run: |
           VERSION=${GITHUB_REF#refs/tags/}
           cd build/linux/x64/release/bundle
-          tar -czf ../../../../../kyrie-lock-${VERSION}-linux.tar.gz *
+          tar -czf ../../../../../weimi-${VERSION}-linux.tar.gz *
       
       - name: Generate Linux checksum
         run: |
           VERSION=${GITHUB_REF#refs/tags/}
-          sha256sum kyrie-lock-${VERSION}-linux.tar.gz > kyrie-lock-${VERSION}-linux.tar.gz.sha256
+          sha256sum weimi-${VERSION}-linux.tar.gz > weimi-${VERSION}-linux.tar.gz.sha256
       
       - name: Upload Linux
         uses: actions/upload-artifact@v4
         with:
           name: linux-tarball
           path: |
-            kyrie-lock-*-linux.tar.gz
-            kyrie-lock-*-linux.tar.gz.sha256
+            weimi-*-linux.tar.gz
+            weimi-*-linux.tar.gz.sha256
 
   release:
     needs: [build-android, build-windows, build-macos, build-linux]
@@ -260,25 +260,25 @@ jobs:
         run: |
           echo "# SHA256 Checksums" > SHA256SUMS.txt
           echo "" >> SHA256SUMS.txt
-          cat artifacts/android-apk/kyrie-lock-*-android.apk.sha256 >> SHA256SUMS.txt
-          cat artifacts/windows-zip/kyrie-lock-*-windows.zip.sha256 >> SHA256SUMS.txt
-          if [ -f artifacts/macos-dmg/kyrie-lock-*-macos.dmg.sha256 ]; then
-            cat artifacts/macos-dmg/kyrie-lock-*-macos.dmg.sha256 >> SHA256SUMS.txt
+          cat artifacts/android-apk/weimi-*-android.apk.sha256 >> SHA256SUMS.txt
+          cat artifacts/windows-zip/weimi-*-windows.zip.sha256 >> SHA256SUMS.txt
+          if [ -f artifacts/macos-dmg/weimi-*-macos.dmg.sha256 ]; then
+            cat artifacts/macos-dmg/weimi-*-macos.dmg.sha256 >> SHA256SUMS.txt
           fi
-          if [ -f artifacts/macos-dmg/kyrie-lock-*-macos.zip.sha256 ]; then
-            cat artifacts/macos-dmg/kyrie-lock-*-macos.zip.sha256 >> SHA256SUMS.txt
+          if [ -f artifacts/macos-dmg/weimi-*-macos.zip.sha256 ]; then
+            cat artifacts/macos-dmg/weimi-*-macos.zip.sha256 >> SHA256SUMS.txt
           fi
-          cat artifacts/linux-tarball/kyrie-lock-*-linux.tar.gz.sha256 >> SHA256SUMS.txt
+          cat artifacts/linux-tarball/weimi-*-linux.tar.gz.sha256 >> SHA256SUMS.txt
       
       - name: Create Release
         uses: softprops/action-gh-release@v1
         with:
           files: |
-            artifacts/android-apk/kyrie-lock-*-android.apk
-            artifacts/windows-zip/kyrie-lock-*-windows.zip
-            artifacts/macos-dmg/kyrie-lock-*-macos.dmg
-            artifacts/macos-dmg/kyrie-lock-*-macos.zip
-            artifacts/linux-tarball/kyrie-lock-*-linux.tar.gz
+            artifacts/android-apk/weimi-*-android.apk
+            artifacts/windows-zip/weimi-*-windows.zip
+            artifacts/macos-dmg/weimi-*-macos.dmg
+            artifacts/macos-dmg/weimi-*-macos.zip
+            artifacts/linux-tarball/weimi-*-linux.tar.gz
             SHA256SUMS.txt
           draft: false
           prerelease: false

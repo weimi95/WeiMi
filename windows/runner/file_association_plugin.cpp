@@ -25,7 +25,7 @@ void FileAssociationPluginRegisterWithRegistrar(
 
   channel_ =
       std::make_unique<flutter::MethodChannel<flutter::EncodableValue>>(
-          registrar->messenger(), "com.walkingon.weimi/file_association",
+          registrar->messenger(), "com.weimi95.weimi/file_association",
           &flutter::StandardMethodCodec::GetInstance());
 
   channel_->SetMethodCallHandler(
@@ -38,7 +38,7 @@ void FileAssociationPlugin::RegisterWithRegistrar(
     flutter::PluginRegistrarWindows* registrar) {
   auto channel =
       std::make_unique<flutter::MethodChannel<flutter::EncodableValue>>(
-          registrar->messenger(), "com.walkingon.weimi/file_association",
+          registrar->messenger(), "com.weimi95.weimi/file_association",
           &flutter::StandardMethodCodec::GetInstance());
 
   channel->SetMethodCallHandler(
@@ -76,7 +76,7 @@ static void RegisterFileAssociation() {
   WCHAR exePath[MAX_PATH];
   GetModuleFileNameW(NULL, exePath, MAX_PATH);
 
-  // 清理旧版本 kyrie_lock 注册表残留
+  // 清理旧版本 kyrie_lock / weimi 注册表残留
   RegDeleteTreeW(HKEY_CURRENT_USER, L"Software\\Classes\\kyrie_lock.wemi");
   RegDeleteTreeW(HKEY_CURRENT_USER, L"Software\\Classes\\kyrie_lock");
 

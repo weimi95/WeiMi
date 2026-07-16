@@ -40,6 +40,6 @@ Write-Host "Pushed to origin" -ForegroundColor Green
 Write-Host "`n========================================" -ForegroundColor Cyan
 Write-Host "Release process completed successfully!" -ForegroundColor Green
 Write-Host "GitHub Actions will now build the release automatically." -ForegroundColor Cyan
-Write-Host "Check progress at: https://github.com/walkingon/WeiMi/actions" -ForegroundColor Cyan
-Write-Host "View releases at: https://github.com/walkingon/WeiMi/releases" -ForegroundColor Cyan
+Write-Host "Check progress at: https://github.com/weimi95/WeiMi/actions" -ForegroundColor Cyan
+Write-Host "View releases at: https://github.com/weimi95/WeiMi/releases" -ForegroundColor Cyan
 Write-Host "========================================" -ForegroundColor Cyan
