@@ -2,11 +2,11 @@
   <img src="android/app/src/main/res/mipmap-xxhdpi/ic_launcher.png" width="120" alt="AppIcon">
 </p>
 
-# KyrieLock
+# WeiMi（微密）
 
 一款开源跨平台高性能文件加密GUI客户端。**加密器支持对任意类型的文件进行加密保护**,内置的查看器支持视频、图片、音频、文本和PDF文件的查看。用户可以对文件设置密码加密,选择已加密的文件进行查看时,输入正确密码即可直接查看,也可以将加密文件还原为普通文件。
 
-###  [前往下载](https://github.com/walkingon/KyrieLock/releases) 
+###  [前往下载](https://github.com/weimi95/WeiMi/releases) 
 
 已支持：Windows、macOS(arm64)、Linux、Android
 
@@ -395,4 +395,10 @@ flutter build macos --release
 5. Copy Rust library
 ```bash
 cp rust_crypto/target/aarch64-apple-darwin/release/librust_crypto.dylib build/macos/Build/Products/Release/kyrie_lock.app/Contents/Resources/
+
+---
+
+## 致谢
+
+本项目基于 [KyrieLock](https://github.com/walkingon/KyrieLock) 修改而来，感谢原作者的优秀工作。KyrieLock 提供了完整的跨平台文件加密架构、Rust 高性能加密引擎、AES-256-GCM 认证加密、多语言支持等核心能力，WeiMi 在此基础上进行了个性化调整与优化。
 ```
