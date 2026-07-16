@@ -50,12 +50,26 @@ jobs:
         run: |
           echo "${{ secrets.ANDROID_KEYSTORE_BASE64 }}" | base64 -d > android/app/upload-keystore.jks
       
+      - name: Convert keystore to PKCS12 (avoid JDK compat issues)
+        run: |
+          keytool -importkeystore \
+            -srckeystore android/app/upload-keystore.jks \
+            -destkeystore android/app/upload-keystore.p12 \
+            -deststoretype PKCS12 \
+            -srcstorepass "${{ secrets.ANDROID_KEYSTORE_PASSWORD }}" \
+            -srckeypass "${{ secrets.ANDROID_KEY_PASSWORD }}" \
+            -srcalias "${{ secrets.ANDROID_KEY_ALIAS }}" \
+            -deststorepass "${{ secrets.ANDROID_KEYSTORE_PASSWORD }}" \
+            -destkeypass "${{ secrets.ANDROID_KEY_PASSWORD }}" \
+            -destalias "${{ secrets.ANDROID_KEY_ALIAS }}" \
+            -noprompt
+      
       - name: Create key.properties
         run: |
           echo "storePassword=${{ secrets.ANDROID_KEYSTORE_PASSWORD }}" > android/key.properties
           echo "keyPassword=${{ secrets.ANDROID_KEY_PASSWORD }}" >> android/key.properties
           echo "keyAlias=${{ secrets.ANDROID_KEY_ALIAS }}" >> android/key.properties
-          echo "storeFile=upload-keystore.jks" >> android/key.properties
+          echo "storeFile=upload-keystore.p12" >> android/key.properties
       
       - name: Replace Aliyun mirrors (not reachable from Actions)
         run: |
