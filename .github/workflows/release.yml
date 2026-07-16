@@ -1,0 +1,279 @@
+name: Build and Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  build-android:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      
+      - uses: actions/setup-java@v4
+        with:
+          distribution: 'zulu'
+          java-version: '17'
+      
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: '3.38.3'
+          channel: 'stable'
+      
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+      
+      - name: Install cargo-ndk
+        run: cargo install cargo-ndk
+      
+      - name: Setup Android NDK
+        uses: nttld/setup-ndk@v1
+        with:
+          ndk-version: r26b
+      
+      - name: Add Android targets
+        run: rustup target add aarch64-linux-android
+      
+      - name: Build Rust library
+        run: |
+          cd rust_crypto
+          cargo ndk -t arm64-v8a build --release
+          cd ..
+      
+      - name: Copy Rust library to jniLibs
+        run: |
+          mkdir -p android/app/src/main/jniLibs/arm64-v8a
+          cp rust_crypto/target/aarch64-linux-android/release/librust_crypto.so android/app/src/main/jniLibs/arm64-v8a/
+      
+      - name: Decode keystore
+        run: |
+          echo "${{ secrets.ANDROID_KEYSTORE_BASE64 }}" | base64 -d > android/app/upload-keystore.jks
+      
+      - name: Create key.properties
+        run: |
+          echo "storePassword=${{ secrets.ANDROID_KEYSTORE_PASSWORD }}" > android/key.properties
+          echo "keyPassword=${{ secrets.ANDROID_KEY_PASSWORD }}" >> android/key.properties
+          echo "keyAlias=${{ secrets.ANDROID_KEY_ALIAS }}" >> android/key.properties
+          echo "storeFile=upload-keystore.jks" >> android/key.properties
+      
+      - name: Build APK
+        run: |
+          export GRADLE_OPTS="-Dorg.gradle.jvmargs=-Xmx4g -Dkotlin.daemon.jvm.options=-Xmx2g"
+          export JAVA_OPTS="-Xmx4g"
+          flutter pub get
+          flutter build apk --release
+      
+      - name: Rename and generate APK checksum
+        run: |
+          VERSION=${GITHUB_REF#refs/tags/}
+          mv build/app/outputs/flutter-apk/app-release.apk kyrie-lock-${VERSION}-android.apk
+          sha256sum kyrie-lock-${VERSION}-android.apk > kyrie-lock-${VERSION}-android.apk.sha256
+      
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: android-apk
+          path: |
+            kyrie-lock-*-android.apk
+            kyrie-lock-*-android.apk.sha256
+
+  build-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: '3.38.3'
+          channel: 'stable'
+      
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+      
+      - name: Build Rust library
+        run: |
+          cd rust_crypto
+          cargo build --release
+          cd ..
+          copy rust_crypto\target\release\rust_crypto.dll .
+      
+      - name: Build Windows
+        run: |
+          flutter pub get
+          flutter build windows --release
+      
+      - name: Create Windows ZIP
+        run: |
+          cd build/windows/x64/runner/Release
+          $VERSION = $env:GITHUB_REF -replace 'refs/tags/', ''
+          Compress-Archive -Path * -DestinationPath "../../../../../kyrie-lock-$VERSION-windows.zip"
+      
+      - name: Generate Windows checksum
+        run: |
+          $VERSION = $env:GITHUB_REF -replace 'refs/tags/', ''
+          $hash = Get-FileHash -Algorithm SHA256 "kyrie-lock-$VERSION-windows.zip"
+          "$($hash.Hash.ToLower())  kyrie-lock-$VERSION-windows.zip" | Out-File -Encoding ASCII "kyrie-lock-$VERSION-windows.zip.sha256"
+      
+      - name: Upload Windows
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-zip
+          path: |
+            kyrie-lock-*-windows.zip
+            kyrie-lock-*-windows.zip.sha256
+
+  build-macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: '3.38.3'
+          channel: 'stable'
+      
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+      
+      - name: Build Rust library
+        run: |
+          cd rust_crypto
+          rustup target add aarch64-apple-darwin
+          cargo build --release --target aarch64-apple-darwin
+          cd ..
+
+      - name: Build macOS
+        run: |
+          flutter pub get
+          flutter build macos --release
+
+      - name: Copy Rust library
+        run: |
+          cp rust_crypto/target/aarch64-apple-darwin/release/librust_crypto.dylib build/macos/Build/Products/Release/kyrie_lock.app/Contents/Resources/
+      
+      - name: Create macOS DMG
+        run: |
+          VERSION=${GITHUB_REF#refs/tags/}
+          brew install create-dmg
+          create-dmg \
+            --volname "KyrieLock" \
+            --window-pos 200 120 \
+            --window-size 600 400 \
+            --icon-size 100 \
+            --app-drop-link 450 185 \
+            kyrie-lock-${VERSION}-macos.dmg \
+            build/macos/Build/Products/Release/kyrie_lock.app || \
+          (cd build/macos/Build/Products/Release && zip -r ../../../../../kyrie-lock-${VERSION}-macos.zip kyrie_lock.app)
+      
+      - name: Generate macOS checksums
+        run: |
+          VERSION=${GITHUB_REF#refs/tags/}
+          if [ -f kyrie-lock-${VERSION}-macos.dmg ]; then
+            shasum -a 256 kyrie-lock-${VERSION}-macos.dmg > kyrie-lock-${VERSION}-macos.dmg.sha256
+          fi
+          if [ -f kyrie-lock-${VERSION}-macos.zip ]; then
+            shasum -a 256 kyrie-lock-${VERSION}-macos.zip > kyrie-lock-${VERSION}-macos.zip.sha256
+          fi
+      
+      - name: Upload macOS
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos-dmg
+          path: |
+            kyrie-lock-*-macos.dmg
+            kyrie-lock-*-macos.dmg.sha256
+            kyrie-lock-*-macos.zip
+            kyrie-lock-*-macos.zip.sha256
+
+  build-linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: '3.38.3'
+          channel: 'stable'
+      
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+      
+      - name: Install Linux dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang cmake ninja-build pkg-config libgtk-3-dev liblzma-dev libstdc++-12-dev
+      
+      - name: Build Rust library
+        run: |
+          cd rust_crypto
+          cargo build --release
+          cd ..
+          cp rust_crypto/target/release/librust_crypto.so .
+      
+      - name: Build Linux
+        run: |
+          flutter pub get
+          flutter build linux --release
+      
+      - name: Create Linux tarball
+        run: |
+          VERSION=${GITHUB_REF#refs/tags/}
+          cd build/linux/x64/release/bundle
+          tar -czf ../../../../../kyrie-lock-${VERSION}-linux.tar.gz *
+      
+      - name: Generate Linux checksum
+        run: |
+          VERSION=${GITHUB_REF#refs/tags/}
+          sha256sum kyrie-lock-${VERSION}-linux.tar.gz > kyrie-lock-${VERSION}-linux.tar.gz.sha256
+      
+      - name: Upload Linux
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux-tarball
+          path: |
+            kyrie-lock-*-linux.tar.gz
+            kyrie-lock-*-linux.tar.gz.sha256
+
+  release:
+    needs: [build-android, build-windows, build-macos, build-linux]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+      
+      - name: Generate combined checksums file
+        run: |
+          echo "# SHA256 Checksums" > SHA256SUMS.txt
+          echo "" >> SHA256SUMS.txt
+          cat artifacts/android-apk/kyrie-lock-*-android.apk.sha256 >> SHA256SUMS.txt
+          cat artifacts/windows-zip/kyrie-lock-*-windows.zip.sha256 >> SHA256SUMS.txt
+          if [ -f artifacts/macos-dmg/kyrie-lock-*-macos.dmg.sha256 ]; then
+            cat artifacts/macos-dmg/kyrie-lock-*-macos.dmg.sha256 >> SHA256SUMS.txt
+          fi
+          if [ -f artifacts/macos-dmg/kyrie-lock-*-macos.zip.sha256 ]; then
+            cat artifacts/macos-dmg/kyrie-lock-*-macos.zip.sha256 >> SHA256SUMS.txt
+          fi
+          cat artifacts/linux-tarball/kyrie-lock-*-linux.tar.gz.sha256 >> SHA256SUMS.txt
+      
+      - name: Create Release
+        uses: softprops/action-gh-release@v1
+        with:
+          files: |
+            artifacts/android-apk/kyrie-lock-*-android.apk
+            artifacts/windows-zip/kyrie-lock-*-windows.zip
+            artifacts/macos-dmg/kyrie-lock-*-macos.dmg
+            artifacts/macos-dmg/kyrie-lock-*-macos.zip
+            artifacts/linux-tarball/kyrie-lock-*-linux.tar.gz
+            SHA256SUMS.txt
+          draft: false
+          prerelease: false
+          generate_release_notes: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
