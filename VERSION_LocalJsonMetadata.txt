@@ -1,0 +1,1 @@
+﻿1.1 - 2026-07-17: Added 'Export metadata to JSON files' menu item (Extensions menu); fixed SDK 6.16 compatibility (removed GetSortingName, fixed Company table references)
