@@ -236,7 +236,7 @@ class HomePage extends StatefulWidget {
   State<HomePage> createState() => _HomePageState();
 }
 
-class _HomePageState extends State<HomePage> {
+class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   // --- state ---
   bool _isProcessing = false;
   bool _isDragging = false;
@@ -274,6 +274,11 @@ class _HomePageState extends State<HomePage> {
       _cleanupFilePickerCache();
     }
     super.dispose();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    // No-op: required by WidgetsBindingObserver
   }
 
   Future<void> _cleanupFilePickerCache() async {
