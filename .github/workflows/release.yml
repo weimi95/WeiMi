@@ -10,7 +10,18 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      
+
+      - name: Free disk space (keep Android SDK)
+        uses: jlumbroso/free-disk-space@main
+        with:
+          android: 'false'
+          dotnet: 'true'
+          haskell: 'true'
+          large-packages: 'true'
+          docker-images: 'true'
+          swap-storage: 'true'
+          tool-cache: 'false'
+
       - uses: actions/setup-java@v4
         with:
           distribution: 'zulu'
