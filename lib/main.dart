@@ -256,6 +256,9 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   // history
   bool _historyExpanded = false;
 
+  // sidebar collapse
+  bool _sidebarCollapsed = false;
+
   String t(String key) => widget.localizationService.translate(key);
 
   @override
@@ -1240,6 +1243,50 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   // ----- sidebar -----
 
   Widget _buildSidebar() {
+    if (_sidebarCollapsed) {
+      // Collapsed: thin strip with expand button
+      return Container(
+        width: 36,
+        decoration: BoxDecoration(
+          color: Colors.grey.shade100,
+          border: Border(
+            right: BorderSide(color: Colors.grey.shade300),
+          ),
+        ),
+        child: Column(
+          children: [
+            const SizedBox(height: 8),
+            InkWell(
+              onTap: () => setState(() => _sidebarCollapsed = false),
+              child: Padding(
+                padding: const EdgeInsets.symmetric(vertical: 12),
+                child: Icon(
+                  Icons.chevron_right,
+                  size: 20,
+                  color: Colors.grey.shade600,
+                ),
+              ),
+            ),
+            Expanded(
+              child: Center(
+                child: RotatedBox(
+                  quarterTurns: 1,
+                  child: Text(
+                    t('favoriteDirectories'),
+                    style: TextStyle(
+                      fontSize: 12,
+                      color: Colors.grey.shade500,
+                      fontWeight: FontWeight.w500,
+                    ),
+                  ),
+                ),
+              ),
+            ),
+          ],
+        ),
+      );
+    }
+
     return Container(
       width: 240,
       decoration: BoxDecoration(
@@ -1253,18 +1300,35 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
         children: [
           // Header
           Container(
-            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+            padding: const EdgeInsets.only(left: 16, right: 4, top: 10, bottom: 10),
             decoration: BoxDecoration(
               border: Border(
                 bottom: BorderSide(color: Colors.grey.shade300),
               ),
             ),
-            child: Text(
-              t('favoriteDirectories'),
-              style: const TextStyle(
-                fontSize: 15,
-                fontWeight: FontWeight.bold,
-              ),
+            child: Row(
+              children: [
+                Expanded(
+                  child: Text(
+                    t('favoriteDirectories'),
+                    style: const TextStyle(
+                      fontSize: 15,
+                      fontWeight: FontWeight.bold,
+                    ),
+                  ),
+                ),
+                InkWell(
+                  onTap: () => setState(() => _sidebarCollapsed = true),
+                  child: Padding(
+                    padding: const EdgeInsets.all(4),
+                    child: Icon(
+                      Icons.chevron_left,
+                      size: 20,
+                      color: Colors.grey.shade600,
+                    ),
+                  ),
+                ),
+              ],
             ),
           ),
           // Directory list
@@ -1283,86 +1347,88 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                       ),
                     ),
                   )
-                : ReorderableListView.builder(
-                    padding: const EdgeInsets.symmetric(vertical: 4),
-                    itemCount: _favoriteDirs.length,
-                    onReorder: (oldIndex, newIndex) async {
-                      await FavoriteDirectoriesService.reorder(
-                          oldIndex, newIndex);
-                      if (mounted) _loadFavorites();
-                    },
-                    proxyDecorator: (child, index, animation) {
-                      return Material(
-                        elevation: 4,
-                        color: Colors.transparent,
-                        child: child,
-                      );
-                    },
-                    itemBuilder: (context, index) {
-                      final dir = _favoriteDirs[index];
-                      final name = dir.split(Platform.pathSeparator).last;
-                      final isSelected = dir == _selectedDir;
+                : Scrollbar(
+                    child: ReorderableListView.builder(
+                      padding: const EdgeInsets.symmetric(vertical: 4),
+                      itemCount: _favoriteDirs.length,
+                      onReorder: (oldIndex, newIndex) async {
+                        await FavoriteDirectoriesService.reorder(
+                            oldIndex, newIndex);
+                        if (mounted) _loadFavorites();
+                      },
+                      proxyDecorator: (child, index, animation) {
+                        return Material(
+                          elevation: 4,
+                          color: Colors.transparent,
+                          child: child,
+                        );
+                      },
+                      itemBuilder: (context, index) {
+                        final dir = _favoriteDirs[index];
+                        final name = dir.split(Platform.pathSeparator).last;
+                        final isSelected = dir == _selectedDir;
 
-                      return Material(
-                        key: ValueKey(dir),
-                        color: isSelected
-                            ? Colors.blue.shade50
-                            : Colors.transparent,
-                        child: InkWell(
-                          onTap: () => _loadFiles(dir),
-                          child: Padding(
-                            padding: const EdgeInsets.symmetric(
-                                horizontal: 12, vertical: 8),
-                            child: Row(
-                              children: [
-                                Icon(
-                                  Icons.folder,
-                                  size: 18,
-                                  color: isSelected
-                                      ? Colors.blue
-                                      : Colors.amber.shade700,
-                                ),
-                                const SizedBox(width: 8),
-                                Expanded(
-                                  child: Column(
-                                    crossAxisAlignment:
-                                        CrossAxisAlignment.start,
-                                    children: [
-                                      Text(
-                                        name,
-                                        style: TextStyle(
-                                          fontSize: 13,
-                                          fontWeight: isSelected
-                                              ? FontWeight.w600
-                                              : FontWeight.normal,
-                                        ),
-                                        overflow: TextOverflow.ellipsis,
-                                      ),
-                                      Text(
-                                        dir,
-                                        style: TextStyle(
-                                          fontSize: 10,
-                                          color: Colors.grey.shade500,
-                                        ),
-                                        overflow: TextOverflow.ellipsis,
-                                      ),
-                                    ],
+                        return Material(
+                          key: ValueKey(dir),
+                          color: isSelected
+                              ? Colors.blue.shade50
+                              : Colors.transparent,
+                          child: InkWell(
+                            onTap: () => _loadFiles(dir),
+                            child: Padding(
+                              padding: const EdgeInsets.symmetric(
+                                  horizontal: 12, vertical: 8),
+                              child: Row(
+                                children: [
+                                  Icon(
+                                    Icons.folder,
+                                    size: 18,
+                                    color: isSelected
+                                        ? Colors.blue
+                                        : Colors.amber.shade700,
                                   ),
-                                ),
-                                InkWell(
-                                  onTap: () => _removeFavoriteDir(index),
-                                  child: Icon(
-                                    Icons.close,
-                                    size: 16,
-                                    color: Colors.grey.shade400,
+                                  const SizedBox(width: 8),
+                                  Expanded(
+                                    child: Column(
+                                      crossAxisAlignment:
+                                          CrossAxisAlignment.start,
+                                      children: [
+                                        Text(
+                                          name,
+                                          style: TextStyle(
+                                            fontSize: 13,
+                                            fontWeight: isSelected
+                                                ? FontWeight.w600
+                                                : FontWeight.normal,
+                                          ),
+                                          overflow: TextOverflow.ellipsis,
+                                        ),
+                                        Text(
+                                          dir,
+                                          style: TextStyle(
+                                            fontSize: 10,
+                                            color: Colors.grey.shade500,
+                                          ),
+                                          overflow: TextOverflow.ellipsis,
+                                        ),
+                                      ],
+                                    ),
                                   ),
-                                ),
-                              ],
+                                  InkWell(
+                                    onTap: () => _removeFavoriteDir(index),
+                                    child: Icon(
+                                      Icons.close,
+                                      size: 16,
+                                      color: Colors.grey.shade400,
+                                    ),
+                                  ),
+                                ],
+                              ),
                             ),
                           ),
-                        ),
-                      );
-                    },
+                        );
+                      },
+                    ),
                   ),
           ),
           // Add button
@@ -1555,17 +1621,19 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     return LayoutBuilder(
       builder: (context, constraints) {
         final crossAxisCount = (constraints.maxWidth / 140).floor().clamp(2, 8);
-        return GridView.builder(
-          padding: const EdgeInsets.all(8),
-          gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
-            crossAxisCount: crossAxisCount,
-            mainAxisSpacing: 4,
-            crossAxisSpacing: 4,
-            childAspectRatio: 0.85,
+        return Scrollbar(
+          child: GridView.builder(
+            padding: const EdgeInsets.all(8),
+            gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
+              crossAxisCount: crossAxisCount,
+              mainAxisSpacing: 4,
+              crossAxisSpacing: 4,
+              childAspectRatio: 0.85,
+            ),
+            itemCount: _fileItems.length,
+            itemBuilder: (context, index) =>
+                _buildFileGridItem(context, index),
           ),
-          itemCount: _fileItems.length,
-          itemBuilder: (context, index) =>
-              _buildFileGridItem(context, index),
         );
       },
     );
@@ -1638,10 +1706,12 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   }
 
   Widget _buildFileList() {
-    return ListView.builder(
-      padding: const EdgeInsets.symmetric(vertical: 4),
-      itemCount: _fileItems.length,
-      itemBuilder: (context, index) => _buildFileListItem(index),
+    return Scrollbar(
+      child: ListView.builder(
+        padding: const EdgeInsets.symmetric(vertical: 4),
+        itemCount: _fileItems.length,
+        itemBuilder: (context, index) => _buildFileListItem(index),
+      ),
     );
   }
 
