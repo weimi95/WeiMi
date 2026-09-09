@@ -79,6 +79,15 @@ jobs:
           sed -i 's|https://maven.aliyun.com/repository/gradle-plugin|https://plugins.gradle.org/m2|g' android/build.gradle.kts android/settings.gradle.kts
           sed -i 's|https://maven.aliyun.com/repository/jcenter|https://jcenter.bintray.com|g' android/build.gradle.kts android/settings.gradle.kts
 
+      - name: Free disk space (Android)
+        run: |
+          sudo rm -rf /usr/share/dotnet
+          sudo rm -rf /usr/local/lib/android
+          sudo rm -rf /opt/ghc
+          sudo rm -rf /usr/local/.ghcup
+          sudo rm -rf /opt/hostedtoolcache/CodeQL
+          df -h /
+      
       - name: Build APK
         run: |
           export GRADLE_OPTS="-Dorg.gradle.jvmargs=-Xmx4g -Dkotlin.daemon.jvm.options=-Xmx2g"
