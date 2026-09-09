@@ -185,8 +185,8 @@ jobs:
             --icon-size 100 \
             --app-drop-link 450 185 \
             weimi_file-${VERSION}-macos.dmg \
-            build/macos/Build/Products/Release/weimi.app || \
-          (cd build/macos/Build/Products/Release && zip -r ../../../../../weimi_file-${VERSION}-macos.zip weimi.app)
+            build/macos/Build/Products/Release/weimi_file.app || \
+          (cd build/macos/Build/Products/Release && zip -r ../../../../../weimi_file-${VERSION}-macos.zip weimi_file.app)
       
       - name: Generate macOS checksums
         run: |
