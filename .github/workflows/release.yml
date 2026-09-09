@@ -9,8 +9,20 @@ jobs:
   build-android:
     runs-on: ubuntu-latest
     steps:
+      # 必须在安装 Android SDK 之前清理，且绝不能删 /usr/local/lib/android (SDK 所在)
+      - name: Free disk space (before SDK setup)
+        run: |
+          sudo rm -rf /usr/share/dotnet
+          sudo rm -rf /opt/ghc
+          sudo rm -rf /usr/local/.ghcup
+          sudo rm -rf /opt/hostedtoolcache/CodeQL
+          sudo rm -rf /usr/local/share/powershell
+          sudo rm -rf /usr/share/swift
+          sudo apt-get clean
+          df -h /
+
       - uses: actions/checkout@v4
-      
+
       - name: Setup Java
         uses: actions/setup-java@v4
         with:
@@ -95,19 +107,13 @@ jobs:
           echo "=== Checking for any remaining internal mirrors ==="
           grep -r "aliyun\|tencent\|mirrors" android/ --include="*.gradle*" --include="*.properties" || echo "No internal mirrors found"
 
-      - name: Free disk space (Android)
+      - name: Verify Android SDK present
         run: |
-          sudo rm -rf /usr/share/dotnet
-          sudo rm -rf /usr/local/lib/android
-          sudo rm -rf /opt/ghc
-          sudo rm -rf /usr/local/.ghcup
-          sudo rm -rf /opt/hostedtoolcache/CodeQL
-          sudo rm -rf /usr/local/lib/android-sdk*
-          sudo rm -rf ~/Android
-          sudo rm -rf /tmp/*
-          sudo apt-get clean
+          echo "ANDROID_HOME=$ANDROID_HOME"
+          ls -la "$ANDROID_HOME" || (echo "SDK MISSING!" && exit 1)
+          ls "$ANDROID_HOME/platforms" || true
           df -h /
-      
+
       - name: Build APK
         run: |
           export GRADLE_OPTS="-Dorg.gradle.jvmargs=-Xmx4g -Dkotlin.daemon.jvm.options=-Xmx2g"
