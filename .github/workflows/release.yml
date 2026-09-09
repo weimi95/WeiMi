@@ -80,13 +80,20 @@ jobs:
           echo "keyAlias=${{ secrets.ANDROID_KEY_ALIAS }}" >> android/key.properties
           echo "storeFile=upload-keystore.p12" >> android/key.properties
       
-      - name: Replace Aliyun mirrors (not reachable from Actions)
+      - name: Replace internal mirrors (not reachable from Actions)
         run: |
+          # Replace Aliyun Maven mirrors
           sed -i 's|https://maven.aliyun.com/repository/google|https://dl.google.com/dl/android/maven2|g' android/build.gradle.kts android/settings.gradle.kts
           sed -i 's|https://maven.aliyun.com/repository/central|https://repo1.maven.org/maven2|g' android/build.gradle.kts android/settings.gradle.kts
           sed -i 's|https://maven.aliyun.com/repository/public|https://repo1.maven.org/maven2|g' android/build.gradle.kts android/settings.gradle.kts
           sed -i 's|https://maven.aliyun.com/repository/gradle-plugin|https://plugins.gradle.org/m2|g' android/build.gradle.kts android/settings.gradle.kts
           sed -i 's|https://maven.aliyun.com/repository/jcenter|https://jcenter.bintray.com|g' android/build.gradle.kts android/settings.gradle.kts
+          # Replace Tencent Cloud Gradle mirror with official
+          sed -i 's|https://mirrors.cloud.tencent.com/gradle/gradle|https://services.gradle.org/distributions/gradle|g' android/gradle/wrapper/gradle-wrapper.properties
+          echo "=== Gradle wrapper properties ==="
+          cat android/gradle/wrapper/gradle-wrapper.properties
+          echo "=== Checking for any remaining internal mirrors ==="
+          grep -r "aliyun\|tencent\|mirrors" android/ --include="*.gradle*" --include="*.properties" || echo "No internal mirrors found"
 
       - name: Free disk space (Android)
         run: |
@@ -106,7 +113,17 @@ jobs:
           export GRADLE_OPTS="-Dorg.gradle.jvmargs=-Xmx4g -Dkotlin.daemon.jvm.options=-Xmx2g"
           export JAVA_OPTS="-Xmx4g"
           flutter pub get
-          flutter build apk --release
+          echo "=== Environment ==="
+          echo "ANDROID_HOME=$ANDROID_HOME"
+          echo "ANDROID_SDK_ROOT=$ANDROID_SDK_ROOT"
+          echo "JAVA_HOME=$JAVA_HOME"
+          echo "Flutter version:"
+          flutter --version
+          echo "=== Building APK ==="
+          flutter build apk --release --verbose 2>&1 | tail -200
+        env:
+          ANDROID_HOME: ${{ env.ANDROID_HOME }}
+          ANDROID_SDK_ROOT: ${{ env.ANDROID_SDK_ROOT }}
       
       - name: Rename and generate APK checksum
         run: |
