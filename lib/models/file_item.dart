@@ -77,7 +77,7 @@ Future<List<FileItem>> listDirectory(String dirPath) async {
 
 /// 获取 WeiMi Vault 目录（应用私有目录）
 Future<String> getWeimiVaultPath() async {
-  final dir = await path_provider.getApplicationDocumentsDirectory();
+  final dir = await getApplicationDocumentsDirectory();
   return path.join(dir.path, 'weimi_vault');
 }
 
