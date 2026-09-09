@@ -142,8 +142,8 @@ jobs:
         with:
           name: android-apk
           path: |
-            weimi-*-android.apk
-            weimi-*-android.apk.sha256
+            weimi_file-*-android.apk
+            weimi_file-*-android.apk.sha256
 
   build-windows:
     runs-on: windows-latest
@@ -187,8 +187,8 @@ jobs:
         with:
           name: windows-zip
           path: |
-            weimi-*-windows.zip
-            weimi-*-windows.zip.sha256
+            weimi_file-*-windows.zip
+            weimi_file-*-windows.zip.sha256
 
   build-macos:
     runs-on: macos-latest
@@ -248,10 +248,10 @@ jobs:
         with:
           name: macos-dmg
           path: |
-            weimi-*-macos.dmg
-            weimi-*-macos.dmg.sha256
-            weimi-*-macos.zip
-            weimi-*-macos.zip.sha256
+            weimi_file-*-macos.dmg
+            weimi_file-*-macos.dmg.sha256
+            weimi_file-*-macos.zip
+            weimi_file-*-macos.zip.sha256
 
   build-linux:
     runs-on: ubuntu-latest
@@ -299,8 +299,8 @@ jobs:
         with:
           name: linux-tarball
           path: |
-            weimi-*-linux.tar.gz
-            weimi-*-linux.tar.gz.sha256
+            weimi_file-*-linux.tar.gz
+            weimi_file-*-linux.tar.gz.sha256
 
   release:
     needs: [build-android, build-windows, build-macos, build-linux]
@@ -319,25 +319,25 @@ jobs:
         run: |
           echo "# SHA256 Checksums" > SHA256SUMS.txt
           echo "" >> SHA256SUMS.txt
-          cat artifacts/android-apk/weimi-*-android.apk.sha256 >> SHA256SUMS.txt
-          cat artifacts/windows-zip/weimi-*-windows.zip.sha256 >> SHA256SUMS.txt
-          if [ -f artifacts/macos-dmg/weimi-*-macos.dmg.sha256 ]; then
-            cat artifacts/macos-dmg/weimi-*-macos.dmg.sha256 >> SHA256SUMS.txt
+          cat artifacts/android-apk/weimi_file-*-android.apk.sha256 >> SHA256SUMS.txt
+          cat artifacts/windows-zip/weimi_file-*-windows.zip.sha256 >> SHA256SUMS.txt
+          if [ -f artifacts/macos-dmg/weimi_file-*-macos.dmg.sha256 ]; then
+            cat artifacts/macos-dmg/weimi_file-*-macos.dmg.sha256 >> SHA256SUMS.txt
           fi
-          if [ -f artifacts/macos-dmg/weimi-*-macos.zip.sha256 ]; then
-            cat artifacts/macos-dmg/weimi-*-macos.zip.sha256 >> SHA256SUMS.txt
+          if [ -f artifacts/macos-dmg/weimi_file-*-macos.zip.sha256 ]; then
+            cat artifacts/macos-dmg/weimi_file-*-macos.zip.sha256 >> SHA256SUMS.txt
           fi
-          cat artifacts/linux-tarball/weimi-*-linux.tar.gz.sha256 >> SHA256SUMS.txt
+          cat artifacts/linux-tarball/weimi_file-*-linux.tar.gz.sha256 >> SHA256SUMS.txt
       
       - name: Create Release
         uses: softprops/action-gh-release@v1
         with:
           files: |
-            artifacts/android-apk/weimi-*-android.apk
-            artifacts/windows-zip/weimi-*-windows.zip
-            artifacts/macos-dmg/weimi-*-macos.dmg
-            artifacts/macos-dmg/weimi-*-macos.zip
-            artifacts/linux-tarball/weimi-*-linux.tar.gz
+            artifacts/android-apk/weimi_file-*-android.apk
+            artifacts/windows-zip/weimi_file-*-windows.zip
+            artifacts/macos-dmg/weimi_file-*-macos.dmg
+            artifacts/macos-dmg/weimi_file-*-macos.zip
+            artifacts/linux-tarball/weimi_file-*-linux.tar.gz
             SHA256SUMS.txt
           draft: false
           prerelease: false
