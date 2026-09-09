@@ -1,5 +1,5 @@
 import 'package:flutter/material.dart';
-import 'package:wei_mi/services/localization_service.dart';
+import 'package:wei_mi_file/services/localization_service.dart';
 
 class LanguageScreen extends StatefulWidget {
   final VoidCallback? onLanguageChanged;
