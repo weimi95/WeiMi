@@ -25,7 +25,7 @@ void FileAssociationPluginRegisterWithRegistrar(
 
   channel_ =
       std::make_unique<flutter::MethodChannel<flutter::EncodableValue>>(
-          registrar->messenger(), "com.weimi95.weimi/file_association",
+          registrar->messenger(), "com.weimi95.weimi_file/file_association",
           &flutter::StandardMethodCodec::GetInstance());
 
   channel_->SetMethodCallHandler(
@@ -38,7 +38,7 @@ void FileAssociationPlugin::RegisterWithRegistrar(
     flutter::PluginRegistrarWindows* registrar) {
   auto channel =
       std::make_unique<flutter::MethodChannel<flutter::EncodableValue>>(
-          registrar->messenger(), "com.weimi95.weimi/file_association",
+          registrar->messenger(), "com.weimi95.weimi_file/file_association",
           &flutter::StandardMethodCodec::GetInstance());
 
   channel->SetMethodCallHandler(
@@ -80,10 +80,10 @@ static void RegisterFileAssociation() {
   RegDeleteTreeW(HKEY_CURRENT_USER, L"Software\\Classes\\kyrie_lock.wemi");
   RegDeleteTreeW(HKEY_CURRENT_USER, L"Software\\Classes\\kyrie_lock");
 
-  std::wstring progId = L"WeiMi.wemi";
+  std::wstring progId = L"微密文件.wemi";
   std::wstring fileExt = L".wemi";
-  std::wstring appName = L"WeiMi";
-  std::wstring description = L"WeiMi Encrypted File";
+  std::wstring appName = L"微密文件";
+  std::wstring description = L"微密文件加密文件";
   
   std::wstring progIdPath = L"Software\\Classes\\" + progId;
   if (RegCreateKeyExW(HKEY_CURRENT_USER, progIdPath.c_str(), 0, NULL, 0,

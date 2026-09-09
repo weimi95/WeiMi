@@ -227,7 +227,7 @@ class AppLocalizations {
     },
     'en': {
       // Main screen
-      'appTitle': 'WeiMi',
+      'appTitle': '微密文件',
       'openFile': 'Open File',
       'encryptFile': 'Encrypt File',
       'decryptFile': 'Decrypt File',
@@ -309,7 +309,7 @@ class AppLocalizations {
       'selectLanguage': 'Select Language',
 
       // About screen
-      'aboutTitle': 'About WeiMi',
+      'aboutTitle': 'About 微密文件',
       'aboutDescription':
           'An open-source cross-platform high-performance file encryption GUI client. The encryption tool supports encrypting files of any type, and the built-in viewer supports viewing video, images, audio, text, and PDF files.',
       'version': 'Version',

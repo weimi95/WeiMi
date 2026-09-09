@@ -1,4 +1,4 @@
-# WeiMi（微密）
+# 微密文件（WeiMi File）
 
 开源跨平台文件加密工具。支持任意类型文件加密保护，内置视频/图片/音频/文本/PDF 查看器，加密文件可在输入密码后直接查看，也可解密还原。
 
@@ -54,7 +54,7 @@ brew install cocoapods && pod setup
 rustup target add aarch64-apple-darwin
 cd rust_crypto && cargo build --release --target aarch64-apple-darwin && cd ..
 flutter pub get && flutter build macos --release
-cp rust_crypto/target/aarch64-apple-darwin/release/librust_crypto.dylib build/macos/Build/Products/Release/weimi.app/Contents/Resources/
+cp rust_crypto/target/aarch64-apple-darwin/release/librust_crypto.dylib build/macos/Build/Products/Release/weimi_file.app/Contents/Resources/
 ```
 
 ---

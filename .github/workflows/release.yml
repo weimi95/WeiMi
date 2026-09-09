@@ -89,8 +89,8 @@ jobs:
       - name: Rename and generate APK checksum
         run: |
           VERSION=${GITHUB_REF#refs/tags/}
-          mv build/app/outputs/flutter-apk/app-release.apk weimi-${VERSION}-android.apk
-          sha256sum weimi-${VERSION}-android.apk > weimi-${VERSION}-android.apk.sha256
+          mv build/app/outputs/flutter-apk/app-release.apk weimi_file-${VERSION}-android.apk
+          sha256sum weimi_file-${VERSION}-android.apk > weimi_file-${VERSION}-android.apk.sha256
       
       - name: Upload APK
         uses: actions/upload-artifact@v4
@@ -129,13 +129,13 @@ jobs:
         run: |
           cd build/windows/x64/runner/Release
           $VERSION = $env:GITHUB_REF -replace 'refs/tags/', ''
-          Compress-Archive -Path * -DestinationPath "../../../../../weimi-$VERSION-windows.zip"
+          Compress-Archive -Path * -DestinationPath "../../../../../weimi_file-$VERSION-windows.zip"
       
       - name: Generate Windows checksum
         run: |
           $VERSION = $env:GITHUB_REF -replace 'refs/tags/', ''
-          $hash = Get-FileHash -Algorithm SHA256 "weimi-$VERSION-windows.zip"
-          "$($hash.Hash.ToLower())  weimi-$VERSION-windows.zip" | Out-File -Encoding ASCII "weimi-$VERSION-windows.zip.sha256"
+          $hash = Get-FileHash -Algorithm SHA256 "weimi_file-$VERSION-windows.zip"
+          "$($hash.Hash.ToLower())  weimi_file-$VERSION-windows.zip" | Out-File -Encoding ASCII "weimi_file-$VERSION-windows.zip.sha256"
       
       - name: Upload Windows
         uses: actions/upload-artifact@v4
@@ -172,30 +172,30 @@ jobs:
 
       - name: Copy Rust library
         run: |
-          cp rust_crypto/target/aarch64-apple-darwin/release/librust_crypto.dylib build/macos/Build/Products/Release/weimi.app/Contents/Resources/
+          cp rust_crypto/target/aarch64-apple-darwin/release/librust_crypto.dylib build/macos/Build/Products/Release/weimi_file.app/Contents/Resources/
       
       - name: Create macOS DMG
         run: |
           VERSION=${GITHUB_REF#refs/tags/}
           brew install create-dmg
           create-dmg \
-            --volname "WeiMi" \
+            --volname "微密文件" \
             --window-pos 200 120 \
             --window-size 600 400 \
             --icon-size 100 \
             --app-drop-link 450 185 \
-            weimi-${VERSION}-macos.dmg \
+            weimi_file-${VERSION}-macos.dmg \
             build/macos/Build/Products/Release/weimi.app || \
-          (cd build/macos/Build/Products/Release && zip -r ../../../../../weimi-${VERSION}-macos.zip weimi.app)
+          (cd build/macos/Build/Products/Release && zip -r ../../../../../weimi_file-${VERSION}-macos.zip weimi.app)
       
       - name: Generate macOS checksums
         run: |
           VERSION=${GITHUB_REF#refs/tags/}
-          if [ -f weimi-${VERSION}-macos.dmg ]; then
-            shasum -a 256 weimi-${VERSION}-macos.dmg > weimi-${VERSION}-macos.dmg.sha256
+          if [ -f weimi_file-${VERSION}-macos.dmg ]; then
+            shasum -a 256 weimi_file-${VERSION}-macos.dmg > weimi_file-${VERSION}-macos.dmg.sha256
           fi
-          if [ -f weimi-${VERSION}-macos.zip ]; then
-            shasum -a 256 weimi-${VERSION}-macos.zip > weimi-${VERSION}-macos.zip.sha256
+          if [ -f weimi_file-${VERSION}-macos.zip ]; then
+            shasum -a 256 weimi_file-${VERSION}-macos.zip > weimi_file-${VERSION}-macos.zip.sha256
           fi
       
       - name: Upload macOS
@@ -242,12 +242,12 @@ jobs:
         run: |
           VERSION=${GITHUB_REF#refs/tags/}
           cd build/linux/x64/release/bundle
-          tar -czf ../../../../../weimi-${VERSION}-linux.tar.gz *
+          tar -czf ../../../../../weimi_file-${VERSION}-linux.tar.gz *
       
       - name: Generate Linux checksum
         run: |
           VERSION=${GITHUB_REF#refs/tags/}
-          sha256sum weimi-${VERSION}-linux.tar.gz > weimi-${VERSION}-linux.tar.gz.sha256
+          sha256sum weimi_file-${VERSION}-linux.tar.gz > weimi_file-${VERSION}-linux.tar.gz.sha256
       
       - name: Upload Linux
         uses: actions/upload-artifact@v4

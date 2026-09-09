@@ -1,5 +1,5 @@
-name: wei_mi
-description: "A cross-platform, high-performance file encryption GUI client with a built-in viewer."
+name: wei_mi_file
+description: "A cross-platform, high-performance file encryption GUI client with built-in file management."
 # The following line prevents the package from being accidentally published to
 # pub.dev using `flutter pub publish`. This is preferred for private packages.
 publish_to: 'none' # Remove this line if you wish to publish to pub.dev
@@ -16,7 +16,7 @@ publish_to: 'none' # Remove this line if you wish to publish to pub.dev
 # https://developer.apple.com/library/archive/documentation/General/Reference/InfoPlistKeyReference/Articles/CoreFoundationKeys.html
 # In Windows, build-name is used as the major, minor, and patch parts
 # of the product and file versions while build-number is used as the build suffix.
-version: 2.1.0+11
+version: 1.0.0+1
 
 environment:
   sdk: ^3.10.1
@@ -69,6 +69,15 @@ dependencies:
 
   # Local storage for language preference
   shared_preferences: ^2.2.3
+
+  # File size formatting
+  intl: ^0.20.1
+
+  # Permission handling (Android storage)
+  permission_handler: ^11.3.1
+
+  # Desktop file tree (desktop only)
+  desktop_windows_move_window: ^1.3.2
 
   # Drag and drop support for desktop
   desktop_drop: ^0.5.0

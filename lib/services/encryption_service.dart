@@ -143,7 +143,7 @@ class EncryptionService {
         final tempFile = File(
           path.join(
             tempDir.path,
-            'weimi_${DateTime.now().millisecondsSinceEpoch}$originalExtension',
+            'weimi_file_${DateTime.now().millisecondsSinceEpoch}$originalExtension',
           ),
         );
 

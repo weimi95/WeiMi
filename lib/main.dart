@@ -13,6 +13,7 @@ import 'services/history_service.dart';
 import 'widgets/progress_dialog.dart';
 import 'screens/about_screen.dart';
 import 'screens/language_screen.dart';
+import 'screens/wei_mi_vault_screen.dart';
 
 // 密码长度限制常量
 const int kPasswordMinLength = 4;
@@ -54,7 +55,7 @@ class _MyAppState extends State<MyApp> {
       builder: (context, snapshot) {
         if (!snapshot.hasData) {
           return MaterialApp(
-            title: '微密',
+            title: '微密文件',
             home: const Scaffold(
               body: Center(child: CircularProgressIndicator()),
             ),
@@ -102,6 +103,7 @@ class HomePage extends StatefulWidget {
 }
 
 class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
+  int _currentTab = 0;
   bool _isProcessing = false;
   bool _isDragging = false;
   List<HistoryRecord> _recentHistory = [];
@@ -370,17 +372,13 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   // ============ 删除原文件对话框 ============
 
   /// 加密完成后弹出"是否删除原始文件"对话框
-  /// [encryptResults] 为加密成功的文件列表：每条包含 originalPath, encryptedPath, hint
   Future<void> _showDeleteOriginalDialog(
       List<Map<String, String>> encryptResults) async {
     if (encryptResults.isEmpty) return;
 
-    // 先检查是否有已记住的偏好
     final savedPref = await DeletePreferenceService.getSavedPreference();
     if (savedPref != null) {
-      // 已记住偏好，静默执行
-      await _executeDelete(
-          encryptResults, savedPref, rememberChoice: false);
+      await _executeDelete(encryptResults, savedPref, rememberChoice: false);
       return;
     }
 
@@ -440,15 +438,13 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                 ),
                 TextButton(
                   onPressed: () {
-                    selectedAction =
-                        DeleteAction.recycleBin;
+                    selectedAction = DeleteAction.recycleBin;
                     Navigator.pop(dialogContext, true);
                   },
                   child: Text(t('moveToRecycleBin')),
                 ),
                 TextButton(
                   onPressed: () async {
-                    // 永久删除需二次确认
                     final secondConfirm = await showDialog<bool>(
                       context: dialogContext,
                       builder: (ctx) => AlertDialog(
@@ -467,8 +463,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                       ),
                     );
                     if (secondConfirm == true) {
-                      selectedAction =
-                          DeleteAction.permanent;
+                      selectedAction = DeleteAction.permanent;
                       if (dialogContext.mounted) {
                         Navigator.pop(dialogContext, true);
                       }
@@ -531,7 +526,6 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     });
 
     try {
-      // 区分 .wemi 文件（解密）和普通文件（加密）
       final decryptFiles = <String>[];
       final encryptFiles = <String>[];
 
@@ -540,7 +534,6 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
         if (path.toLowerCase().endsWith('.wemi')) {
           decryptFiles.add(path);
         } else {
-          // 检查是否为加密文件
           final isEnc = await EncryptionService.isEncryptedFile(path);
           if (isEnc) {
             decryptFiles.add(path);
@@ -553,7 +546,6 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       if (decryptFiles.isNotEmpty) {
         await _processDecryptFiles(decryptFiles);
       }
-
       if (encryptFiles.isNotEmpty) {
         await _processEncryptFiles(encryptFiles);
       }
@@ -667,20 +659,17 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
           '${t('encryptCompleted')}${encryptResults.length}${t('filesSuccess')}');
     }
 
-    // 记录历史
     if (historyRecords.isNotEmpty) {
       await HistoryService.addRecords(historyRecords);
       await _loadHistory();
     }
 
-    // 弹出删除对话框
     if (encryptResults.isNotEmpty && mounted) {
       await _showDeleteOriginalDialog(encryptResults);
     }
   }
 
   Future<void> _processDecryptFiles(List<String> filePaths) async {
-    // 过滤出真正可解密的文件
     final encryptedFiles = <String>[];
     for (final filePath in filePaths) {
       final isEncrypted = await EncryptionService.isEncryptedFile(filePath);
@@ -741,7 +730,6 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
         );
         successFiles++;
 
-        // 查找原始加密记录获取 hint
         final existingRecord =
             await HistoryService.findByEncryptedPath(filePath);
         final recordHint = existingRecord?.hint ?? '';
@@ -782,7 +770,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     }
   }
 
-  // ============ 原有处理函数（按钮触发） ============
+  // ============ 按钮处理 ============
 
   Future<void> _handleOpenFile() async {
     if (_isProcessing) return;
@@ -869,7 +857,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     }
   }
 
-  // ============ 清空历史 ============
+  // ============ 历史 ============
 
   Future<void> _handleClearHistory() async {
     final confirmed = await showDialog<bool>(
@@ -903,12 +891,172 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
 
   @override
   Widget build(BuildContext context) {
-    final bool supportDragDrop =
-        !Platform.isAndroid && !Platform.isIOS;
+    final bool isDesktop = !Platform.isAndroid && !Platform.isIOS;
+    final bool supportDragDrop = isDesktop;
 
-    Widget bodyContent = Column(
+    Widget bodyContent;
+    switch (_currentTab) {
+      case 0:
+        bodyContent = _buildEncryptTab();
+        break;
+      case 1:
+        bodyContent = _buildVaultTab();
+        break;
+      case 2:
+        bodyContent = _buildHistoryTab();
+        break;
+      default:
+        bodyContent = _buildEncryptTab();
+    }
+
+    return Scaffold(
+      appBar: AppBar(
+        title: Text(t('appTitle')),
+        backgroundColor: Theme.of(context).colorScheme.inversePrimary,
+        actions: [
+          IconButton(
+            icon: const Icon(Icons.language),
+            tooltip: t('language'),
+            onPressed: () {
+              Navigator.push(
+                context,
+                MaterialPageRoute(
+                    builder: (context) => LanguageScreen(
+                          onLanguageChanged: widget.onLanguageChanged,
+                        )),
+              );
+            },
+          ),
+          IconButton(
+            icon: const Icon(Icons.info_outline),
+            tooltip: t('about'),
+            onPressed: () {
+              Navigator.push(
+                context,
+                MaterialPageRoute(
+                    builder: (context) => const AboutScreen()),
+              );
+            },
+          ),
+        ],
+      ),
+      drawer: isDesktop
+          ? Drawer(
+              child: ListView(
+                padding: EdgeInsets.zero,
+                children: [
+                  DrawerHeader(
+                    decoration: BoxDecoration(
+                      color: Theme.of(context).colorScheme.inversePrimary,
+                    ),
+                    child: Column(
+                      mainAxisAlignment: MainAxisAlignment.center,
+                      children: [
+                        const Icon(
+                          Icons.folder_special,
+                          size: 60,
+                          color: Colors.blueAccent,
+                        ),
+                        const SizedBox(height: 16),
+                        Text(
+                          t('appTitle'),
+                          style: const TextStyle(
+                              fontSize: 24, fontWeight: FontWeight.bold),
+                        ),
+                      ],
+                    ),
+                  ),
+                  ListTile(
+                    leading: const Icon(Icons.language),
+                    title: Text(t('language')),
+                    onTap: () {
+                      Navigator.pop(context);
+                      Navigator.push(
+                        context,
+                        MaterialPageRoute(
+                            builder: (context) => LanguageScreen(
+                                  onLanguageChanged:
+                                      widget.onLanguageChanged,
+                                )),
+                      );
+                    },
+                  ),
+                  ListTile(
+                    leading: const Icon(Icons.info_outline),
+                    title: Text(t('about')),
+                    onTap: () {
+                      Navigator.pop(context);
+                      Navigator.push(
+                        context,
+                        MaterialPageRoute(
+                            builder: (context) => const AboutScreen()),
+                      );
+                    },
+                  ),
+                ],
+              ),
+            )
+          : null,
+      body: supportDragDrop
+          ? DropTarget(
+              onDragDone: (detail) {
+                if (!_isProcessing) {
+                  _handleDroppedFiles(detail.files);
+                }
+              },
+              onDragEntered: (detail) {
+                setState(() => _isDragging = true);
+              },
+              onDragExited: (detail) {
+                setState(() => _isDragging = false);
+              },
+              child: Container(
+                decoration: BoxDecoration(
+                  border: _isDragging
+                      ? Border.all(color: Colors.blueAccent, width: 3)
+                      : null,
+                  color: _isDragging
+                      ? Colors.blueAccent.withAlpha(20)
+                      : null,
+                ),
+                child: _isProcessing
+                    ? const Center(child: CircularProgressIndicator())
+                    : bodyContent,
+              ),
+            )
+          : _isProcessing
+              ? const Center(child: CircularProgressIndicator())
+              : bodyContent,
+      bottomNavigationBar: BottomNavigationBar(
+        currentIndex: _currentTab,
+        onTap: (index) {
+          setState(() => _currentTab = index);
+          if (index == 2) _loadHistory();
+        },
+        type: BottomNavigationBarType.fixed,
+        items: const [
+          BottomNavigationBarItem(
+            icon: Icon(Icons.lock_open),
+            label: '加密',
+          ),
+          BottomNavigationBarItem(
+            icon: Icon(Icons.folder),
+            label: '文件',
+          ),
+          BottomNavigationBarItem(
+            icon: Icon(Icons.history),
+            label: '历史',
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildEncryptTab() {
+    final bool isDesktop = !Platform.isAndroid && !Platform.isIOS;
+
+    return Column(
       children: [
-        // 主功能区
         Expanded(
           child: Center(
             child: Column(
@@ -937,7 +1085,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                   label: t('decryptFile'),
                   onPressed: _handleDecryptFile,
                 ),
-                if (supportDragDrop) ...[
+                if (isDesktop) ...[
                   const SizedBox(height: 24),
                   Icon(
                     Icons.cloud_upload_outlined,
@@ -957,104 +1105,64 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
             ),
           ),
         ),
-        // 底部历史记录
         _buildHistorySection(),
       ],
     );
+  }
 
-    // 在桌面端用 DropTarget 包裹
-    if (supportDragDrop) {
-      bodyContent = DropTarget(
-        onDragDone: (detail) {
-          if (!_isProcessing) {
-            _handleDroppedFiles(detail.files);
-          }
-        },
-        onDragEntered: (detail) {
-          setState(() => _isDragging = true);
-        },
-        onDragExited: (detail) {
-          setState(() => _isDragging = false);
-        },
-        child: Container(
-          decoration: BoxDecoration(
-            border: _isDragging
-                ? Border.all(color: Colors.blueAccent, width: 3)
-                : null,
-            color:
-                _isDragging ? Colors.blueAccent.withAlpha(20) : null,
-          ),
-          child: bodyContent,
+  Widget _buildVaultTab() {
+    return const WeiMiVaultScreen(showSystemDirs: true);
+  }
+
+  Widget _buildHistoryTab() {
+    if (_recentHistory.isEmpty) {
+      return const Center(
+        child: Column(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            Icon(Icons.history, size: 64, color: Colors.grey),
+            SizedBox(height: 16),
+            Text('暂无历史记录', style: TextStyle(color: Colors.grey)),
+          ],
         ),
       );
     }
 
-    return Scaffold(
-      appBar: AppBar(
-        title: Text(t('appTitle')),
-        backgroundColor: Theme.of(context).colorScheme.inversePrimary,
-      ),
-      drawer: Drawer(
-        child: ListView(
-          padding: EdgeInsets.zero,
-          children: [
-            DrawerHeader(
-              decoration: BoxDecoration(
-                color: Theme.of(context).colorScheme.inversePrimary,
+    return Column(
+      children: [
+        Padding(
+          padding: const EdgeInsets.all(12),
+          child: Row(
+            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+            children: [
+              Text(
+                '${t('recentHistory')} (${_recentHistory.length})',
+                style: const TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
               ),
-              child: Column(
-                mainAxisAlignment: MainAxisAlignment.center,
-                children: [
-                  const Icon(
-                    Icons.folder_special,
-                    size: 60,
-                    color: Colors.blueAccent,
-                  ),
-                  const SizedBox(height: 16),
-                  Text(
-                    t('appTitle'),
-                    style: const TextStyle(
-                        fontSize: 24, fontWeight: FontWeight.bold),
-                  ),
-                ],
+              TextButton.icon(
+                onPressed: _handleClearHistory,
+                icon: const Icon(Icons.delete_sweep, size: 18),
+                label: Text(t('clearAll')),
               ),
-            ),
-            ListTile(
-              leading: const Icon(Icons.language),
-              title: Text(t('language')),
-              onTap: () {
-                Navigator.pop(context);
-                Navigator.push(
-                  context,
-                  MaterialPageRoute(
-                      builder: (context) => LanguageScreen(
-                            onLanguageChanged: widget.onLanguageChanged,
-                          )),
-                );
-              },
-            ),
-            ListTile(
-              leading: const Icon(Icons.info_outline),
-              title: Text(t('about')),
-              onTap: () {
-                Navigator.pop(context);
-                Navigator.push(
-                  context,
-                  MaterialPageRoute(
-                      builder: (context) => const AboutScreen()),
-                );
-              },
-            ),
-          ],
+            ],
+          ),
         ),
-      ),
-      body: _isProcessing
-          ? const Center(child: CircularProgressIndicator())
-          : bodyContent,
+        Expanded(
+          child: ListView.separated(
+            padding: const EdgeInsets.symmetric(horizontal: 8),
+            itemCount: _recentHistory.length,
+            separatorBuilder: (_, __) =>
+                Divider(height: 1, color: Colors.grey.shade200),
+            itemBuilder: (context, index) {
+              final record = _recentHistory[index];
+              return _buildHistoryItem(record);
+            },
+          ),
+        ),
+      ],
     );
   }
 
-  /// 历史记录区块
   Widget _buildHistorySection() {
     if (_recentHistory.isEmpty) return const SizedBox.shrink();
 
@@ -1067,7 +1175,6 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       child: Column(
         mainAxisSize: MainAxisSize.min,
         children: [
-          // 标题栏
           Padding(
             padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
             child: Row(
@@ -1089,8 +1196,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                     style: const TextStyle(fontSize: 12),
                   ),
                   style: TextButton.styleFrom(
-                    padding:
-                        const EdgeInsets.symmetric(horizontal: 8),
+                    padding: const EdgeInsets.symmetric(horizontal: 8),
                     minimumSize: Size.zero,
                     tapTargetSize: MaterialTapTargetSize.shrinkWrap,
                   ),
@@ -1098,7 +1204,6 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
               ],
             ),
           ),
-          // 记录列表
           Flexible(
             child: ListView.separated(
               shrinkWrap: true,
@@ -1131,7 +1236,6 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     final opLabel = isEncrypt ? t('encryptFile') : t('decryptFile');
     final fileName = record.filePath.split(Platform.pathSeparator).last;
 
-    // 格式化时间戳
     String timeStr = record.timestamp;
     try {
       final dt = DateTime.parse(record.timestamp);
