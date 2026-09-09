@@ -72,3 +72,5 @@ librust_crypto.dylib
 
 # AI 
 .claude
+# WorkBuddy
+.workbuddy
