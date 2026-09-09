@@ -22,6 +22,9 @@ jobs:
         with:
           packages: 'platforms;android-34 build-tools;34.0.0'
 
+      - name: Set ANDROID_HOME for Flutter
+        run: echo "ANDROID_HOME=$ANDROID_SDK_ROOT" >> $GITHUB_ENV
+
       - uses: subosito/flutter-action@v2
         with:
           flutter-version: '3.38.3'
