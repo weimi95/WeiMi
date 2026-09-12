@@ -125,8 +125,8 @@ jobs:
           echo "JAVA_HOME=$JAVA_HOME"
           echo "Flutter version:"
           flutter --version
-          echo "=== Building APK ==="
-          flutter build apk --release --verbose 2>&1 | tail -200
+          echo "=== Building APK (arm64-v8a only, split per ABI) ==="
+          flutter build apk --release --split-per-abi --target-platform android-arm64 --verbose 2>&1 | tail -200
         env:
           ANDROID_HOME: ${{ env.ANDROID_HOME }}
           ANDROID_SDK_ROOT: ${{ env.ANDROID_SDK_ROOT }}
@@ -134,16 +134,21 @@ jobs:
       - name: Rename and generate APK checksum
         run: |
           VERSION=${GITHUB_REF#refs/tags/}
-          mv build/app/outputs/flutter-apk/app-release.apk weimi_file-${VERSION}-android.apk
-          sha256sum weimi_file-${VERSION}-android.apk > weimi_file-${VERSION}-android.apk.sha256
+          echo "=== APK outputs ==="
+          ls -la build/app/outputs/flutter-apk/
+          SRC=build/app/outputs/flutter-apk/app-arm64-v8a-release.apk
+          if [ ! -f "$SRC" ]; then SRC=build/app/outputs/flutter-apk/app-release.apk; fi
+          mv "$SRC" weimi_file-${VERSION}-android-arm64.apk
+          sha256sum weimi_file-${VERSION}-android-arm64.apk > weimi_file-${VERSION}-android-arm64.apk.sha256
+          ls -lh weimi_file-${VERSION}-android-arm64.apk
       
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
           name: android-apk
           path: |
-            weimi_file-*-android.apk
-            weimi_file-*-android.apk.sha256
+            weimi_file-*-android-arm64.apk
+            weimi_file-*-android-arm64.apk.sha256
 
   build-windows:
     runs-on: windows-latest
@@ -319,7 +324,7 @@ jobs:
         run: |
           echo "# SHA256 Checksums" > SHA256SUMS.txt
           echo "" >> SHA256SUMS.txt
-          cat artifacts/android-apk/weimi_file-*-android.apk.sha256 >> SHA256SUMS.txt
+          cat artifacts/android-apk/weimi_file-*-android-arm64.apk.sha256 >> SHA256SUMS.txt
           cat artifacts/windows-zip/weimi_file-*-windows.zip.sha256 >> SHA256SUMS.txt
           if [ -f artifacts/macos-dmg/weimi_file-*-macos.dmg.sha256 ]; then
             cat artifacts/macos-dmg/weimi_file-*-macos.dmg.sha256 >> SHA256SUMS.txt
@@ -333,7 +338,7 @@ jobs:
         uses: softprops/action-gh-release@v1
         with:
           files: |
-            artifacts/android-apk/weimi_file-*-android.apk
+            artifacts/android-apk/weimi_file-*-android-arm64.apk
             artifacts/windows-zip/weimi_file-*-windows.zip
             artifacts/macos-dmg/weimi_file-*-macos.dmg
             artifacts/macos-dmg/weimi_file-*-macos.zip
