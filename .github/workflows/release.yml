@@ -114,6 +114,14 @@ jobs:
           ls "$ANDROID_HOME/platforms" || true
           df -h /
 
+      - name: Sync version from tag
+        run: |
+          VERSION_NAME="${GITHUB_REF_NAME#v}"
+          BUILD_NUMBER=$(echo "$VERSION_NAME" | awk -F. '{printf "%d%02d%02d", $1, $2, $3}')
+          sed -i -E "s/^version:.*/version: ${VERSION_NAME}+${BUILD_NUMBER}/" pubspec.yaml
+          echo "=== pubspec version ==="
+          grep '^version:' pubspec.yaml
+
       - name: Build APK
         run: |
           export GRADLE_OPTS="-Dorg.gradle.jvmargs=-Xmx4g -Dkotlin.daemon.jvm.options=-Xmx2g"
@@ -170,6 +178,18 @@ jobs:
           cd ..
           copy rust_crypto\target\release\rust_crypto.dll .
       
+      - name: Sync version from tag
+        shell: pwsh
+        run: |
+          $v = $env:GITHUB_REF_NAME -replace '^v',''
+          $p = $v.Split('.')
+          $b = [int]$p[0] * 10000 + [int]$p[1] * 100 + [int]$p[2]
+          $c = Get-Content pubspec.yaml -Raw
+          $c = [regex]::Replace($c, '(?m)^version:.*$', "version: $v+$b")
+          [System.IO.File]::WriteAllText("$PWD\pubspec.yaml", $c)
+          Write-Host "=== pubspec version ==="
+          Select-String -Path pubspec.yaml -Pattern '^version:'
+
       - name: Build Windows
         run: |
           flutter pub get
@@ -214,6 +234,14 @@ jobs:
           rustup target add aarch64-apple-darwin
           cargo build --release --target aarch64-apple-darwin
           cd ..
+
+      - name: Sync version from tag
+        run: |
+          VERSION_NAME="${GITHUB_REF_NAME#v}"
+          BUILD_NUMBER=$(echo "$VERSION_NAME" | awk -F. '{printf "%d%02d%02d", $1, $2, $3}')
+          sed -i -E "s/^version:.*/version: ${VERSION_NAME}+${BUILD_NUMBER}/" pubspec.yaml
+          echo "=== pubspec version ==="
+          grep '^version:' pubspec.yaml
 
       - name: Build macOS
         run: |
@@ -283,6 +311,14 @@ jobs:
           cd ..
           cp rust_crypto/target/release/librust_crypto.so .
       
+      - name: Sync version from tag
+        run: |
+          VERSION_NAME="${GITHUB_REF_NAME#v}"
+          BUILD_NUMBER=$(echo "$VERSION_NAME" | awk -F. '{printf "%d%02d%02d", $1, $2, $3}')
+          sed -i -E "s/^version:.*/version: ${VERSION_NAME}+${BUILD_NUMBER}/" pubspec.yaml
+          echo "=== pubspec version ==="
+          grep '^version:' pubspec.yaml
+
       - name: Build Linux
         run: |
           flutter pub get
