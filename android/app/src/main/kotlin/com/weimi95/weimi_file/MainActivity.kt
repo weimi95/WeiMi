@@ -1,4 +1,4 @@
-package com.weimi95.weimi
+package com.weimi95.weimi_file
 
 import android.content.Context
 import android.content.Intent
