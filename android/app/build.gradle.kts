@@ -21,7 +21,9 @@ android {
 
     packaging {
         jniLibs {
-            useLegacyPackaging = true
+            // Flutter 官方推荐：so 不压缩、直接 mmap，避免 OEM ROM（一加/ColorOS）上
+            // 压缩 so 解压后 page-align 校验失败导致 dlopen 崩溃闪退。
+            useLegacyPackaging = false
         }
     }
 
