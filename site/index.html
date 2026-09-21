@@ -1,0 +1,447 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>微密文件 · WeiMi File — 文件加密，简单可靠</title>
+<meta name="description" content="微密文件（WeiMi File）：跨平台文件加密工具，Flutter + Rust 加密引擎（AES-256-GCM），支持 Windows / macOS / Linux / Android，开源免费。">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🔒</text></svg>">
+<style>
+:root {
+  --bg: #07070c;
+  --fg: #e8e9f0;
+  --muted: #9aa0b4;
+  --accent1: #22d3ee;
+  --accent2: #a855f7;
+  --accent3: #f472b6;
+  --card-bg: rgba(255, 255, 255, 0.045);
+  --card-border: rgba(255, 255, 255, 0.09);
+  --glass-blur: 12px;
+  --maxw: 1080px;
+}
+
+* { box-sizing: border-box; margin: 0; padding: 0; }
+
+html { scroll-behavior: smooth; }
+
+body {
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC",
+    "Hiragino Sans GB", "Microsoft YaHei", "Noto Sans SC", system-ui, sans-serif;
+  background: var(--bg);
+  color: var(--fg);
+  line-height: 1.65;
+  overflow-x: hidden;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* ===== 极光背景 ===== */
+.aurora {
+  position: fixed;
+  inset: 0;
+  z-index: -1;
+  overflow: hidden;
+  pointer-events: none;
+  background: radial-gradient(120% 120% at 50% 0%, #0c0c16 0%, #07070c 60%);
+}
+.blob {
+  position: absolute;
+  border-radius: 50%;
+  filter: blur(80px);
+  opacity: 0.5;
+  mix-blend-mode: screen;
+  animation: float 18s ease-in-out infinite;
+}
+.b1 { width: 46vw; height: 46vw; left: -8vw; top: -10vw;
+  background: radial-gradient(circle, var(--accent1), transparent 65%); }
+.b2 { width: 40vw; height: 40vw; right: -6vw; top: 4vw;
+  background: radial-gradient(circle, var(--accent2), transparent 65%); animation-delay: -4s; }
+.b3 { width: 38vw; height: 38vw; left: 20vw; bottom: -14vw;
+  background: radial-gradient(circle, var(--accent3), transparent 65%); animation-delay: -8s; opacity: 0.35; }
+.b4 { width: 30vw; height: 30vw; right: 16vw; bottom: -6vw;
+  background: radial-gradient(circle, #34d399, transparent 65%); animation-delay: -12s; opacity: 0.3; }
+
+@keyframes float {
+  0%, 100% { transform: translate(0, 0) scale(1); }
+  33% { transform: translate(4vw, 3vw) scale(1.08); }
+  66% { transform: translate(-3vw, -2vw) scale(0.95); }
+}
+
+/* ===== Hero ===== */
+.hero {
+  max-width: var(--maxw);
+  margin: 0 auto;
+  padding: 17vh 24px 10vh;
+  text-align: center;
+}
+.eyebrow {
+  letter-spacing: 0.42em;
+  font-size: 0.72rem;
+  color: var(--muted);
+  margin-bottom: 1.1rem;
+  font-weight: 600;
+}
+.name {
+  font-size: clamp(2.6rem, 7.5vw, 4.8rem);
+  font-weight: 800;
+  letter-spacing: -0.02em;
+  line-height: 1.05;
+}
+.grad {
+  background: linear-gradient(100deg, var(--accent1), var(--accent2) 50%, var(--accent3));
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+}
+.tagline {
+  margin: 1.3rem auto 0;
+  max-width: 640px;
+  color: var(--muted);
+  font-size: clamp(1rem, 2.4vw, 1.18rem);
+}
+.hero-links {
+  margin-top: 2.4rem;
+  display: flex;
+  gap: 0.8rem;
+  justify-content: center;
+  flex-wrap: wrap;
+}
+.btn {
+  display: inline-block;
+  padding: 0.62rem 1.4rem;
+  border-radius: 999px;
+  font-size: 0.92rem;
+  font-weight: 600;
+  text-decoration: none;
+  color: #07070c;
+  background: linear-gradient(100deg, var(--accent1), var(--accent2));
+  transition: transform 0.18s ease, box-shadow 0.18s ease;
+  box-shadow: 0 6px 24px -8px var(--accent2);
+}
+.btn:hover { transform: translateY(-2px); box-shadow: 0 10px 30px -8px var(--accent2); }
+.btn.ghost {
+  color: var(--fg);
+  background: transparent;
+  border: 1px solid var(--card-border);
+  box-shadow: none;
+}
+.btn.ghost:hover { border-color: var(--accent1); background: rgba(34, 211, 238, 0.08); }
+
+/* 版本徽标行 */
+.badges {
+  margin-top: 1.6rem;
+  display: flex;
+  gap: 0.5rem;
+  justify-content: center;
+  flex-wrap: wrap;
+}
+.badge {
+  font-size: 0.74rem;
+  padding: 0.24rem 0.75rem;
+  border-radius: 999px;
+  color: #cdd2e6;
+  background: rgba(255, 255, 255, 0.06);
+  border: 1px solid rgba(255, 255, 255, 0.07);
+}
+.badge.hl {
+  color: var(--accent1);
+  border-color: rgba(34, 211, 238, 0.35);
+  background: rgba(34, 211, 238, 0.08);
+}
+
+/* ===== Sections ===== */
+main { max-width: var(--maxw); margin: 0 auto; padding: 0 24px 4rem; }
+.section-title {
+  font-size: clamp(1.5rem, 4vw, 2.1rem);
+  font-weight: 700;
+  margin: 3.5rem 0 1.8rem;
+  letter-spacing: -0.01em;
+}
+.section-title::after {
+  content: "";
+  display: block;
+  width: 48px;
+  height: 3px;
+  margin-top: 0.6rem;
+  border-radius: 3px;
+  background: linear-gradient(90deg, var(--accent1), var(--accent2));
+}
+
+/* ===== 特性网格 ===== */
+.grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
+  gap: 1.1rem;
+}
+.card {
+  position: relative;
+  padding: 1.5rem 1.4rem 1.3rem;
+  border-radius: 18px;
+  background: var(--card-bg);
+  border: 1px solid var(--card-border);
+  backdrop-filter: blur(var(--glass-blur));
+  -webkit-backdrop-filter: blur(var(--glass-blur));
+  transition: transform 0.22s ease, border-color 0.22s ease, box-shadow 0.22s ease;
+  overflow: hidden;
+}
+.card::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: 18px;
+  padding: 1px;
+  pointer-events: none;
+  background: linear-gradient(130deg, transparent, rgba(34, 211, 238, 0.4), transparent 60%);
+  -webkit-mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0);
+  -webkit-mask-composite: xor;
+  mask-composite: exclude;
+  opacity: 0;
+  transition: opacity 0.22s ease;
+}
+.card:hover {
+  transform: translateY(-6px);
+  border-color: transparent;
+  box-shadow: 0 18px 50px -20px rgba(168, 85, 247, 0.55);
+}
+.card:hover::before { opacity: 1; }
+
+.card-head { display: flex; align-items: center; gap: 0.7rem; margin-bottom: 0.7rem; }
+.icon { font-size: 1.5rem; line-height: 1; }
+.card h3 { font-size: 1.16rem; font-weight: 700; }
+.card h3 .en { color: var(--muted); font-weight: 500; font-size: 0.86rem; margin-left: 0.3rem; }
+.desc { color: var(--muted); font-size: 0.94rem; }
+.tags { display: flex; flex-wrap: wrap; gap: 0.4rem; margin: 0.9rem 0 0.2rem; }
+.tags span {
+  font-size: 0.74rem;
+  padding: 0.22rem 0.6rem;
+  border-radius: 999px;
+  color: #cdd2e6;
+  background: rgba(255, 255, 255, 0.06);
+  border: 1px solid rgba(255, 255, 255, 0.07);
+}
+
+/* ===== 下载区 ===== */
+.dl-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(230px, 1fr));
+  gap: 1.1rem;
+}
+.dl-card { text-align: center; padding: 1.6rem 1.2rem 1.4rem; }
+.dl-card .icon { font-size: 2.2rem; display: block; margin-bottom: 0.7rem; }
+.dl-card h3 { font-size: 1.05rem; margin-bottom: 0.35rem; }
+.dl-card .desc { font-size: 0.84rem; margin-bottom: 1.1rem; }
+.dl-card .btn { padding: 0.5rem 1.3rem; font-size: 0.88rem; }
+.dl-note {
+  margin-top: 1.6rem;
+  text-align: center;
+  color: var(--muted);
+  font-size: 0.88rem;
+}
+.dl-note a { color: var(--accent1); text-decoration: none; }
+.dl-note a:hover { color: var(--accent3); }
+
+/* ===== 三步上手 ===== */
+.steps {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+  gap: 1.1rem;
+  counter-reset: step;
+}
+.step { position: relative; }
+.step-num {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 2.1rem;
+  height: 2.1rem;
+  border-radius: 50%;
+  font-weight: 700;
+  font-size: 0.95rem;
+  color: #07070c;
+  background: linear-gradient(100deg, var(--accent1), var(--accent2));
+  margin-bottom: 0.8rem;
+}
+.step h3 { font-size: 1.05rem; margin-bottom: 0.35rem; }
+
+/* ===== Footer ===== */
+footer {
+  max-width: var(--maxw);
+  margin: 0 auto;
+  padding: 2.6rem 24px 3.4rem;
+  text-align: center;
+  color: var(--muted);
+  font-size: 0.86rem;
+  border-top: 1px solid rgba(255, 255, 255, 0.06);
+}
+.foot-links { margin-top: 0.5rem; }
+.foot-links a { color: var(--fg); text-decoration: none; }
+.foot-links a:hover { color: var(--accent1); }
+footer a { color: var(--accent1); text-decoration: none; }
+footer a:hover { color: var(--accent3); }
+
+/* ===== 滚动揭示 ===== */
+.reveal {
+  opacity: 0;
+  transform: translateY(22px);
+  transition: opacity 0.6s ease, transform 0.6s ease;
+}
+.reveal.in { opacity: 1; transform: none; }
+
+@media (prefers-reduced-motion: reduce) {
+  .blob { animation: none; }
+  .reveal { opacity: 1; transform: none; transition: none; }
+  html { scroll-behavior: auto; }
+}
+</style>
+</head>
+<body>
+  <div class="aurora" aria-hidden="true">
+    <span class="blob b1"></span>
+    <span class="blob b2"></span>
+    <span class="blob b3"></span>
+    <span class="blob b4"></span>
+  </div>
+
+  <header class="hero">
+    <p class="eyebrow">PRIVATE&nbsp;BY&nbsp;DEFAULT</p>
+    <h1 class="name">微密文件 <span class="grad">WeiMi</span></h1>
+    <p class="tagline">跨平台文件加密工具 · Rust 加密引擎（AES-256-GCM）· 加密之外，还能直接看</p>
+    <nav class="hero-links">
+      <a class="btn" href="https://pan.quark.cn/s/ba97115eccfc" target="_blank" rel="noopener">下载最新版</a>
+      <a class="btn ghost" href="#features">看看功能</a>
+    </nav>
+    <div class="badges">
+      <span class="badge hl">v1.0.19</span>
+      <span class="badge">AES-256-GCM</span>
+      <span class="badge">Windows · macOS · Linux · Android</span>
+      <span class="badge">Apache 2.0 开源</span>
+    </div>
+  </header>
+
+  <main>
+    <section id="features">
+      <h2 class="section-title reveal">核心功能</h2>
+      <div class="grid">
+
+        <article class="card reveal">
+          <div class="card-head">
+            <span class="icon">🔐</span>
+            <h3>硬核加密引擎 <span class="en">Rust</span></h3>
+          </div>
+          <p class="desc">加密核心用 Rust 编写、经 dart:ffi 桥接调用，AES-256-GCM 认证加密，密文被改动会直接校验失败，不静默出错。</p>
+          <div class="tags"><span>Rust</span><span>AES-256-GCM</span><span>dart:ffi</span></div>
+        </article>
+
+        <article class="card reveal">
+          <div class="card-head">
+            <span class="icon">📦</span>
+            <h3>自有加密格式 <span class="en">.wemi</span></h3>
+          </div>
+          <p class="desc">新版统一打包为 .wemi 格式；老用户无缝过渡——旧 .kyl 加密文件照样能解密打开。</p>
+          <div class="tags"><span>.wemi</span><span>兼容 .kyl</span></div>
+        </article>
+
+        <article class="card reveal">
+          <div class="card-head">
+            <span class="icon">👁️</span>
+            <h3>内置查看器</h3>
+          </div>
+          <p class="desc">视频、图片、音频、文本、PDF 解密后不用导出第三方应用，在 App 内直接打开查看，看完即走不留痕迹。</p>
+          <div class="tags"><span>视频</span><span>图片</span><span>音频</span><span>文本</span><span>PDF</span></div>
+        </article>
+
+        <article class="card reveal">
+          <div class="card-head">
+            <span class="icon">🗂️</span>
+            <h3>文件管理器</h3>
+          </div>
+          <p class="desc">常用目录（下载 / 文档 / 图片 / 相册 / 音乐 / 视频）折叠展开随手浏览，也支持添加自己的常用目录，加密选文件不用来回翻。</p>
+          <div class="tags"><span>常用目录</span><span>自定义目录</span></div>
+        </article>
+
+        <article class="card reveal">
+          <div class="card-head">
+            <span class="icon">💻</span>
+            <h3>全平台覆盖</h3>
+          </div>
+          <p class="desc">Windows / macOS / Linux / Android 四端齐发，一套加密格式走天下；桌面端还支持文件拖拽直接加密。</p>
+          <div class="tags"><span>Windows</span><span>macOS</span><span>Linux</span><span>Android</span></div>
+        </article>
+
+        <article class="card reveal">
+          <div class="card-head">
+            <span class="icon">🔓</span>
+            <h3>开源 &amp; 免费使用</h3>
+          </div>
+          <p class="desc">代码全量开源（Apache 2.0 协议），构建过程公开可查。加密工具不看代码怎么放心？</p>
+          <div class="tags"><span>Apache 2.0</span><span>开源免费</span></div>
+        </article>
+
+      </div>
+    </section>
+
+    <section id="download">
+      <h2 class="section-title reveal">下载</h2>
+      <div class="dl-grid">
+
+        <article class="card dl-card reveal" style="grid-column: 1 / -1;">
+          <span class="icon">⚡</span>
+          <h3>夸克网盘 · 全平台安装包</h3>
+          <p class="desc">Android APK · Windows ZIP · macOS DMG · Linux TAR.GZ · SHA256 校验文件<br>国内下载速度更快，链接长期有效，新版本自动同步更新</p>
+          <a class="btn" href="https://pan.quark.cn/s/ba97115eccfc" target="_blank" rel="noopener">打开夸克网盘下载</a>
+        </article>
+
+      </div>
+      <p class="dl-note reveal">网盘文件夹长期有效，历史版本并存留档，随取随用。</p>
+    </section>
+
+    <section id="howto">
+      <h2 class="section-title reveal">三步上手</h2>
+      <div class="steps">
+
+        <article class="card step reveal">
+          <span class="step-num">1</span>
+          <h3>选文件</h3>
+          <p class="desc">从文件管理器选要加密的文件，桌面端直接把文件拖进窗口也行。</p>
+        </article>
+
+        <article class="card step reveal">
+          <span class="step-num">2</span>
+          <h3>设密码加密</h3>
+          <p class="desc">设置加密密码，一键生成 .wemi 加密文件，原文件可按需处理。</p>
+        </article>
+
+        <article class="card step reveal">
+          <span class="step-num">3</span>
+          <h3>解密即看</h3>
+          <p class="desc">输入密码解密，视频 / 图片 / 音频 / 文本 / PDF 直接在 App 内查看。</p>
+        </article>
+
+      </div>
+    </section>
+  </main>
+
+  <footer>
+    <p>© <span id="year"></span> 微密文件 WeiMi</p>
+    <p class="foot-links">
+      <a href="https://weimi95.github.io/" target="_blank" rel="noopener">阿伟小站</a> ·
+      <a href="https://weimi95.github.io/weitu/" target="_blank" rel="noopener">微图相册管家</a> ·
+      <a href="https://weimi95.github.io/wei8/" target="_blank" rel="noopener">导航站</a>
+    </p>
+  </footer>
+
+  <script>
+    document.getElementById('year').textContent = new Date().getFullYear();
+
+    const io = new IntersectionObserver((entries) => {
+      entries.forEach((e) => {
+        if (e.isIntersecting) {
+          e.target.classList.add('in');
+          io.unobserve(e.target);
+        }
+      });
+    }, { threshold: 0.12 });
+
+    document.querySelectorAll('.reveal').forEach((el) => io.observe(el));
+  </script>
+</body>
+</html>
