@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:file_picker/file_picker.dart';
 import 'package:path/path.dart' as p;
@@ -18,7 +20,7 @@ class _LanTransferScreenState extends State<LanTransferScreen> {
   final LanTransferService _svc = LanTransferService.instance;
   List<LanPeer> _peers = [];
   String _ip = '…';
-  Stream<LanEvent>? _sub;
+  StreamSubscription<LanEvent>? _sub;
 
   @override
   void initState() {

@@ -275,7 +275,15 @@ class LanTransferService {
 
     try {
       final sink = File(savePath).openWrite();
-      await req.pipe(sink);
+      try {
+        // 手动逐块写入（IOSink 不是 StreamConsumer<Uint8List>，不能用 pipe）
+        await for (final chunk in req) {
+          sink.add(chunk);
+        }
+        await sink.flush();
+      } finally {
+        await sink.close();
+      }
       req.response.statusCode = HttpStatus.ok;
       req.response.write(json.encode({'ok': true, 'path': savePath}));
       await req.response.close();
