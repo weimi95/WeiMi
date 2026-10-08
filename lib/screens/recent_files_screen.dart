@@ -91,7 +91,7 @@ class RecentFilesScreenState extends State<RecentFilesScreen> {
       'Library',
       'Applications',
       'System Volume Information',
-      '$RECYCLE.BIN',
+      r'$RECYCLE.BIN',
       'node_modules',
     };
 

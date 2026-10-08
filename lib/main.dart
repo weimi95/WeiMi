@@ -16,6 +16,8 @@ import 'screens/about_screen.dart';
 import 'screens/language_screen.dart';
 import 'screens/wei_mi_vault_screen.dart';
 import 'screens/recent_files_screen.dart';
+import 'services/lan_transfer_service.dart';
+import 'package:path_provider/path_provider.dart';
 
 // 密码长度限制常量
 const int kPasswordMinLength = 4;
@@ -29,6 +31,12 @@ void main() async {
 
   // Initialize localization service before running the app
   await LocalizationService.getInstance();
+
+  // 局域网接收文件的兜底目录（用户未设置加密目录时用）
+  try {
+    final docs = await getApplicationDocumentsDirectory();
+    LanTransferService.instance.fallbackDir = docs.path;
+  } catch (_) {}
 
   if (Platform.isWindows) {
     await FileAssociationService.registerFileAssociation();
@@ -111,7 +119,6 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   int _currentTab = 0;
   bool _isProcessing = false;
   bool _isDragging = false;
-  List<HistoryRecord> _allHistory = [];
 
   // Helper to get translations
   String t(String key) => widget.localizationService.translate(key);
@@ -121,7 +128,6 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
     _checkInitialFile();
-    _loadHistory();
   }
 
   @override
@@ -138,19 +144,6 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       await FilePicker.platform.clearTemporaryFiles();
     } catch (e) {
       debugPrint('Failed to clear file_picker cache: $e');
-    }
-  }
-
-  Future<void> _loadHistory() async {
-    try {
-      final all = await HistoryService.getAllRecords();
-      if (mounted) {
-        setState(() {
-          _allHistory = all;
-        });
-      }
-    } catch (e) {
-      debugPrint('Failed to load history: $e');
     }
   }
 
@@ -563,10 +556,19 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     }
   }
 
-  /// 选择输出目录：有上次选择时优先询问是否沿用，否则打开目录选择器。
-  /// 成功选择后记录为「上次位置」。
+  /// 选择输出目录：优先「加密文件存放目录」（用户设置过则默认直接用），
+  /// 其次上次选择，都没有时打开目录选择器。成功选择后记录为「上次位置」。
   Future<String?> _chooseOutputDirectory() async {
     final prefs = await SharedPreferences.getInstance();
+
+    // 加密文件存放目录优先
+    final vaultDir = prefs.getString('weimi_vault_dir');
+    if (vaultDir != null && vaultDir.isNotEmpty) {
+      try {
+        if (await Directory(vaultDir).exists()) return vaultDir;
+      } catch (_) {}
+    }
+
     final lastDir = prefs.getString(kLastOutputDirKey);
 
     if (lastDir != null &&
@@ -607,31 +609,46 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
 
     if (!mounted) return;
 
-    final confirmed = await showDialog<bool>(
-      context: context,
-      builder: (context) {
-        return AlertDialog(
-          title: Text(t('selectOutputDirectory')),
-          content: Text(
-              '${t('aboutToEncrypt')}${pickedFiles.length}${t('filesSelectOutputDir')}'),
-          actions: [
-            TextButton(
-              onPressed: () => Navigator.pop(context, false),
-              child: Text(t('cancel')),
-            ),
-            TextButton(
-              onPressed: () => Navigator.pop(context, true),
-              child: Text(t('confirm')),
-            ),
-          ],
-        );
-      },
-    );
+    // 已设置「加密文件存放目录」时直接使用，不再询问输出位置
+    final prefs = await SharedPreferences.getInstance();
+    final vaultDir = prefs.getString('weimi_vault_dir');
+    var hasVaultDir = false;
+    if (vaultDir != null && vaultDir.isNotEmpty) {
+      try {
+        hasVaultDir = await Directory(vaultDir).exists();
+      } catch (_) {}
+    }
 
-    if (confirmed != true) return;
+    String? outputDirectory;
+    if (hasVaultDir && vaultDir != null) {
+      outputDirectory = vaultDir;
+    } else {
+      final confirmed = await showDialog<bool>(
+        context: context,
+        builder: (context) {
+          return AlertDialog(
+            title: Text(t('selectOutputDirectory')),
+            content: Text(
+                '${t('aboutToEncrypt')}${pickedFiles.length}${t('filesSelectOutputDir')}'),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.pop(context, false),
+                child: Text(t('cancel')),
+              ),
+              TextButton(
+                onPressed: () => Navigator.pop(context, true),
+                child: Text(t('confirm')),
+              ),
+            ],
+          );
+        },
+      );
 
-    final outputDirectory = await _chooseOutputDirectory();
-    if (outputDirectory == null) return;
+      if (confirmed != true) return;
+
+      outputDirectory = await _chooseOutputDirectory();
+      if (outputDirectory == null) return;
+    }
 
     final encryptResults = <Map<String, String>>[];
     final historyRecords = <HistoryRecord>[];
@@ -708,7 +725,6 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
 
     if (historyRecords.isNotEmpty) {
       await HistoryService.addRecords(historyRecords);
-      await _loadHistory();
     }
 
     if (encryptResults.isNotEmpty && mounted) {
@@ -813,7 +829,6 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
 
     if (historyRecords.isNotEmpty) {
       await HistoryService.addRecords(historyRecords);
-      await _loadHistory();
     }
   }
 
@@ -904,36 +919,6 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     }
   }
 
-  // ============ 历史 ============
-
-  Future<void> _handleClearHistory() async {
-    final confirmed = await showDialog<bool>(
-      context: context,
-      builder: (ctx) => AlertDialog(
-        title: Text(t('clearHistory')),
-        content: Text(t('clearHistoryConfirm')),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(ctx, false),
-            child: Text(t('cancel')),
-          ),
-          TextButton(
-            onPressed: () => Navigator.pop(ctx, true),
-            child: Text(t('confirm')),
-          ),
-        ],
-      ),
-    );
-
-    if (confirmed == true) {
-      await HistoryService.clearAll();
-      await _loadHistory();
-      if (mounted) {
-        _showMessage(t('historyCleared'));
-      }
-    }
-  }
-
   // ============ 构建 UI ============
 
   @override
@@ -947,13 +932,8 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
         bodyContent = _buildRecentTab();
         break;
       case 1:
-        bodyContent = _buildFilesTab();
-        break;
-      case 2:
-        bodyContent = _buildHistoryTab();
-        break;
       default:
-        bodyContent = _buildRecentTab();
+        bodyContent = _buildFilesTab();
     }
 
     return Scaffold(
@@ -1078,8 +1058,6 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
         currentIndex: _currentTab,
         onTap: (index) {
           setState(() => _currentTab = index);
-          if (index == 0) _loadHistory(); // 刷新最近记录
-          if (index == 2) _loadHistory(); // 刷新历史
         },
         type: BottomNavigationBarType.fixed,
         items: [
@@ -1090,10 +1068,6 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
           BottomNavigationBarItem(
             icon: const Icon(Icons.folder),
             label: t('tabFiles'),
-          ),
-          BottomNavigationBarItem(
-            icon: const Icon(Icons.history),
-            label: t('tabHistory'),
           ),
         ],
       ),
@@ -1186,139 +1160,4 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   Widget _buildFilesTab() {
     return const WeiMiVaultScreen(showSystemDirs: true);
   }
-
-  Widget _buildHistoryTab() {
-    if (_allHistory.isEmpty) {
-      return Center(
-        child: Column(
-          mainAxisAlignment: MainAxisAlignment.center,
-          children: [
-            Icon(Icons.history, size: 64, color: Colors.grey),
-            const SizedBox(height: 16),
-            Text(t('noHistoryRecords'),
-                style: const TextStyle(color: Colors.grey)),
-          ],
-        ),
-      );
-    }
-
-    return Column(
-      children: [
-        Padding(
-          padding: const EdgeInsets.all(12),
-          child: Row(
-            mainAxisAlignment: MainAxisAlignment.spaceBetween,
-            children: [
-              Text(
-                '${t('recentHistory')} (${_allHistory.length})',
-                style: const TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
-              ),
-              TextButton.icon(
-                onPressed: _handleClearHistory,
-                icon: const Icon(Icons.delete_sweep, size: 18),
-                label: Text(t('clearAll')),
-              ),
-            ],
-          ),
-        ),
-        Expanded(
-          child: ListView.separated(
-            padding: const EdgeInsets.symmetric(horizontal: 8),
-            itemCount: _allHistory.length,
-            separatorBuilder: (_, __) =>
-                Divider(height: 1, color: Colors.grey.shade200),
-            itemBuilder: (context, index) {
-              final record = _allHistory[index];
-              return _buildHistoryItem(record);
-            },
-          ),
-        ),
-      ],
-    );
-  }
-
-  Future<void> _onHistoryItemTap(HistoryRecord record) async {
-    final targetPath = record.encryptedPath.isNotEmpty
-        ? record.encryptedPath
-        : record.filePath;
-    await _openFile(targetPath);
-  }
-
-  Widget _buildHistoryItem(HistoryRecord record) {
-    final isEncrypt = record.operation == 'encrypt';
-    final icon = isEncrypt ? Icons.lock : Icons.lock_open;
-    final iconColor = isEncrypt ? Colors.orange : Colors.green;
-    final opLabel = isEncrypt ? t('encryptFile') : t('decryptFile');
-    final fileName = record.filePath.split(Platform.pathSeparator).last;
-
-    String timeStr = record.timestamp;
-    try {
-      final dt = DateTime.parse(record.timestamp);
-      timeStr =
-          '${dt.month.toString().padLeft(2, '0')}-${dt.day.toString().padLeft(2, '0')} '
-          '${dt.hour.toString().padLeft(2, '0')}:${dt.minute.toString().padLeft(2, '0')}';
-    } catch (_) {}
-
-    return InkWell(
-      onTap: () => _onHistoryItemTap(record),
-      child: Padding(
-        padding: const EdgeInsets.symmetric(vertical: 4),
-        child: Row(
-          children: [
-            Icon(icon, size: 16, color: iconColor),
-            const SizedBox(width: 8),
-            Expanded(
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Row(
-                    children: [
-                      Container(
-                        padding: const EdgeInsets.symmetric(
-                            horizontal: 4, vertical: 1),
-                        decoration: BoxDecoration(
-                          color: isEncrypt
-                              ? Colors.orange.shade50
-                              : Colors.green.shade50,
-                          borderRadius: BorderRadius.circular(3),
-                        ),
-                        child: Text(
-                          opLabel,
-                          style: TextStyle(
-                            fontSize: 10,
-                            color: isEncrypt
-                                ? Colors.orange.shade700
-                                : Colors.green.shade700,
-                          ),
-                        ),
-                      ),
-                      const SizedBox(width: 6),
-                      Expanded(
-                        child: Text(
-                          fileName,
-                          style: const TextStyle(fontSize: 12),
-                          overflow: TextOverflow.ellipsis,
-                        ),
-                      ),
-                    ],
-                  ),
-                  if (record.hint.isNotEmpty)
-                    Text(
-                      '${t('hint')}${record.hint}',
-                      style: TextStyle(fontSize: 10, color: Colors.grey.shade500),
-                      overflow: TextOverflow.ellipsis,
-                    ),
-                ],
-              ),
-            ),
-            Text(
-              timeStr,
-              style: TextStyle(fontSize: 10, color: Colors.grey.shade500),
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-
-  }
+}
