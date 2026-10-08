@@ -51,6 +51,9 @@ class LanTransferService {
   /// 收到传入文件请求时的确认回调（UI 弹窗），返回 true 才接收
   Future<bool> Function(IncomingRequest request)? confirmHandler;
 
+  /// 最近一次发送失败的错误详情（诊断用）
+  String lastSendError = '';
+
   LanTransferService._();
   static final LanTransferService instance = LanTransferService._();
 
@@ -79,22 +82,44 @@ class LanTransferService {
     if (_receiving) await _broadcastAnnounce();
   }
 
-  /// 本机局域网 IPv4（取第一个非回环、非链路本地地址）
-  Future<String?> localIPv4() async {
+  /// 本机所有候选局域网 IPv4。
+  /// 过滤常见虚拟网卡（ZeroTier/VPN/WSL/Docker 等），并按「最可能是真实局域网」排序。
+  Future<List<String>> localIPv4s() async {
+    final virtual = RegExp(
+      r'zerotier|vgate|virtual|vmware|vbox|hyper-?v|wsl|docker|vpn|tap|tun|teredo|bluetooth',
+      caseSensitive: false,
+    );
+    final out = <String>[];
     try {
       final ifs = await NetworkInterface.list(
         type: InternetAddressType.IPv4,
         includeLoopback: false,
       );
       for (final ni in ifs) {
+        if (virtual.hasMatch(ni.name)) continue;
         for (final a in ni.addresses) {
-          if (!a.isLoopback && !a.address.startsWith('169.254')) {
-            return a.address;
+          if (!a.isLoopback &&
+              !a.address.startsWith('169.254') &&
+              !out.contains(a.address)) {
+            out.add(a.address);
           }
         }
       }
     } catch (_) {}
-    return null;
+    // 排序：192.168 段最常见排最前，其次 10. 段，再 172. 段
+    int rank(String ip) {
+      if (ip.startsWith('192.168.')) return 0;
+      if (ip.startsWith('10.')) return 1;
+      return 2;
+    }
+    out.sort((a, b) => rank(a).compareTo(rank(b)));
+    return out;
+  }
+
+  /// 本机主局域网 IPv4（多网卡时选最可能是真实局域网的）
+  Future<String?> localIPv4() async {
+    final all = await localIPv4s();
+    return all.isEmpty ? null : all.first;
   }
 
   // ============ 接收端 ============
@@ -189,13 +214,13 @@ class LanTransferService {
       'httpPort': httpPort,
       'v': 1,
     }));
+    // 对每个本机网段的定向广播都发一遍，多网卡/虚拟网卡环境也能被同网段设备发现
     final targets = <String>['255.255.255.255'];
-    final myIp = await localIPv4();
-    if (myIp != null) {
+    for (final myIp in await localIPv4s()) {
       final parts = myIp.split('.');
       if (parts.length == 4) {
-        // 子网定向广播（/24），比全网广播更可靠
-        targets.add('${parts[0]}.${parts[1]}.${parts[2]}.255');
+        final sub = '${parts[0]}.${parts[1]}.${parts[2]}.255';
+        if (!targets.contains(sub)) targets.add(sub);
       }
     }
     for (final t in targets) {
@@ -340,10 +365,14 @@ class LanTransferService {
     required String filePath,
     void Function(int sent, int total)? onProgress,
   }) async {
+    lastSendError = '';
     try {
       final sendName = p.basename(filePath);
       final f = File(filePath);
-      if (!await f.exists()) return false;
+      if (!await f.exists()) {
+        lastSendError = '本地文件不存在: $filePath';
+        return false;
+      }
       final total = await f.length();
 
       final client = HttpClient();
@@ -370,11 +399,17 @@ class LanTransferService {
             .transform(utf8.decoder)
             .timeout(const Duration(seconds: 60))
             .join();
-        return resp.statusCode == HttpStatus.ok && body.contains('"ok":true');
+        if (resp.statusCode == HttpStatus.ok && body.contains('"ok":true')) {
+          return true;
+        }
+        lastSendError =
+            '对方返回 ${resp.statusCode}（403=拒收/防火墙拦截，500=对方写入失败）';
+        return false;
       } finally {
         client.close(force: true);
       }
-    } catch (_) {
+    } catch (e) {
+      lastSendError = '$e';
       return false;
     }
   }

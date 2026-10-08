@@ -190,10 +190,14 @@ class _LanTransferScreenState extends State<LanTransferScreen> {
 
     if (mounted) {
       ProgressDialog.hide(context);
+      final detail = failCount > 0 && _svc.lastSendError.isNotEmpty
+          ? '\n失败原因：${_svc.lastSendError}'
+          : '';
       ScaffoldMessenger.of(context).showSnackBar(SnackBar(
         content: Text(
-            '发送完成：成功 $okCount，失败 $failCount（发给 ${peer.name}）'),
+            '发送完成：成功 $okCount，失败 $failCount（发给 ${peer.name}）$detail'),
         backgroundColor: failCount == 0 ? Colors.green : Colors.orange,
+        duration: const Duration(seconds: 6),
       ));
     }
   }
