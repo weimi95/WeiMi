@@ -17,7 +17,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 ///
 /// HTTP 协议：
 ///   POST /weimi/send
-///   Header: X-Weimi-App / X-Sender-Id / X-Sender-Name / X-File-Name /
+///   Header: X-Weimi-App / X-Sender-Id / X-Sender-Name(URL编码) / X-File-Name(URL编码) /
 ///           X-File-Size
 ///   Body: 文件字节流
 ///   Response: 200 {"ok":true,"path":"..."} / 403 拒收 / 500 失败
@@ -266,7 +266,15 @@ class LanTransferService {
   }
 
   Future<void> _handleIncomingFile(HttpRequest req) async {
-    String h(String name) => req.headers.value(name) ?? '';
+    String h(String name) {
+      final v = req.headers.value(name) ?? '';
+      if (v.isEmpty) return v;
+      try {
+        return Uri.decodeComponent(v);
+      } catch (_) {
+        return v;
+      }
+    }
     if (h('X-Weimi-App') != _magic) {
       req.response.statusCode = HttpStatus.forbidden;
       await req.response.close();
@@ -382,8 +390,9 @@ class LanTransferService {
             .postUrl(Uri.parse('http://${peer.ip}:${peer.httpPort}/weimi/send'));
         req.headers.set('X-Weimi-App', _magic);
         req.headers.set('X-Sender-Id', _identityId);
-        req.headers.set('X-Sender-Name', _selfName);
-        req.headers.set('X-File-Name', sendName);
+        // HTTP 头只允许 ASCII：中文设备名/文件名必须 URL 编码，接收端解码
+        req.headers.set('X-Sender-Name', Uri.encodeComponent(_selfName));
+        req.headers.set('X-File-Name', Uri.encodeComponent(sendName));
         req.headers.set('X-File-Size', '$total');
         req.headers.contentLength = total;
 
