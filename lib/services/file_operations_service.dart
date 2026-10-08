@@ -1,8 +1,61 @@
 import 'dart:io';
+import 'package:flutter/services.dart';
 import 'package:file_picker/file_picker.dart' as file_picker;
 import '../services/encryption_service.dart';
 
 class FileOperationsService {
+  static const MethodChannel _fileOpsChannel =
+      MethodChannel('com.weimi95.weimi/file_association');
+
+  /// 批量选文件，返回 [{path: 缓存/真实路径, identifier: 原始 content:// URI（可能为 null）}]
+  static Future<List<Map<String, String?>>> pickMultipleFilesWithOrigin() async {
+    final result = await file_picker.FilePicker.platform
+        .pickFiles(type: file_picker.FileType.any, allowMultiple: true);
+
+    if (result != null && result.files.isNotEmpty) {
+      return result.files
+          .where((file) => file.path != null)
+          .map((file) => {'path': file.path!, 'identifier': file.identifier})
+          .toList();
+    }
+    return [];
+  }
+
+  /// 删除原始文件。
+  /// Android 上 file_picker 返回的 path 是应用缓存副本，真实文件须通过
+  /// 原生 MethodChannel 按 content:// URI 删除；其他平台直接删路径。
+  static Future<bool> deleteOriginal(String path, {String? identifier}) async {
+    if (Platform.isAndroid) {
+      try {
+        final target =
+            (identifier != null && identifier.isNotEmpty) ? identifier : path;
+        final ok = await _fileOpsChannel.invokeMethod<bool>(
+          'deleteFile',
+          {'path': target},
+        );
+        if (ok == true) return true;
+        // 原生失败兜底：path 本身可能就是真实路径（旧版选择器/直读场景）
+        final f = File(path);
+        if (await f.exists()) {
+          await f.delete();
+          return true;
+        }
+        return false;
+      } catch (_) {
+        return false;
+      }
+    }
+    try {
+      final f = File(path);
+      if (await f.exists()) {
+        await f.delete();
+        return true;
+      }
+      return false;
+    } catch (_) {
+      return false;
+    }
+  }
   static Future<List<String>> pickFilesForDecryption() async {
     file_picker.FilePickerResult? result = await file_picker.FilePicker.platform
         .pickFiles(type: file_picker.FileType.any, allowMultiple: true);

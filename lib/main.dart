@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 import 'package:file_picker/file_picker.dart';
 import 'package:desktop_drop/desktop_drop.dart';
 import 'package:cross_file/cross_file.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 import 'services/file_operations_service.dart';
 import 'services/encryption_service.dart';
 import 'services/file_viewer_service.dart';
@@ -14,10 +15,14 @@ import 'widgets/progress_dialog.dart';
 import 'screens/about_screen.dart';
 import 'screens/language_screen.dart';
 import 'screens/wei_mi_vault_screen.dart';
+import 'screens/recent_files_screen.dart';
 
 // 密码长度限制常量
 const int kPasswordMinLength = 4;
 const int kPasswordMaxLength = 32;
+
+// 上次加密/解密输出目录的 SharedPreferences key
+const String kLastOutputDirKey = 'last_output_dir';
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -106,7 +111,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   int _currentTab = 0;
   bool _isProcessing = false;
   bool _isDragging = false;
-  List<HistoryRecord> _recentHistory = [];
+  List<HistoryRecord> _allHistory = [];
 
   // Helper to get translations
   String t(String key) => widget.localizationService.translate(key);
@@ -138,10 +143,10 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
 
   Future<void> _loadHistory() async {
     try {
-      final records = await HistoryService.getRecentRecords();
+      final all = await HistoryService.getAllRecords();
       if (mounted) {
         setState(() {
-          _recentHistory = records;
+          _allHistory = all;
         });
       }
     } catch (e) {
@@ -500,12 +505,13 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     int deletedCount = 0;
     for (final result in encryptResults) {
       final originalPath = result['originalPath']!;
+      final identifier = result['identifier'] ?? '';
       try {
-        final file = File(originalPath);
-        if (await file.exists()) {
-          await file.delete();
-          deletedCount++;
-        }
+        final ok = await FileOperationsService.deleteOriginal(
+          originalPath,
+          identifier: identifier.isEmpty ? null : identifier,
+        );
+        if (ok) deletedCount++;
       } catch (e) {
         debugPrint('Failed to delete $originalPath: $e');
       }
@@ -547,7 +553,8 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
         await _processDecryptFiles(decryptFiles);
       }
       if (encryptFiles.isNotEmpty) {
-        await _processEncryptFiles(encryptFiles);
+        await _processEncryptFiles(
+            encryptFiles.map((p) => {'path': p, 'identifier': null}).toList());
       }
     } catch (e) {
       _showMessage('${t('dropProcessFailed')}$e', isError: true);
@@ -556,7 +563,45 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     }
   }
 
-  Future<void> _processEncryptFiles(List<String> filePaths) async {
+  /// 选择输出目录：有上次选择时优先询问是否沿用，否则打开目录选择器。
+  /// 成功选择后记录为「上次位置」。
+  Future<String?> _chooseOutputDirectory() async {
+    final prefs = await SharedPreferences.getInstance();
+    final lastDir = prefs.getString(kLastOutputDirKey);
+
+    if (lastDir != null &&
+        lastDir.isNotEmpty &&
+        await Directory(lastDir).exists()) {
+      if (!mounted) return null;
+      final useLast = await showDialog<bool>(
+        context: context,
+        builder: (ctx) => AlertDialog(
+          title: Text(t('selectOutputDirectory')),
+          content: Text('${t('lastLocation')}: $lastDir'),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(ctx, false),
+              child: Text(t('chooseOtherLocation')),
+            ),
+            TextButton(
+              onPressed: () => Navigator.pop(ctx, true),
+              child: Text(t('useLastLocation')),
+            ),
+          ],
+        ),
+      );
+      if (useLast == true) return lastDir;
+    }
+
+    final dir = await FileOperationsService.pickOutputDirectory();
+    if (dir != null && dir.isNotEmpty) {
+      await prefs.setString(kLastOutputDirKey, dir);
+    }
+    return dir;
+  }
+
+  Future<void> _processEncryptFiles(
+      List<Map<String, String?>> pickedFiles) async {
     final result = await _showEncryptPasswordDialog();
     if (result == null) return;
 
@@ -568,7 +613,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
         return AlertDialog(
           title: Text(t('selectOutputDirectory')),
           content: Text(
-              '${t('aboutToEncrypt')}${filePaths.length}${t('filesSelectOutputDir')}'),
+              '${t('aboutToEncrypt')}${pickedFiles.length}${t('filesSelectOutputDir')}'),
           actions: [
             TextButton(
               onPressed: () => Navigator.pop(context, false),
@@ -585,15 +630,16 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
 
     if (confirmed != true) return;
 
-    final outputDirectory = await FileOperationsService.pickOutputDirectory();
+    final outputDirectory = await _chooseOutputDirectory();
     if (outputDirectory == null) return;
 
     final encryptResults = <Map<String, String>>[];
     final historyRecords = <HistoryRecord>[];
     final now = DateTime.now();
 
-    for (int i = 0; i < filePaths.length; i++) {
-      final filePath = filePaths[i];
+    for (int i = 0; i < pickedFiles.length; i++) {
+      final filePath = pickedFiles[i]['path']!;
+      final fileIdentifier = pickedFiles[i]['identifier'] ?? '';
       final fileName = filePath.split(Platform.pathSeparator).last;
 
       if (mounted) {
@@ -602,7 +648,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
             context,
             title: t('batchEncrypt'),
             currentProgress: i,
-            totalProgress: filePaths.length,
+            totalProgress: pickedFiles.length,
             currentFileName: fileName,
           );
         } else {
@@ -610,7 +656,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
             context,
             title: t('batchEncrypt'),
             currentProgress: i,
-            totalProgress: filePaths.length,
+            totalProgress: pickedFiles.length,
             currentFileName: fileName,
           );
         }
@@ -636,6 +682,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
         encryptResults.add({
           'originalPath': filePath,
           'encryptedPath': encryptedPath,
+          'identifier': fileIdentifier,
           'hint': result['hint'] ?? '',
         });
 
@@ -690,7 +737,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     final password = await _showPasswordDialog(hint: hint);
     if (password == null) return;
 
-    final outputDirectory = await FileOperationsService.pickOutputDirectory();
+    final outputDirectory = await _chooseOutputDirectory();
     if (outputDirectory == null) return;
 
     final historyRecords = <HistoryRecord>[];
@@ -817,13 +864,13 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     setState(() => _isProcessing = true);
 
     try {
-      final filePaths = await FileOperationsService.pickMultipleFiles();
-      if (filePaths.isEmpty) {
+      final pickedFiles = await FileOperationsService.pickMultipleFilesWithOrigin();
+      if (pickedFiles.isEmpty) {
         setState(() => _isProcessing = false);
         return;
       }
 
-      await _processEncryptFiles(filePaths);
+      await _processEncryptFiles(pickedFiles);
     } catch (e) {
       if (mounted) {
         ProgressDialog.hide(context);
@@ -897,16 +944,16 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     Widget bodyContent;
     switch (_currentTab) {
       case 0:
-        bodyContent = _buildEncryptTab();
+        bodyContent = _buildRecentTab();
         break;
       case 1:
-        bodyContent = _buildVaultTab();
+        bodyContent = _buildFilesTab();
         break;
       case 2:
         bodyContent = _buildHistoryTab();
         break;
       default:
-        bodyContent = _buildEncryptTab();
+        bodyContent = _buildRecentTab();
     }
 
     return Scaffold(
@@ -1031,98 +1078,125 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
         currentIndex: _currentTab,
         onTap: (index) {
           setState(() => _currentTab = index);
-          if (index == 2) _loadHistory();
+          if (index == 0) _loadHistory(); // 刷新最近记录
+          if (index == 2) _loadHistory(); // 刷新历史
         },
         type: BottomNavigationBarType.fixed,
-        items: const [
+        items: [
           BottomNavigationBarItem(
-            icon: Icon(Icons.lock_open),
-            label: '加密',
+            icon: const Icon(Icons.access_time),
+            label: t('tabRecent'),
           ),
           BottomNavigationBarItem(
-            icon: Icon(Icons.folder),
-            label: '文件',
+            icon: const Icon(Icons.folder),
+            label: t('tabFiles'),
           ),
           BottomNavigationBarItem(
-            icon: Icon(Icons.history),
-            label: '历史',
+            icon: const Icon(Icons.history),
+            label: t('tabHistory'),
           ),
         ],
       ),
     );
   }
 
-  Widget _buildEncryptTab() {
-    final bool isDesktop = !Platform.isAndroid && !Platform.isIOS;
-
+  Widget _buildRecentTab() {
     return Column(
       children: [
-        Expanded(
-          child: Center(
-            child: Column(
-              mainAxisAlignment: MainAxisAlignment.center,
-              children: [
-                const Icon(
-                  Icons.folder_special,
-                  size: 100,
-                  color: Colors.blueAccent,
-                ),
-                const SizedBox(height: 48),
-                _buildMenuButton(
-                  icon: Icons.folder_open,
-                  label: t('openFile'),
-                  onPressed: _handleOpenFile,
-                ),
-                const SizedBox(height: 16),
-                _buildMenuButton(
+        // 快速操作区（紧凑一行）
+        Padding(
+          padding: const EdgeInsets.fromLTRB(12, 8, 12, 4),
+          child: Row(
+            children: [
+              Expanded(
+                child: _buildActionCard(
                   icon: Icons.lock,
                   label: t('encryptFile'),
-                  onPressed: _handleEncryptFile,
+                  color: Colors.orange,
+                  onTap: _handleEncryptFile,
                 ),
-                const SizedBox(height: 16),
-                _buildMenuButton(
+              ),
+              const SizedBox(width: 10),
+              Expanded(
+                child: _buildActionCard(
                   icon: Icons.lock_open,
                   label: t('decryptFile'),
-                  onPressed: _handleDecryptFile,
+                  color: Colors.green,
+                  onTap: _handleDecryptFile,
                 ),
-                if (isDesktop) ...[
-                  const SizedBox(height: 24),
-                  Icon(
-                    Icons.cloud_upload_outlined,
-                    size: 32,
-                    color: Colors.grey.shade400,
-                  ),
-                  const SizedBox(height: 4),
-                  Text(
-                    t('dragDropHint'),
-                    style: TextStyle(
-                      fontSize: 12,
-                      color: Colors.grey.shade400,
-                    ),
-                  ),
-                ],
-              ],
-            ),
+              ),
+              const SizedBox(width: 10),
+              Expanded(
+                child: _buildActionCard(
+                  icon: Icons.folder_open,
+                  label: t('openFile'),
+                  color: Colors.blue,
+                  onTap: _handleOpenFile,
+                ),
+              ),
+            ],
           ),
         ),
-        _buildHistorySection(),
+        // 全部文件列表（最近修改在前）
+        Expanded(
+          child: RecentFilesScreen(
+            translate: t,
+            onOpenFile: _openFile,
+          ),
+        ),
       ],
     );
   }
 
-  Widget _buildVaultTab() {
+  Widget _buildActionCard({
+    required IconData icon,
+    required String label,
+    required Color color,
+    required VoidCallback onTap,
+  }) {
+    return InkWell(
+      onTap: onTap,
+      borderRadius: BorderRadius.circular(12),
+      child: Container(
+        padding: const EdgeInsets.symmetric(vertical: 10),
+        decoration: BoxDecoration(
+          color: color.withAlpha(15),
+          borderRadius: BorderRadius.circular(12),
+          border: Border.all(color: color.withAlpha(50)),
+        ),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(icon, size: 24, color: color),
+            const SizedBox(height: 6),
+            Text(
+              label,
+              style: TextStyle(
+                fontSize: 13,
+                fontWeight: FontWeight.w500,
+                color: color,
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildFilesTab() {
     return const WeiMiVaultScreen(showSystemDirs: true);
   }
 
   Widget _buildHistoryTab() {
-    if (_recentHistory.isEmpty) {
-      return const Center(
+    if (_allHistory.isEmpty) {
+      return Center(
         child: Column(
           mainAxisAlignment: MainAxisAlignment.center,
           children: [
             Icon(Icons.history, size: 64, color: Colors.grey),
-            SizedBox(height: 16),
-            Text('暂无历史记录', style: TextStyle(color: Colors.grey)),
+            const SizedBox(height: 16),
+            Text(t('noHistoryRecords'),
+                style: const TextStyle(color: Colors.grey)),
           ],
         ),
       );
@@ -1136,7 +1210,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
             mainAxisAlignment: MainAxisAlignment.spaceBetween,
             children: [
               Text(
-                '${t('recentHistory')} (${_recentHistory.length})',
+                '${t('recentHistory')} (${_allHistory.length})',
                 style: const TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
               ),
               TextButton.icon(
@@ -1150,75 +1224,16 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
         Expanded(
           child: ListView.separated(
             padding: const EdgeInsets.symmetric(horizontal: 8),
-            itemCount: _recentHistory.length,
+            itemCount: _allHistory.length,
             separatorBuilder: (_, __) =>
                 Divider(height: 1, color: Colors.grey.shade200),
             itemBuilder: (context, index) {
-              final record = _recentHistory[index];
+              final record = _allHistory[index];
               return _buildHistoryItem(record);
             },
           ),
         ),
       ],
-    );
-  }
-
-  Widget _buildHistorySection() {
-    if (_recentHistory.isEmpty) return const SizedBox.shrink();
-
-    return Container(
-      constraints: const BoxConstraints(maxHeight: 200),
-      decoration: BoxDecoration(
-        color: Colors.grey.shade50,
-        border: Border(top: BorderSide(color: Colors.grey.shade200)),
-      ),
-      child: Column(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
-            child: Row(
-              mainAxisAlignment: MainAxisAlignment.spaceBetween,
-              children: [
-                Text(
-                  t('recentHistory'),
-                  style: TextStyle(
-                    fontSize: 13,
-                    fontWeight: FontWeight.bold,
-                    color: Colors.grey.shade700,
-                  ),
-                ),
-                TextButton.icon(
-                  onPressed: _handleClearHistory,
-                  icon: const Icon(Icons.delete_sweep, size: 16),
-                  label: Text(
-                    t('clearAll'),
-                    style: const TextStyle(fontSize: 12),
-                  ),
-                  style: TextButton.styleFrom(
-                    padding: const EdgeInsets.symmetric(horizontal: 8),
-                    minimumSize: Size.zero,
-                    tapTargetSize: MaterialTapTargetSize.shrinkWrap,
-                  ),
-                ),
-              ],
-            ),
-          ),
-          Flexible(
-            child: ListView.separated(
-              shrinkWrap: true,
-              padding: const EdgeInsets.symmetric(horizontal: 16),
-              itemCount: _recentHistory.length,
-              separatorBuilder: (_, __) =>
-                  Divider(height: 1, color: Colors.grey.shade200),
-              itemBuilder: (context, index) {
-                final record = _recentHistory[index];
-                return _buildHistoryItem(record);
-              },
-            ),
-          ),
-        ],
-      ),
     );
   }
 
@@ -1306,22 +1321,4 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     );
   }
 
-  Widget _buildMenuButton({
-    required IconData icon,
-    required String label,
-    required VoidCallback onPressed,
-  }) {
-    return SizedBox(
-      width: 200,
-      height: 50,
-      child: ElevatedButton.icon(
-        onPressed: onPressed,
-        icon: Icon(icon),
-        label: Text(label),
-        style: ElevatedButton.styleFrom(
-          textStyle: const TextStyle(fontSize: 18),
-        ),
-      ),
-    );
   }
-}

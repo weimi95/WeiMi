@@ -136,6 +136,9 @@ class AppLocalizations {
     'zh': {
       // Main screen
       'appTitle': '微密',
+      'tabRecent': '最近',
+      'tabFiles': '文件',
+      'tabHistory': '历史',
       'openFile': '打开文件',
       'encryptFile': '加密文件',
       'decryptFile': '解密文件',
@@ -199,6 +202,16 @@ class AppLocalizations {
       'dropProcessFailed': '拖拽处理失败: ',
 
       // History
+      'quickActions': '快速操作',
+      'recentFiles': '最近文件',
+      'noRecentRecords': '暂无最近记录',
+      'noHistoryRecords': '暂无历史记录',
+      'lastLocation': '上次保存位置',
+      'useLastLocation': '使用此位置',
+      'chooseOtherLocation': '选择其他位置',
+      'scanning': '正在扫描文件…',
+      'scanFailed': '扫描失败',
+      'noFilesFound': '没有找到文件',
       'recentHistory': '最近记录',
       'clearAll': '清空',
       'clearHistory': '清空历史记录',
@@ -228,6 +241,9 @@ class AppLocalizations {
     'en': {
       // Main screen
       'appTitle': '微密文件',
+      'tabRecent': 'Recent',
+      'tabFiles': 'Files',
+      'tabHistory': 'History',
       'openFile': 'Open File',
       'encryptFile': 'Encrypt File',
       'decryptFile': 'Decrypt File',
@@ -292,6 +308,16 @@ class AppLocalizations {
       'dropProcessFailed': 'Drop processing failed: ',
 
       // History
+      'quickActions': 'Quick Actions',
+      'recentFiles': 'Recent Files',
+      'noRecentRecords': 'No recent records',
+      'noHistoryRecords': 'No history records',
+      'lastLocation': 'Last location',
+      'useLastLocation': 'Use this location',
+      'chooseOtherLocation': 'Choose another location',
+      'scanning': 'Scanning files…',
+      'scanFailed': 'Scan failed',
+      'noFilesFound': 'No files found',
       'recentHistory': 'Recent History',
       'clearAll': 'Clear All',
       'clearHistory': 'Clear History',

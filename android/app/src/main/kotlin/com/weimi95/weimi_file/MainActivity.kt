@@ -27,10 +27,55 @@ class MainActivity : FlutterActivity() {
                 "getInitialFile" -> {
                     result.success(initialFilePath)
                 }
+                "deleteFile" -> {
+                    val target = call.argument<String>("path")
+                    result.success(if (target != null) deleteTarget(target) else false)
+                }
                 else -> {
                     result.notImplemented()
                 }
             }
+        }
+    }
+
+    /// 删除文件：content:// URI 先解析真实路径（_data 列）再删，
+    /// 失败则走 DocumentsContract.deleteDocument；普通路径直接删。
+    private fun deleteTarget(target: String): Boolean {
+        return try {
+            if (target.startsWith("content://")) {
+                val uri = Uri.parse(target)
+                var deleted = false
+                try {
+                    val cursor: Cursor? = contentResolver.query(uri, arrayOf("_data"), null, null, null)
+                    cursor?.use {
+                        if (it.moveToFirst()) {
+                            val idx = it.getColumnIndex("_data")
+                            if (idx != -1) {
+                                val p = it.getString(idx)
+                                if (p != null) {
+                                    val f = File(p)
+                                    if (f.exists()) deleted = f.delete()
+                                }
+                            }
+                        }
+                    }
+                } catch (e: Exception) {
+                    // 解析真实路径失败，走下方兜底
+                }
+                if (!deleted) {
+                    deleted = try {
+                        android.provider.DocumentsContract.deleteDocument(contentResolver, uri)
+                    } catch (e: Exception) {
+                        false
+                    }
+                }
+                deleted
+            } else {
+                val f = File(target)
+                f.exists() && f.delete()
+            }
+        } catch (e: Exception) {
+            false
         }
     }
 
