@@ -1,5 +1,7 @@
 import 'dart:io';
 import 'package:flutter/material.dart';
+import '../services/file_batch_ops.dart';
+import '../widgets/file_selection_bar.dart';
 
 /// 最近文件信息
 class RecentFileInfo {
@@ -36,6 +38,21 @@ class RecentFilesScreenState extends State<RecentFilesScreen> {
   bool _loading = true;
   String? _error;
   List<RecentFileInfo> _files = [];
+
+  // ============ 多选模式 ============
+  final Set<String> _selectedPaths = {};
+  bool get _selecting => _selectedPaths.isNotEmpty;
+
+  void _toggleSelect(String path) {
+    setState(() {
+      if (!_selectedPaths.remove(path)) _selectedPaths.add(path);
+    });
+  }
+
+  Future<void> _afterChange(Iterable<String> touched) async {
+    _selectedPaths.removeAll(touched);
+    await refresh();
+  }
 
   @override
   void initState() {
@@ -219,7 +236,7 @@ class RecentFilesScreenState extends State<RecentFilesScreen> {
       );
     }
 
-    return RefreshIndicator(
+    Widget body = RefreshIndicator(
       onRefresh: refresh,
       child: ListView.separated(
         physics: const AlwaysScrollableScrollPhysics(),
@@ -231,13 +248,32 @@ class RecentFilesScreenState extends State<RecentFilesScreen> {
           final (icon, color) = _iconFor(f.name);
           final dirPath =
               f.path.substring(0, f.path.length - f.name.length - 1);
+          final selected = _selectedPaths.contains(f.path);
           return InkWell(
-            onTap: () => widget.onOpenFile(f.path),
+            onTap: () {
+              if (_selecting) {
+                _toggleSelect(f.path);
+              } else {
+                widget.onOpenFile(f.path);
+              }
+            },
+            onLongPress: () => _toggleSelect(f.path),
             child: Padding(
               padding:
                   const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
               child: Row(
                 children: [
+                  if (_selecting)
+                    Padding(
+                      padding: const EdgeInsets.only(right: 10),
+                      child: Icon(
+                        selected
+                            ? Icons.check_box
+                            : Icons.check_box_outline_blank,
+                        size: 22,
+                        color: selected ? Colors.blue : Colors.grey,
+                      ),
+                    ),
                   Container(
                     width: 42,
                     height: 42,
@@ -302,5 +338,51 @@ class RecentFilesScreenState extends State<RecentFilesScreen> {
         },
       ),
     );
+
+    // 多选模式：顶部「已选择 N 项」横幅 + 底部操作栏
+    if (_selecting) {
+      body = Column(
+        children: [
+          SelectionHeaderBar(
+            count: _selectedPaths.length,
+            onSelectAll: () =>
+                setState(() => _selectedPaths.addAll(
+                      _files.map((f) => f.path),
+                    )),
+            onCancel: () => setState(_selectedPaths.clear),
+          ),
+          Expanded(child: body),
+          FileSelectionBar(
+            count: _selectedPaths.length,
+            onShare: () =>
+                FileBatchOps.share(context, _selectedPaths.toList()),
+            onMove: () => FileBatchOps.moveTo(context, _selectedPaths.toList(),
+                afterChange: () => _afterChange(_selectedPaths)),
+            onCopy: () => FileBatchOps.copyTo(context, _selectedPaths.toList()),
+            onDelete: () => FileBatchOps.delete(context, _selectedPaths.toList(),
+                afterChange: () => _afterChange(_selectedPaths)),
+            onMore: _moreSelected,
+          ),
+        ],
+      );
+    }
+    return body;
+  }
+
+  Future<void> _moreSelected() async {
+    final single = _selectedPaths.length == 1 ? _selectedPaths.first : null;
+    final action = await FileBatchOps.moreSheet(context, single: single != null);
+    if (action == null || !mounted) return;
+    switch (action) {
+      case 'info':
+        await FileBatchOps.info(context, single!);
+        break;
+      case 'rename':
+        await FileBatchOps.rename(context, single!,
+            afterChange: () => _afterChange([single]));
+        break;
+      case 'encrypt':
+        break; // 最近页不提供加密入口（在「加密」页操作）
+    }
   }
 }

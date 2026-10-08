@@ -6,8 +6,10 @@ import 'package:permission_handler/permission_handler.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import '../models/file_item.dart';
 import '../services/encryption_service.dart';
+import '../services/file_batch_ops.dart';
 import '../services/file_operations_service.dart';
 import '../services/file_viewer_service.dart';
+import '../widgets/file_selection_bar.dart';
 import 'lan_transfer_screen.dart';
 
 /// WeiMi Vault 屏幕
@@ -520,6 +522,107 @@ class _WeiMiVaultScreenState extends State<WeiMiVaultScreen> {
     }
   }
 
+  // ============ 多选模式 ============
+
+  final Set<String> _selectedPaths = {}; // 当前选中的文件路径
+  bool get _selecting => _selectedPaths.isNotEmpty;
+
+  void _toggleSelect(String path) {
+    setState(() {
+      if (!_selectedPaths.remove(path)) _selectedPaths.add(path);
+    });
+  }
+
+  void _clearSelection() => setState(_selectedPaths.clear);
+
+  void _selectAllVisible(Iterable<String> paths) {
+    setState(() => _selectedPaths.addAll(paths));
+  }
+
+  /// 操作后统一刷新：浏览视图刷新当前目录，根视图失效展开缓存
+  Future<void> _afterBatchChange(Iterable<String> touchedPaths) async {
+    for (final dir in {for (final p0 in touchedPaths) p.dirname(p0)}) {
+      _invalidateDir(dir);
+    }
+    if (_currentPath.isNotEmpty) {
+      _navigateTo(_currentPath);
+    } else {
+      setState(() {});
+    }
+  }
+
+  Future<void> _shareSelected() async {
+    await FileBatchOps.share(context, _selectedPaths.toList());
+  }
+
+  Future<void> _copySelected() async {
+    await FileBatchOps.copyTo(context, _selectedPaths.toList(),
+        afterChange: () async {});
+  }
+
+  Future<void> _moveSelected() async {
+    final paths = _selectedPaths.toList();
+    await FileBatchOps.moveTo(context, paths,
+        afterChange: () => _afterBatchChange(paths));
+    if (mounted) _clearSelection();
+  }
+
+  Future<void> _deleteSelected() async {
+    final paths = _selectedPaths.toList();
+    await FileBatchOps.delete(context, paths,
+        afterChange: () => _afterBatchChange(paths));
+    if (mounted) _clearSelection();
+  }
+
+  Future<void> _moreSelected() async {
+    final single = _selectedPaths.length == 1 ? _selectedPaths.first : null;
+    final action = await FileBatchOps.moreSheet(context, single: single != null);
+    if (action == null || !mounted) return;
+    switch (action) {
+      case 'info':
+        await FileBatchOps.info(context, single!);
+        break;
+      case 'rename':
+        await FileBatchOps.rename(context, single!,
+            afterChange: () => _afterBatchChange([single]));
+        if (mounted) _clearSelection();
+        break;
+      case 'encrypt':
+        if (single != null) {
+          _encryptFile(single);
+        } else {
+          // 多选加密：逐个走单文件加密流程（每个文件都要确认密码）
+          for (final f in _selectedPaths.toList()) {
+            if (!mounted) return;
+            await _encryptFile(f);
+          }
+        }
+        if (mounted) _clearSelection();
+        break;
+    }
+  }
+
+  /// 使目录展开缓存失效（存在则移除，保持折叠状态时下次展开重新读取）
+  void _invalidateDir(String dir) {
+    _dirChildren.remove(dir);
+  }
+
+  /// 当前界面可见、可参与多选的文件路径（不含文件夹）
+  Iterable<String> _visibleSelectableFiles() sync* {
+    if (_currentPath.isNotEmpty) {
+      for (final item in _items) {
+        if (!item.isDirectory) yield item.fullPath;
+      }
+    } else {
+      for (final children in _dirChildren.values) {
+        if (children == null) continue;
+        for (final item in children) {
+          if (!item.isDirectory) yield item.fullPath;
+        }
+      }
+    }
+  }
+
   Future<Map<String, String?>?> _showEncryptPasswordDialog() async {
     final passwordController = TextEditingController();
     final confirmController = TextEditingController();
@@ -594,19 +697,44 @@ class _WeiMiVaultScreenState extends State<WeiMiVaultScreen> {
     final isRoot = _currentPath.isEmpty;
 
     return Scaffold(
-      appBar: AppBar(
-        title: Text(isRoot ? '文件' : p.basename(_currentPath)),
-        leading: _historyIndex > 0
-            ? IconButton(icon: const Icon(Icons.arrow_back), onPressed: _goBack)
-            : null,
-        actions: [
-          if (_historyIndex < _pathHistory.length - 1)
-            IconButton(icon: const Icon(Icons.arrow_forward), onPressed: _goForward),
-        ],
-      ),
+      appBar: _selecting
+          ? AppBar(
+              leading: IconButton(
+                icon: const Icon(Icons.close),
+                onPressed: _clearSelection,
+              ),
+              title: Text('已选择 ${_selectedPaths.length} 项'),
+              actions: [
+                TextButton(
+                  onPressed: () =>
+                      _selectAllVisible(_visibleSelectableFiles()),
+                  child: const Text('全选'),
+                ),
+              ],
+            )
+          : AppBar(
+              title: Text(isRoot ? '文件' : p.basename(_currentPath)),
+              leading: _historyIndex > 0
+                  ? IconButton(icon: const Icon(Icons.arrow_back), onPressed: _goBack)
+                  : null,
+              actions: [
+                if (_historyIndex < _pathHistory.length - 1)
+                  IconButton(icon: const Icon(Icons.arrow_forward), onPressed: _goForward),
+              ],
+            ),
       body: _loading
           ? const Center(child: CircularProgressIndicator())
           : (isRoot ? _buildRootView() : (_items.isEmpty ? _emptyState : _buildFileList())),
+      bottomSheet: _selecting && !_loading
+          ? FileSelectionBar(
+              count: _selectedPaths.length,
+              onShare: _shareSelected,
+              onMove: _moveSelected,
+              onCopy: _copySelected,
+              onDelete: _deleteSelected,
+              onMore: _moreSelected,
+            )
+          : null,
       floatingActionButton: isRoot
           ? FloatingActionButton.extended(
               onPressed: _addCustomDir,
@@ -831,27 +959,44 @@ class _WeiMiVaultScreenState extends State<WeiMiVaultScreen> {
 
   /// 展开后的子项行（缩进显示）：文件夹点击进入浏览，文件点击走操作菜单
   Widget _buildChildRow(FileItem item) {
+    final selectable = !item.isDirectory;
+    final selected = selectable && _selectedPaths.contains(item.fullPath);
     return Padding(
       padding: const EdgeInsets.only(left: 24),
       child: ListTile(
         dense: true,
         visualDensity: VisualDensity.compact,
-        leading: Icon(
-          item.isDirectory ? Icons.folder : _fileIcon(item),
-          size: 20,
-          color: item.isDirectory
-              ? Colors.amber.shade700
-              : (item.isEncryptedFile ? Colors.blue : Colors.grey),
-        ),
+        leading: _selecting && selectable
+            ? Icon(
+                selected
+                    ? Icons.check_box
+                    : Icons.check_box_outline_blank,
+                size: 20,
+                color: selected ? Colors.blue : Colors.grey,
+              )
+            : Icon(
+                item.isDirectory ? Icons.folder : _fileIcon(item),
+                size: 20,
+                color: item.isDirectory
+                    ? Colors.amber.shade700
+                    : (item.isEncryptedFile ? Colors.blue : Colors.grey),
+              ),
         title: Text(item.name, style: const TextStyle(fontSize: 14)),
         subtitle: !item.isDirectory
             ? Text(item.humanSize,
                 style: const TextStyle(fontSize: 11, color: Colors.grey))
             : null,
-        trailing: item.isEncryptedFile
+        trailing: item.isEncryptedFile && !_selecting
             ? const Icon(Icons.lock, size: 14, color: Colors.blue)
             : null,
-        onTap: () => _openFile(item),
+        onTap: () {
+          if (_selecting) {
+            if (selectable) _toggleSelect(item.fullPath);
+          } else {
+            _openFile(item);
+          }
+        },
+        onLongPress: selectable ? () => _toggleSelect(item.fullPath) : null,
       ),
     );
   }
@@ -879,9 +1024,21 @@ class _WeiMiVaultScreenState extends State<WeiMiVaultScreen> {
         itemCount: _items.length,
         itemBuilder: (context, index) {
           final item = _items[index];
+          final selectable = !item.isDirectory;
+          final selected = selectable && _selectedPaths.contains(item.fullPath);
           return _FileListItem(
             item: item,
-            onTap: () => _openFile(item),
+            selected: selected,
+            selecting: _selecting,
+            onTap: () {
+              if (_selecting) {
+                if (selectable) _toggleSelect(item.fullPath);
+              } else {
+                _openFile(item);
+              }
+            },
+            onLongPress:
+                selectable ? () => _toggleSelect(item.fullPath) : null,
           );
         },
       ),
@@ -1037,22 +1194,41 @@ class _FileActionSheet extends StatelessWidget {
 class _FileListItem extends StatelessWidget {
   final FileItem item;
   final VoidCallback onTap;
-  const _FileListItem({required this.item, required this.onTap});
+  final VoidCallback? onLongPress;
+  final bool selected;
+  final bool selecting;
+
+  const _FileListItem({
+    required this.item,
+    required this.onTap,
+    this.onLongPress,
+    this.selected = false,
+    this.selecting = false,
+  });
 
   @override
   Widget build(BuildContext context) {
+    final showCheck = selecting && !item.isDirectory;
     return ListTile(
-      leading: Icon(
-        item.isDirectory ? Icons.folder : _fileIcon(item),
-        color: item.isDirectory ? Colors.amber : (item.isEncryptedFile ? Colors.blue : Colors.grey),
-      ),
+      leading: showCheck
+          ? Icon(
+              selected ? Icons.check_box : Icons.check_box_outline_blank,
+              color: selected ? Colors.blue : Colors.grey,
+            )
+          : Icon(
+              item.isDirectory ? Icons.folder : _fileIcon(item),
+              color: item.isDirectory ? Colors.amber : (item.isEncryptedFile ? Colors.blue : Colors.grey),
+            ),
       title: Text(
         item.name,
         style: TextStyle(fontWeight: item.isDirectory ? FontWeight.w500 : null),
       ),
       subtitle: !item.isDirectory ? Text(item.humanSize, style: const TextStyle(fontSize: 12, color: Colors.grey)) : null,
-      trailing: item.isEncryptedFile ? const Icon(Icons.lock, size: 16, color: Colors.blue) : null,
+      trailing: item.isEncryptedFile && !selecting
+          ? const Icon(Icons.lock, size: 16, color: Colors.blue)
+          : null,
       onTap: onTap,
+      onLongPress: onLongPress,
     );
   }
 }

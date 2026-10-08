@@ -1,0 +1,6 @@
+# SHA256 Checksums
+
+b14d63ccabf4f51f3fdc8c31f73ca3b937f358805aa48f4e59e2e9284975cac0  weimi_file-v1.0.21-android-arm64.apk
+df44e3d9bb0ff29b26f4944b9a049614245170a6f5311af2bca787c060a66d73  weimi_file-v1.0.21-windows.zip
+f6bfc5c75a792cd19eed29856bb910e1acfb79fe2fa287042e377da9f9ddd29c  weimi_file-v1.0.21-macos.dmg
+bb0551bc9a13d564a2eaf14f58b0c7644728d295b6c6ced12c62215a2aa7bfc0  weimi_file-v1.0.21-linux.tar.gz

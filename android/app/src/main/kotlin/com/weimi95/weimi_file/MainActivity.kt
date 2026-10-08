@@ -31,6 +31,10 @@ class MainActivity : FlutterActivity() {
                     val target = call.argument<String>("path")
                     result.success(if (target != null) deleteTarget(target) else false)
                 }
+                "shareFiles" -> {
+                    val paths = call.argument<List<String>>("paths") ?: emptyList()
+                    result.success(shareFiles(paths))
+                }
                 else -> {
                     result.notImplemented()
                 }
@@ -74,6 +78,41 @@ class MainActivity : FlutterActivity() {
                 val f = File(target)
                 f.exists() && f.delete()
             }
+        } catch (e: Exception) {
+            false
+        }
+    }
+
+    /// 通过系统分享菜单把本地文件分享出去（FileProvider content:// URI）
+    private fun shareFiles(paths: List<String>): Boolean {
+        return try {
+            val uris = ArrayList<Uri>()
+            for (p in paths) {
+                val f = File(p)
+                if (f.exists()) {
+                    uris.add(
+                        androidx.core.content.FileProvider.getUriForFile(
+                            this, "$packageName.fileprovider", f
+                        )
+                    )
+                }
+            }
+            if (uris.isEmpty()) return false
+            val intent: Intent = if (uris.size == 1) {
+                Intent(Intent.ACTION_SEND).apply {
+                    type = "*/*"
+                    putExtra(Intent.EXTRA_STREAM, uris[0])
+                    addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                }
+            } else {
+                Intent(Intent.ACTION_SEND_MULTIPLE).apply {
+                    type = "*/*"
+                    putExtra(Intent.EXTRA_STREAM, uris)
+                    addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                }
+            }
+            startActivity(Intent.createChooser(intent, "分享文件"))
+            true
         } catch (e: Exception) {
             false
         }
