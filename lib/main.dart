@@ -1002,7 +1002,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
               final group = ViewPrefsService.instance.group;
               Widget item(String value, IconData icon, String label,
                   {bool checked = false}) {
-                return PopupMenuItem(
+                return PopupMenuItem<String>(
                   value: value,
                   child: Row(
                     children: [
