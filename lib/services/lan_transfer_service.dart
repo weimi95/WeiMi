@@ -525,7 +525,7 @@ class LanTransferService {
       await req.response.close();
       return;
     }
-    final from = '网页访客(${req.remoteAddress.address})';
+    final from = '网页访客(${req.connectionInfo?.remoteAddress.address ?? "未知"})';
     final name = _safeFileName(req.uri.queryParameters['name'] ?? 'unnamed');
     try {
       final savePath = await _resolveSavePath(name);
@@ -562,7 +562,7 @@ class LanTransferService {
       await req.response.close();
       return;
     }
-    final from = '网页访客(${req.remoteAddress.address})';
+    final from = '网页访客(${req.connectionInfo?.remoteAddress.address ?? "未知"})';
     try {
       final bytes = <int>[];
       await for (final chunk in req) {
@@ -751,7 +751,8 @@ function sendText() {
 </html>''';
   }
 
-  /// 接收文件保存目录：优先「加密文件存放目录」，否则注入的兜底目录  Future<String> _resolveSaveDir() async {
+  /// 接收文件保存目录：优先「加密文件存放目录」，否则注入的兜底目录
+  Future<String> _resolveSaveDir() async {
     final prefs = await SharedPreferences.getInstance();
     final vaultDir = prefs.getString('weimi_vault_dir');
     if (vaultDir != null && vaultDir.isNotEmpty) {
