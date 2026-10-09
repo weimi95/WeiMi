@@ -8,6 +8,7 @@ import '../services/lan_transfer_service.dart';
 import '../services/trusted_devices_service.dart';
 import '../widgets/progress_dialog.dart';
 import 'settings_screen.dart';
+import 'transfer_history_screen.dart';
 
 /// 微密飞传页：同 WiFi 下发现设备、互传文件/文本（对标 Landrop，明文原样收发）
 /// - 发送：选设备 → 选文件/输入文本 → 直传
@@ -27,9 +28,12 @@ class LanTransferScreen extends StatefulWidget {
 class _LanTransferScreenState extends State<LanTransferScreen> {
   final LanTransferService _svc = LanTransferService.instance;
   List<LanPeer> _peers = [];
+  List<WebPeer> _webPeers = [];
   String _ip = '…';
   StreamSubscription<LanEvent>? _sub;
-  bool _autoSendDone = false;
+  // 系统分享直达：待发送内容，等用户选设备，不自动发送
+  String? _pendingText;
+  List<String> _pendingFiles = [];
 
   @override
   void initState() {
@@ -44,6 +48,8 @@ class _LanTransferScreenState extends State<LanTransferScreen> {
       if (!mounted) return;
       if (e.type == LanEventType.peersChanged) {
         setState(() => _peers = _svc.peers);
+      } else if (e.type == LanEventType.webPeersChanged) {
+        setState(() => _webPeers = _svc.webPeers);
       } else if (e.type == LanEventType.incomingDone) {
         ScaffoldMessenger.of(context).showSnackBar(SnackBar(
           content: Text('已接收「${e.name}」（来自 ${e.from}）'),
@@ -72,39 +78,16 @@ class _LanTransferScreenState extends State<LanTransferScreen> {
         _peers = _svc.peers;
       });
     }
-    _autoSendIfNeeded();
-  }
-
-  /// 系统分享直达：等设备出现后自动发送
-  Future<void> _autoSendIfNeeded() async {
-    if (_autoSendDone) return;
-    final hasPayload =
-        (widget.initialText != null && widget.initialText!.isNotEmpty) ||
-            widget.initialFiles.isNotEmpty;
-    if (!hasPayload) return;
-    _autoSendDone = true;
-    // 最多等 15 秒发现设备
-    for (int i = 0; i < 30; i++) {
-      if (!mounted) return;
-      if (_peers.isNotEmpty) break;
-      await Future.delayed(const Duration(milliseconds: 500));
-      // peers 由事件流更新，这里手动同步一次防止事件窗口错过
-      setState(() => _peers = _svc.peers);
-    }
-    if (!mounted) return;
-    if (_peers.isEmpty) {
-      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
-        content: Text('未发现附近设备，可等设备出现后点右下角发送'),
-        duration: Duration(seconds: 5),
-      ));
-      return;
-    }
-    final peer = await _pickPeer();
-    if (peer == null || !mounted) return;
+    // 系统分享直达：挂起待发送内容，等用户手动选设备（不自动发送）
     if (widget.initialText != null && widget.initialText!.isNotEmpty) {
-      await _sendTextTo(peer, widget.initialText!);
+      _pendingText = widget.initialText;
     } else if (widget.initialFiles.isNotEmpty) {
-      await _sendFilesTo(peer, widget.initialFiles);
+      _pendingFiles = widget.initialFiles;
+    }
+    if (mounted) {
+      setState(() {
+        _webPeers = _svc.webPeers;
+      });
     }
   }
 
@@ -356,6 +339,130 @@ class _LanTransferScreenState extends State<LanTransferScreen> {
     }
   }
 
+  /// 分享直达：把挂起的待发送内容发给选定设备，完成后清空
+  Future<void> _sendPendingTo(LanPeer peer) async {
+    if (_pendingText != null && _pendingText!.isNotEmpty) {
+      final text = _pendingText!;
+      await _sendTextTo(peer, text);
+      if (mounted) setState(() => _pendingText = null);
+    } else if (_pendingFiles.isNotEmpty) {
+      final files = List<String>.from(_pendingFiles);
+      await _sendFilesTo(peer, files);
+      if (mounted) setState(() => _pendingFiles = []);
+    }
+  }
+
+  /// 设备点击：有待发内容直接发，否则走选文件流程
+  Future<void> _onDeviceTap(LanPeer d) async {
+    if (_pendingText != null || _pendingFiles.isNotEmpty) {
+      await _sendPendingTo(d);
+    } else {
+      await _startSendFilesTo(d);
+    }
+  }
+
+  // ============ 网页客户端（WS 房间） ============
+
+  /// 点网页客户端：有待发内容直接发，否则选文件发
+  Future<void> _onWebPeerTap(WebPeer w) async {
+    if (_pendingText != null && _pendingText!.isNotEmpty) {
+      final text = _pendingText!;
+      await _sendWebTextTo(w, text);
+      if (mounted) setState(() => _pendingText = null);
+    } else if (_pendingFiles.isNotEmpty) {
+      await _sendWebFiles(w, List<String>.from(_pendingFiles));
+      if (mounted) setState(() => _pendingFiles = []);
+    } else {
+      final result = await FilePicker.platform.pickFiles(
+        type: FileType.any,
+        allowMultiple: true,
+      );
+      if (result == null || result.files.isEmpty || !mounted) return;
+      final files = result.files
+          .where((f) => f.path != null)
+          .map((f) => f.path!)
+          .toList();
+      if (files.isEmpty) return;
+      await _sendWebFiles(w, files);
+    }
+  }
+
+  Future<void> _sendWebFiles(WebPeer w, List<String> files) async {
+    int ok = 0, fail = 0;
+    for (int i = 0; i < files.length; i++) {
+      if (mounted) {
+        if (i == 0) {
+          ProgressDialog.show(context,
+              title: '正在发送',
+              currentProgress: i,
+              totalProgress: files.length,
+              currentFileName: p.basename(files[i]));
+        } else {
+          ProgressDialog.update(context,
+              title: '正在发送',
+              currentProgress: i,
+              totalProgress: files.length,
+              currentFileName: p.basename(files[i]));
+        }
+      }
+      final r = await _svc.sendWebFile(w, files[i]);
+      r ? ok++ : fail++;
+    }
+    if (mounted) {
+      ProgressDialog.hide(context);
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+        content: Text(
+            '发送完成：成功 $ok，失败 $fail（发给网页客户端「${w.name}」）'
+            '${fail > 0 && _svc.lastSendError.isNotEmpty ? '\n${_svc.lastSendError}' : ''}'),
+        backgroundColor: fail == 0 ? Colors.green : Colors.orange,
+      ));
+    }
+  }
+
+  Future<void> _sendWebTextTo(WebPeer w, String text) async {
+    if (mounted) {
+      ProgressDialog.show(context,
+          title: '正在发送文本', currentProgress: 1, totalProgress: 1);
+    }
+    final ok = await _svc.sendWebText(w, text);
+    if (mounted) {
+      ProgressDialog.hide(context);
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+        content: Text(ok
+            ? '文本已发送给网页客户端「${w.name}」'
+            : '发送失败：${_svc.lastSendError}'),
+        backgroundColor: ok ? Colors.green : Colors.red,
+      ));
+    }
+  }
+
+  Future<void> _startSendTextToWeb(WebPeer w) async {
+    final controller = TextEditingController();
+    if (!mounted) return;
+    final text = await showDialog<String>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: Text('发送文本给「${w.name}」'),
+        content: TextField(
+          controller: controller,
+          maxLines: 6,
+          autofocus: true,
+          maxLength: 10000,
+          decoration: const InputDecoration(hintText: '输入要发送的文本内容'),
+        ),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.pop(ctx), child: const Text('取消')),
+          TextButton(
+              onPressed: () => Navigator.pop(ctx, controller.text),
+              child: const Text('发送')),
+        ],
+      ),
+    );
+    if (text == null || text.trim().isEmpty || !mounted) return;
+    await _sendWebTextTo(w, text);
+  }
+
   // ============ 信任设备 ============
 
   Future<void> _toggleTrust(LanPeer d) async {
@@ -430,6 +537,14 @@ class _LanTransferScreenState extends State<LanTransferScreen> {
         title: const Text('微密飞传'),
         actions: [
           IconButton(
+            icon: const Icon(Icons.history),
+            tooltip: '传输记录',
+            onPressed: () {
+              Navigator.push(context,
+                  MaterialPageRoute(builder: (_) => const TransferHistoryScreen()));
+            },
+          ),
+          IconButton(
             icon: const Icon(Icons.settings_outlined),
             tooltip: '设置',
             onPressed: () {
@@ -501,6 +616,41 @@ class _LanTransferScreenState extends State<LanTransferScreen> {
             ),
           ),
           const SizedBox(height: 16),
+          // 分享直达：待发送内容卡
+          if (_pendingText != null || _pendingFiles.isNotEmpty)
+            Container(
+              margin: const EdgeInsets.only(bottom: 16),
+              padding: const EdgeInsets.all(14),
+              decoration: BoxDecoration(
+                color: Colors.amber.withAlpha(30),
+                borderRadius: BorderRadius.circular(12),
+                border: Border.all(color: Colors.amber.withAlpha(90)),
+              ),
+              child: Row(
+                children: [
+                  const Icon(Icons.share_outlined,
+                      size: 20, color: Colors.amber),
+                  const SizedBox(width: 8),
+                  Expanded(
+                    child: Text(
+                      _pendingText != null
+                          ? '待发送文本：${_pendingText!.length > 30 ? '${_pendingText!.substring(0, 30)}…' : _pendingText!}'
+                          : '待发送 ${_pendingFiles.length} 个文件，点击下方设备即发送',
+                      style:
+                          const TextStyle(fontSize: 13, fontWeight: FontWeight.w500),
+                    ),
+                  ),
+                  TextButton(
+                    onPressed: () =>
+                        setState(() {
+                          _pendingText = null;
+                          _pendingFiles = [];
+                        }),
+                    child: const Text('取消'),
+                  ),
+                ],
+              ),
+            ),
           // 网页快传地址卡（Snapdrop 式：浏览器打开即可发文件给本机）
           Container(
             padding: const EdgeInsets.all(14),
@@ -654,11 +804,54 @@ class _LanTransferScreenState extends State<LanTransferScreen> {
                           ])),
                     ],
                   ),
-                  onTap: () => _startSendFilesTo(d),
+                  onTap: () => _onDeviceTap(d),
                 ),
               );
             }),
           const SizedBox(height: 12),
+          // 网页客户端（Snapdrop 式 WS 房间成员，可与本机互发）
+          if (_webPeers.isNotEmpty) ...[
+            Row(
+              children: [
+                Icon(Icons.language, size: 18, color: Colors.grey.shade600),
+                const SizedBox(width: 6),
+                Text(
+                  '网页客户端（${_webPeers.length}）· 浏览器打开上面的快传地址即可加入',
+                  style: TextStyle(
+                    fontSize: 13,
+                    fontWeight: FontWeight.bold,
+                    color: Colors.grey.shade600,
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 8),
+            ..._webPeers.map((w) {
+              return Container(
+                margin: const EdgeInsets.only(bottom: 8),
+                decoration: BoxDecoration(
+                  color: Colors.white,
+                  borderRadius: BorderRadius.circular(12),
+                  border: Border.all(color: Colors.teal.shade300),
+                ),
+                child: ListTile(
+                  leading: const Icon(Icons.language, color: Colors.teal),
+                  title: Text(w.name,
+                      style: const TextStyle(fontWeight: FontWeight.w500)),
+                  subtitle: Text('网页客户端 · ${w.ip}',
+                      style: const TextStyle(fontSize: 12)),
+                  trailing: IconButton(
+                    icon: const Icon(Icons.chat_bubble_outline, size: 20),
+                    tooltip: '发送文本',
+                    onPressed: () => _startSendTextToWeb(w),
+                  ),
+                  onTap: () => _onWebPeerTap(w),
+                ),
+              );
+            }),
+            const SizedBox(height: 4),
+          ],
+          const SizedBox(height: 4),
           Padding(
             padding: const EdgeInsets.symmetric(horizontal: 4),
             child: Text(

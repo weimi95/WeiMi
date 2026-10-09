@@ -74,3 +74,6 @@ librust_crypto.dylib
 .claude
 # WorkBuddy
 .workbuddy
+
+# 本地下载的发布资产不入库
+releases/

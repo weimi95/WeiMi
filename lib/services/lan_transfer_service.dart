@@ -6,6 +6,7 @@ import 'package:flutter/services.dart';
 import 'package:path/path.dart' as p;
 import 'package:shared_preferences/shared_preferences.dart';
 import 'trusted_devices_service.dart';
+import 'transfer_history_service.dart';
 
 /// 微密飞传服务（方案 B：自研轻量协议，对标 Landrop）
 ///
@@ -39,6 +40,8 @@ class LanTransferService {
   static const String _kDeviceIdKey = 'lan_device_id';
   static const String _kDeviceNameKey = 'lan_device_name';
   static const String _kWebShareKey = 'web_share_enabled';
+  /// WS 房间里 App 虚拟设备的固定 id
+  static const String kAppPeerId = 'app';
   static const MethodChannel _fgsChannel =
       MethodChannel('com.weimi95.weimi/transfer');
 
@@ -52,6 +55,13 @@ class LanTransferService {
   bool _discovering = false;
   bool _backgroundMode = false;
   bool _webShareEnabled = true;
+  // Snapdrop 式 WS 房间：浏览器客户端表
+  final Map<String, WebPeer> _webPeers = {};
+  int _webPeerSeq = 0;
+  // 每个 WS 连接当前正在接收的文件状态（file-start 后的 binary 帧流）
+  final Map<WebSocket, _WebInbound> _webInbound = {};
+  // App 正在接收的网页文件（同一时刻只允许一个，避免写盘竞争）
+  _WebInbound? _appInbound;
   int _httpPort = defaultHttpPort;
   Timer? _announceTimer;
   Timer? _pruneTimer;
@@ -81,6 +91,7 @@ class LanTransferService {
   bool get webShareEnabled => _webShareEnabled;
   int get httpPortActual => _httpPort;
   List<LanPeer> get peers => _peers.values.toList();
+  List<WebPeer> get webPeers => _webPeers.values.toList();
 
   /// App 退到后台时置 true（HomePage 生命周期驱动）：
   /// 此时无法弹确认框 —— 信任设备直收、非信任设备拒收。
@@ -337,6 +348,11 @@ class LanTransferService {
         await req.response.close();
         return;
       }
+      // Snapdrop 式 WebSocket 房间
+      if (req.uri.path == '/ws') {
+        await _handleWebSocket(req);
+        return;
+      }
       if (req.method == 'POST' && req.uri.path == '/web/upload') {
         await _guardReceiving(req, _handleWebUpload);
         return;
@@ -447,6 +463,17 @@ class LanTransferService {
       await req.response.close();
       _events.add(LanEvent(LanEventType.incomingDone,
           name: request.fileName, from: request.senderName, path: savePath));
+      await TransferHistoryService.instance.add(TransferRecord(
+        id: '${DateTime.now().microsecondsSinceEpoch}_in',
+        kind: 'file',
+        direction: 'in',
+        name: request.fileName,
+        path: savePath,
+        size: request.fileSize,
+        peerName: request.senderName,
+        time: DateTime.now(),
+        ok: true,
+      ));
     } catch (e) {
       try {
         final f = File(savePath);
@@ -509,6 +536,17 @@ class LanTransferService {
       await req.response.close();
       _events.add(LanEvent(LanEventType.incomingText,
           from: senderName, content: text));
+      await TransferHistoryService.instance.add(TransferRecord(
+        id: '${DateTime.now().microsecondsSinceEpoch}_int',
+        kind: 'text',
+        direction: 'in',
+        name: text,
+        text: text,
+        size: text.length,
+        peerName: senderName,
+        time: DateTime.now(),
+        ok: true,
+      ));
     } catch (e) {
       req.response.statusCode = HttpStatus.internalServerError;
       req.response.write(json.encode({'ok': false, 'error': '$e'}));
@@ -546,12 +584,33 @@ class LanTransferService {
       await req.response.close();
       _events.add(LanEvent(LanEventType.incomingDone,
           name: name, from: from, path: savePath));
+      await TransferHistoryService.instance.add(TransferRecord(
+        id: '${DateTime.now().microsecondsSinceEpoch}_web',
+        kind: 'file',
+        direction: 'in',
+        name: name,
+        path: savePath,
+        size: req.contentLength,
+        peerName: from,
+        time: DateTime.now(),
+        ok: true,
+      ));
     } catch (e) {
       req.response.statusCode = HttpStatus.internalServerError;
       req.response.write(json.encode({'ok': false, 'error': '$e'}));
       await req.response.close();
       _events.add(LanEvent(LanEventType.incomingFailed,
           name: name, from: from, error: '$e'));
+      await TransferHistoryService.instance.add(TransferRecord(
+        id: '${DateTime.now().microsecondsSinceEpoch}_web',
+        kind: 'file',
+        direction: 'in',
+        name: name,
+        size: 0,
+        peerName: from,
+        time: DateTime.now(),
+        ok: false,
+      ));
     }
   }
 
@@ -574,10 +633,369 @@ class LanTransferService {
       req.response.write(json.encode({'ok': true}));
       await req.response.close();
       _events.add(LanEvent(LanEventType.incomingText, from: from, content: text));
+      await TransferHistoryService.instance.add(TransferRecord(
+        id: '${DateTime.now().microsecondsSinceEpoch}_webt',
+        kind: 'text',
+        direction: 'in',
+        name: text,
+        text: text,
+        size: text.length,
+        peerName: from,
+        time: DateTime.now(),
+        ok: true,
+      ));
     } catch (e) {
       req.response.statusCode = HttpStatus.internalServerError;
       req.response.write(json.encode({'ok': false, 'error': '$e'}));
       await req.response.close();
+    }
+  }
+
+  // ============ Snapdrop 式 WebSocket 房间 ============
+  //
+  // 协议（JSON 文本帧 + 裸二进制帧）：
+  //   客户端→服务端: {t:'hello',name} / {t:'rename',name} / {t:'text',to,text}
+  //                 {t:'file-start',to,name,size,fid} + 若干 binary 帧（累计到 size 为止）
+  //   服务端→客户端: {t:'welcome',id,self,peers} / {t:'peers',peers}
+  //                 {t:'text',from,name,text} / {t:'file-start',from,name,size,fid}
+  //                 {t:'file-done',fid} / {t:'file-abort',fid} / {t:'busy',fid}
+  //   to='app' 表示发给本机 App（虚拟设备，直接走现有接收管线）
+
+  Future<void> _handleWebSocket(HttpRequest req) async {
+    if (!_webShareEnabled || !_receiving) {
+      req.response.statusCode = HttpStatus.forbidden;
+      await req.response.close();
+      return;
+    }
+    WebSocket socket;
+    try {
+      socket = await WebSocketTransformer.upgrade(req);
+    } catch (_) {
+      return;
+    }
+    final peerIp = req.connectionInfo?.remoteAddress.address ?? '';
+    WebPeer? peer;
+    socket.listen(
+      (data) {
+        try {
+          if (data is String) {
+            peer = _onWebTextFrame(socket, peer, peerIp, data);
+          } else if (data is List<int>) {
+            _onWebBinaryFrame(peer, data);
+          }
+        } catch (_) {}
+      },
+      onDone: () => _removeWebPeer(peer),
+      onError: (_) => _removeWebPeer(peer),
+      cancelOnError: true,
+    );
+  }
+
+  /// 处理 WS 文本帧，返回（可能新建的）peer
+  WebPeer? _onWebTextFrame(
+      WebSocket socket, WebPeer? peer, String ip, String raw) {
+    final msg = json.decode(raw) as Map<String, dynamic>;
+    final t = msg['t'] as String?;
+
+    if (t == 'hello') {
+      if (peer != null) return peer;
+      final name = _safeFileName((msg['name'] as String?) ?? '').trim();
+      _webPeerSeq++;
+      peer = WebPeer(
+        id: 'w$_webPeerSeq${DateTime.now().millisecondsSinceEpoch % 10000}',
+        name: name.isEmpty ? '匿名设备' : name,
+        socket: socket,
+        ip: ip,
+      );
+      _webPeers[peer.id] = peer;
+      final self = {'id': peer.id, 'name': peer.name};
+      _safeAdd(socket, json.encode({
+        't': 'welcome',
+        'id': peer.id,
+        'self': self,
+        'peers': _roomPeers(exclude: peer.id),
+      }));
+      _broadcastWebPeers();
+      return peer;
+    }
+
+    if (peer == null) return null;
+
+    switch (t) {
+      case 'rename':
+        final name = _safeFileName((msg['name'] as String?) ?? '').trim();
+        if (name.isNotEmpty) {
+          peer!.name = name;
+          _broadcastWebPeers();
+        }
+        break;
+      case 'text':
+        final to = msg['to'] as String?;
+        final text = (msg['text'] as String?) ?? '';
+        if (text.isEmpty) break;
+        if (to == kAppPeerId) {
+          _onAppIncomingText('网页访客(${peer!.name})', text);
+        } else {
+          final target = _webPeers[to];
+          if (target != null) {
+            _safeAdd(target.socket, json.encode({
+              't': 'text', 'from': peer!.id, 'name': peer.name, 'text': text,
+            }));
+          }
+        }
+        break;
+      case 'file-start':
+        final to = msg['to'] as String?;
+        final name = _safeFileName((msg['name'] as String?) ?? 'unnamed');
+        final size = (msg['size'] as num?)?.toInt() ?? 0;
+        final fid = (msg['fid'] as String?) ?? '';
+        final inbound = _WebInbound(
+          fid: fid, name: name, size: size, fromName: peer!.name,
+          from: peer.id, to: to ?? '', received: 0,
+        );
+        if (to == kAppPeerId) {
+          if (_appInbound != null) {
+            _safeAdd(socket, json.encode({'t': 'busy', 'fid': fid}));
+            break;
+          }
+          _startAppInbound(inbound).then((savePath) {
+            if (savePath != null) {
+              _safeAdd(socket, json.encode({'t': 'file-done', 'fid': fid}));
+            } else {
+              _safeAdd(socket, json.encode({'t': 'file-abort', 'fid': fid}));
+            }
+          });
+        } else {
+          final target = _webPeers[to];
+          if (target == null) {
+            _safeAdd(socket, json.encode({'t': 'file-abort', 'fid': fid}));
+            break;
+          }
+          _safeAdd(target.socket, json.encode({
+            't': 'file-start', 'from': peer.id, 'name': name, 'fromName': peer.name,
+            'size': size, 'fid': fid,
+          }));
+          _webInbound[target.socket] = inbound;
+        }
+        // 挂到发送方连接上，后续 binary 帧按此路由
+        _webInbound[socket] = inbound;
+        break;
+      default:
+        break;
+    }
+    return peer;
+  }
+
+  /// 处理 WS 二进制帧（按 file-start 挂的 inbound 状态转发/落盘）
+  void _onWebBinaryFrame(WebPeer? sender, List<int> chunk) {
+    if (sender == null) return;
+    final inbound = _webInbound[sender.socket];
+    if (inbound == null || inbound.aborted) return;
+    inbound.received += chunk.length;
+
+    if (inbound.to == kAppPeerId) {
+      // 写入 App 接收文件
+      final sink = inbound.sink;
+      if (sink != null) {
+        sink.add(chunk);
+        if (inbound.size > 0 && inbound.received >= inbound.size) {
+          inbound.done = true;
+        }
+      }
+    } else {
+      final target = _webPeers[inbound.to];
+      if (target == null) {
+        inbound.aborted = true;
+        _cleanupInbound(inbound);
+        return;
+      }
+      _safeAdd(target.socket, chunk);
+      if (inbound.size > 0 && inbound.received >= inbound.size) {
+        _safeAdd(target.socket,
+            json.encode({'t': 'file-done', 'fid': inbound.fid}));
+        _cleanupInbound(inbound);
+      }
+    }
+  }
+
+  /// App 接收网页文件：开 sink、收齐后关流并走记录/事件。返回落盘路径（失败 null）。
+  Future<String?> _startAppInbound(_WebInbound inbound) async {
+    if (_appInbound != null) return null;
+    _appInbound = inbound;
+    final from = '网页访客(${inbound.fromName})';
+    String? savePath;
+    try {
+      savePath = await _resolveSavePath(inbound.name);
+      final sink = File(savePath).openWrite();
+      inbound.sink = sink;
+      if (inbound.size == 0) inbound.done = true; // 空文件直接完成
+      _events.add(LanEvent(LanEventType.incomingStarted,
+          name: inbound.name, from: from));
+      // 等 binary 帧写满（done 标记由 _onWebBinaryFrame 置位）
+      const tick = Duration(milliseconds: 100);
+      int waited = 0;
+      while (!(inbound.done || inbound.aborted) && waited < 3600 * 1000) {
+        await Future.delayed(tick);
+        waited += 100;
+      }
+      await sink.flush();
+      await sink.close();
+      if (inbound.aborted || !inbound.done) {
+        try {
+          final f = File(savePath);
+          if (await f.exists()) await f.delete();
+        } catch (_) {}
+        return null;
+      }
+      _events.add(LanEvent(LanEventType.incomingDone,
+          name: inbound.name, from: from, path: savePath));
+      await TransferHistoryService.instance.add(TransferRecord(
+        id: '${DateTime.now().microsecondsSinceEpoch}_ws',
+        kind: 'file',
+        direction: 'in',
+        name: inbound.name,
+        path: savePath,
+        size: inbound.size,
+        peerName: from,
+        time: DateTime.now(),
+        ok: true,
+      ));
+      return savePath;
+    } catch (e) {
+      _events.add(LanEvent(LanEventType.incomingFailed,
+          name: inbound.name, from: from, error: '$e'));
+      return null;
+    } finally {
+      _cleanupInbound(inbound);
+      _appInbound = null;
+    }
+  }
+
+  void _cleanupInbound(_WebInbound inbound) {
+    _webInbound.removeWhere((_, v) => v == inbound);
+    if (inbound.sink != null && !inbound.done && !inbound.aborted) {
+      try {
+        inbound.sink!.close();
+      } catch (_) {}
+    }
+  }
+
+  void _onAppIncomingText(String from, String text) {
+    _events.add(LanEvent(LanEventType.incomingText, from: from, content: text));
+    TransferHistoryService.instance.add(TransferRecord(
+      id: '${DateTime.now().microsecondsSinceEpoch}_wst',
+      kind: 'text',
+      direction: 'in',
+      name: text,
+      text: text,
+      size: text.length,
+      peerName: from,
+      time: DateTime.now(),
+      ok: true,
+    ));
+  }
+
+  void _removeWebPeer(WebPeer? peer) {
+    if (peer == null) return;
+    _webPeers.remove(peer.id);
+    _webInbound.remove(peer.socket);
+    try {
+      peer.socket.close();
+    } catch (_) {}
+    _broadcastWebPeers();
+  }
+
+  /// 房间成员列表（含 App 虚拟设备），exclude 排除某个浏览器
+  List<Map<String, String>> _roomPeers({String? exclude}) {
+    final out = <Map<String, String>>[
+      {'id': kAppPeerId, 'name': _selfName},
+    ];
+    for (final w in _webPeers.values) {
+      if (w.id != exclude) out.add({'id': w.id, 'name': w.name});
+    }
+    return out;
+  }
+
+  void _broadcastWebPeers() {
+    final peers = _roomPeers();
+    for (final w in List<WebPeer>.from(_webPeers.values)) {
+      _safeAdd(w.socket, json.encode({'t': 'peers', 'peers': peers}));
+    }
+    _events.add(LanEvent(LanEventType.webPeersChanged));
+  }
+
+  void _safeAdd(WebSocket socket, Object data) {
+    try {
+      if (socket.readyState == WebSocket.open) socket.add(data);
+    } catch (_) {}
+  }
+
+  /// App 发文件给网页客户端（512KB 分块）
+  Future<bool> sendWebFile(WebPeer peer, String filePath,
+      {void Function(int sent, int total)? onProgress}) async {
+    lastSendError = '';
+    try {
+      final f = File(filePath);
+      if (!await f.exists()) {
+        lastSendError = '本地文件不存在: $filePath';
+        return false;
+      }
+      final sendName = p.basename(filePath);
+      final total = await f.length();
+      final fid = 'a${DateTime.now().microsecondsSinceEpoch}';
+      _safeAdd(peer.socket, json.encode({
+        't': 'file-start', 'to': peer.id, 'name': sendName,
+        'size': total, 'fid': fid,
+      }));
+      int sent = 0;
+      await for (final chunk in f.openRead()) {
+        _safeAdd(peer.socket, chunk);
+        sent += chunk.length;
+        if (onProgress != null) onProgress(sent, total);
+      }
+      await peer.socket.flush();
+      _safeAdd(peer.socket, json.encode({'t': 'file-done', 'fid': fid}));
+      await TransferHistoryService.instance.add(TransferRecord(
+        id: '${DateTime.now().microsecondsSinceEpoch}_wsout',
+        kind: 'file',
+        direction: 'out',
+        name: sendName,
+        path: filePath,
+        size: total,
+        peerName: '网页客户端(${peer.name})',
+        time: DateTime.now(),
+        ok: true,
+      ));
+      return true;
+    } catch (e) {
+      lastSendError = '$e';
+      return false;
+    }
+  }
+
+  /// App 发文本给网页客户端
+  Future<bool> sendWebText(WebPeer peer, String text) async {
+    lastSendError = '';
+    try {
+      _safeAdd(peer.socket, json.encode({
+        't': 'text', 'from': kAppPeerId, 'name': _selfName, 'text': text,
+      }));
+      await peer.socket.flush();
+      await TransferHistoryService.instance.add(TransferRecord(
+        id: '${DateTime.now().microsecondsSinceEpoch}_wsot',
+        kind: 'text',
+        direction: 'out',
+        name: text,
+        text: text,
+        size: text.length,
+        peerName: '网页客户端(${peer.name})',
+        time: DateTime.now(),
+        ok: true,
+      ));
+      return true;
+    } catch (e) {
+      lastSendError = '$e';
+      return false;
     }
   }
 
@@ -595,61 +1013,247 @@ class LanTransferService {
   body { font-family:-apple-system,"PingFang SC","Microsoft YaHei",sans-serif;
          background:#f2f5f9; min-height:100vh; display:flex; flex-direction:column; }
   header { background:linear-gradient(135deg,#1e6fd9,#2fa3e8); color:#fff;
-           padding:22px 16px 18px; text-align:center; }
-  header h1 { font-size:20px; font-weight:600; }
-  header p { font-size:12px; opacity:.85; margin-top:4px; }
-  main { flex:1; max-width:520px; width:100%; margin:0 auto; padding:16px; }
-  .drop { background:#fff; border:2px dashed #9db8d6; border-radius:14px;
-          padding:34px 16px; text-align:center; cursor:pointer; transition:.2s; }
-  .drop.on, .drop:hover { border-color:#1e6fd9; background:#f0f7ff; }
-  .drop .ic { font-size:40px; }
-  .drop b { display:block; margin-top:8px; font-size:15px; color:#24405e; }
-  .drop span { display:block; margin-top:4px; font-size:12px; color:#7d90a5; }
-  .card { background:#fff; border-radius:14px; padding:14px; margin-top:14px; }
-  .card h3 { font-size:14px; color:#24405e; margin-bottom:8px; }
-  textarea { width:100%; height:90px; border:1px solid #d5dfeb; border-radius:10px;
+           padding:20px 16px 16px; text-align:center; }
+  header h1 { font-size:19px; font-weight:600; }
+  header p { font-size:12px; opacity:.85; margin-top:3px; }
+  main { flex:1; max-width:640px; width:100%; margin:0 auto; padding:20px 16px; }
+  .ring { display:flex; flex-wrap:wrap; gap:22px; justify-content:center;
+          align-items:center; padding:26px 0; }
+  .dev { width:104px; text-align:center; cursor:pointer; user-select:none; }
+  .dev .bubble { width:86px; height:86px; margin:0 auto; border-radius:50%;
+                 display:flex; align-items:center; justify-content:center;
+                 font-size:30px; font-weight:600; color:#fff;
+                 background:#2fa3e8; transition:.15s;
+                 box-shadow:0 3px 10px rgba(30,111,217,.25); }
+  .dev:hover .bubble { transform:scale(1.06); }
+  .dev.drag .bubble { transform:scale(1.12); background:#1d9e75; }
+  .dev .nm { margin-top:8px; font-size:13px; color:#24405e; word-break:break-all; }
+  .dev.self .bubble { background:#5f6b7a; font-size:24px; }
+  .dev.self { cursor:default; }
+  .empty { text-align:center; color:#7d90a5; font-size:14px; padding:30px 0; }
+  .panel { background:#fff; border-radius:14px; padding:14px; margin-top:10px; }
+  .panel h3 { font-size:14px; color:#24405e; margin-bottom:8px; }
+  textarea { width:100%; height:80px; border:1px solid #d5dfeb; border-radius:10px;
              padding:10px; font-size:14px; resize:vertical; outline:none; }
-  textarea:focus { border-color:#2fa3e8; }
-  .btn { display:inline-block; border:none; border-radius:10px; padding:10px 22px;
+  .btn { display:inline-block; border:none; border-radius:10px; padding:9px 20px;
          font-size:14px; color:#fff; background:#1e6fd9; cursor:pointer; }
-  .btn:disabled { background:#a9c4e4; }
-  .btn.sec { background:#eef4fb; color:#1e6fd9; }
+  .btn.gray { background:#eef4fb; color:#1e6fd9; }
   .row { display:flex; gap:10px; justify-content:flex-end; margin-top:10px; }
-  ul { list-style:none; margin-top:10px; }
-  li { font-size:13px; color:#24405e; padding:8px 10px; border-radius:8px;
+  ul { list-style:none; margin-top:6px; }
+  li { font-size:13px; color:#24405e; padding:9px 11px; border-radius:9px;
        background:#f2f7fd; margin-bottom:6px; word-break:break-all; }
   li .bar { height:4px; background:#d8e6f5; border-radius:2px; margin-top:6px; overflow:hidden; }
   li .bar i { display:block; height:100%; width:0; background:#2fa3e8; transition:width .15s; }
   li.ok { background:#eef9ef; color:#1d7a34; }
   li.err { background:#fdeeee; color:#b23434; }
-  footer { text-align:center; font-size:11px; color:#93a4b8; padding:12px; }
+  .dialog { position:absolute; inset:0; background:rgba(15,35,60,.45);
+            display:flex; align-items:center; justify-content:center; z-index:9; }
+  .dialog .box { background:#fff; border-radius:14px; padding:18px; width:min(90vw,360px); }
+  footer { text-align:center; font-size:11px; color:#93a4b8; padding:10px; }
 </style>
 </head>
 <body>
 <header>
   <h1>微密飞传 · 网页快传</h1>
-  <p>同一 WiFi 下，选择文件或输入文本即可发送到这台设备</p>
+  <p>同一 WiFi 下设备互相发现，点设备或拖文件到设备即可发送</p>
 </header>
 <main>
-  <div class="drop" id="drop" onclick="document.getElementById('file').click()">
-    <div class="ic">📤</div>
-    <b>点按选择文件，或把文件拖到这里</b>
-    <span>支持多选，文件将保存到对方设备的接收目录</span>
-  </div>
-  <input type="file" id="file" multiple hidden>
-  <div class="card">
-    <h3>发送文本</h3>
-    <textarea id="txt" placeholder="输入要发送的文本内容"></textarea>
+  <div class="ring" id="ring"></div>
+  <div class="empty" id="empty">等待其他设备打开此页面…</div>
+  <ul id="list"></ul>
+  <div class="panel" id="sendPanel" hidden>
+    <h3 id="sendTitle">发送</h3>
+    <textarea id="txt" placeholder="输入要发送的文本内容（发文本点下面的按钮）"></textarea>
     <div class="row">
-      <button class="btn" onclick="sendText()">发送文本</button>
+      <button class="btn gray" onclick="closeDialog()">取消</button>
+      <button class="btn gray" onclick="pickFiles()">发送文件</button>
+      <button class="btn" onclick="doSendText()">发送文本</button>
     </div>
   </div>
-  <ul id="list"></ul>
+  <input type="file" id="file" multiple hidden>
 </main>
 <footer>微密文件 · 局域网直传，数据不经外部服务器</footer>
 <script>
+var COLORS = ['白','灰','黑','赤','金','银','蓝','绿'];
+var ANIMALS = ['鲸','狼','狐','鹿','鹰','虎','猫','熊','马','龟'];
+var ws = null, myId = '', peers = [], myName;
+var recvList = {};   // fid -> {name,size,chunks,received,el,bar}
+var targetPeer = null;
+var ring = document.getElementById('ring');
+var empty = document.getElementById('empty');
 var list = document.getElementById('list');
-var drop = document.getElementById('drop');
+
+myName = localStorage.getItem('weimi_web_name');
+if (!myName) {
+  myName = COLORS[Math.floor(Math.random()*COLORS.length)] +
+           ANIMALS[Math.floor(Math.random()*ANIMALS.length)];
+  localStorage.setItem('weimi_web_name', myName);
+}
+
+function connect() {
+  var proto = location.protocol === 'https:' ? 'wss' : 'ws';
+  ws = new WebSocket(proto + '://' + location.host + '/ws');
+  ws.binaryType = 'arraybuffer';
+  ws.onopen = function() { ws.send(JSON.stringify({t:'hello', name:myName})); };
+  ws.onmessage = onMsg;
+  ws.onclose = function() { setTimeout(connect, 3000); };
+}
+connect();
+
+function onMsg(e) {
+  if (e.data instanceof ArrayBuffer) { onBinary(e.data); return; }
+  var m = JSON.parse(e.data);
+  if (m.t === 'welcome') { myId = m.id; render(m.peers); }
+  else if (m.t === 'peers') render(m.peers);
+  else if (m.t === 'text') showText(m);
+  else if (m.t === 'file-start') startRecv(m);
+  else if (m.t === 'file-done') finishRecv(m.fid, true);
+  else if (m.t === 'file-abort' || m.t === 'busy') finishRecv(m.fid, false);
+}
+
+function render(listPeers) {
+  peers = listPeers;
+  ring.innerHTML = '';
+  // 本机（自己）
+  var self = document.createElement('div');
+  self.className = 'dev self';
+  self.innerHTML = '<div class="bubble">' + esc(myName.charAt(0)) + '</div>' +
+                   '<div class="nm">' + esc(myName) + '<br><span style="font-size:11px;color:#93a4b8">点我改名</span></div>';
+  self.onclick = renameSelf;
+  ring.appendChild(self);
+  // 其他设备（含本机 App「微密文件」）
+  peers.forEach(function(p) {
+    var d = document.createElement('div');
+    d.className = 'dev';
+    d.innerHTML = '<div class="bubble">' + esc(p.name.charAt(0)) + '</div>' +
+                  '<div class="nm">' + esc(p.name) + '</div>';
+    d.onclick = function() { openSend(p.id, p.name); };
+    d.ondragover = function(e) { e.preventDefault(); d.classList.add('drag'); };
+    d.ondragleave = function() { d.classList.remove('drag'); };
+    d.ondrop = function(e) {
+      e.preventDefault(); d.classList.remove('drag');
+      if (e.dataTransfer.files.length) sendFiles(p.id, e.dataTransfer.files, p.name);
+    };
+    ring.appendChild(d);
+  });
+  empty.hidden = peers.length > 0;
+}
+
+function esc(s) {
+  return String(s).replace(/[&<>"]/g, function(c) {
+    return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c];
+  });
+}
+
+function renameSelf() {
+  var n = prompt('给自己起个名字', myName);
+  if (n && n.trim()) {
+    myName = n.trim().slice(0, 20);
+    localStorage.setItem('weimi_web_name', myName);
+    ws.send(JSON.stringify({t:'rename', name:myName}));
+    render(peers);
+  }
+}
+
+function openSend(pid, pname) {
+  targetPeer = {id: pid, name: pname};
+  var panel = document.getElementById('sendPanel');
+  document.getElementById('sendTitle').textContent = '发送给「' + pname + '」';
+  document.getElementById('txt').value = '';
+  panel.hidden = false;
+  panel.scrollIntoView({behavior:'smooth'});
+}
+
+function closeDialog() { document.getElementById('sendPanel').hidden = true; }
+
+function doSendText() {
+  var ta = document.getElementById('txt');
+  if (!ta.value.trim() || !targetPeer) return;
+  ws.send(JSON.stringify({t:'text', to:targetPeer.id, text:ta.value}));
+  li('文本已发送给「' + targetPeer.name + '」', 'ok');
+  closeDialog();
+}
+
+document.getElementById('file').addEventListener('change', function() {
+  if (this.files.length && targetPeer) sendFiles(targetPeer.id, this.files, targetPeer.name);
+  this.value = '';
+});
+
+function pickFiles() { document.getElementById('file').click(); }
+
+function sendFiles(pid, files, pname) {
+  var arr = Array.prototype.slice.call(files);
+  (function next() {
+    if (!arr.length) return;
+    sendOne(pid, arr.shift(), pname).then(next);
+  })();
+}
+
+function sendOne(pid, f, pname) {
+  return new Promise(function(resolve) {
+    var el = li('正在发送 ' + f.name + ' → 「' + pname + '」（0%）');
+    var bar = document.createElement('div'); bar.className = 'bar';
+    var inner = document.createElement('i'); bar.appendChild(inner); el.appendChild(bar);
+    var fid = 'f' + Date.now() + Math.floor(Math.random()*1000);
+    var pos = 0, slice = 512 * 1024;
+    ws.send(JSON.stringify({t:'file-start', to:pid, name:f.name, size:f.size, fid:fid}));
+    (function next() {
+      var end = Math.min(pos + slice, f.size);
+      f.slice(pos, end).arrayBuffer().then(function(buf) {
+        ws.send(buf);
+        pos = end;
+        var pct = Math.round(pos / f.size * 100);
+        inner.style.width = pct + '%';
+        el.firstChild.textContent = '正在发送 ' + f.name + ' → 「' + pname + '」（' + pct + '%）';
+        if (pos < f.size) next();
+        else { done(el, '已发送 ' + f.name + ' → 「' + pname + '」', true); resolve(); }
+      });
+    })();
+  });
+}
+
+function startRecv(m) {
+  var el = li('正在接收 ' + m.name + '（来自 ' + (m.fromName || '设备') + '）');
+  var bar = document.createElement('div'); bar.className = 'bar';
+  var inner = document.createElement('i'); bar.appendChild(inner); el.appendChild(bar);
+  recvList[m.fid] = {name:m.name, size:m.size, chunks:[], received:0, el:el, bar:inner};
+}
+
+function onBinary(buf) {
+  for (var fid in recvList) break;
+  var r = recvList[fid];
+  if (!r) return;
+  r.chunks.push(buf);
+  r.received += buf.byteLength;
+  if (r.size > 0) r.bar.style.width = Math.round(r.received / r.size * 100) + '%';
+  r.el.firstChild.textContent = '正在接收 ' + r.name + '（' +
+    Math.round(r.received / r.size * 100) + '%）';
+}
+
+function finishRecv(fid, ok) {
+  var r = recvList[fid];
+  if (!r) return;
+  delete recvList[fid];
+  if (ok) {
+    var blob = new Blob(r.chunks);
+    var a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = r.name;
+    document.body.appendChild(a); a.click(); a.remove();
+    done(r.el, '已接收 ' + r.name + '（已开始下载）', true);
+  } else {
+    done(r.el, '接收失败 ' + r.name, false);
+  }
+}
+
+function showText(m) {
+  var el = li('收到来自「' + (m.name || '设备') + '」的文本，点此查看');
+  el.style.cursor = 'pointer';
+  el.onclick = function() {
+    var v = prompt('来自「' + (m.name || '设备') + '」的文本（可全选复制）', m.text);
+  };
+  el.className = 'ok';
+}
 
 function li(text, cls) {
   var el = document.createElement('li');
@@ -663,88 +1267,6 @@ function done(el, text, ok) {
   el.className = ok ? 'ok' : 'err';
   var bar = el.querySelector('.bar');
   if (bar) bar.remove();
-}
-
-document.getElementById('file').addEventListener('change', function() {
-  uploadAll(this.files);
-  this.value = '';
-});
-
-['dragover','dragenter'].forEach(function(ev){
-  drop.addEventListener(ev, function(e){ e.preventDefault(); drop.classList.add('on'); });
-});
-['dragleave','drop'].forEach(function(ev){
-  drop.addEventListener(ev, function(e){ e.preventDefault(); drop.classList.remove('on'); });
-});
-drop.addEventListener('drop', function(e){
-  if (e.dataTransfer && e.dataTransfer.files.length) uploadAll(e.dataTransfer.files);
-});
-
-function uploadAll(files) {
-  var arr = Array.prototype.slice.call(files);
-  (function next() {
-    if (!arr.length) return;
-    uploadOne(arr.shift()).then(next);
-  })();
-}
-
-function uploadOne(file) {
-  return new Promise(function(resolve) {
-    var el = li('正在发送 ' + file.name + '（0%）');
-    var bar = document.createElement('div');
-    bar.className = 'bar';
-    var inner = document.createElement('i');
-    bar.appendChild(inner);
-    el.appendChild(bar);
-    var xhr = new XMLHttpRequest();
-    xhr.open('POST', '/web/upload?name=' + encodeURIComponent(file.name));
-    xhr.upload.onprogress = function(e) {
-      if (e.lengthComputable) {
-        var pct = Math.round(e.loaded / e.total * 100);
-        inner.style.width = pct + '%';
-        el.firstChild.textContent = '正在发送 ' + file.name + '（' + pct + '%）';
-      }
-    };
-    xhr.onload = function() {
-      if (xhr.status === 200) {
-        done(el, '已发送 ' + file.name, true);
-      } else {
-        done(el, '发送失败 ' + file.name + '（' + xhr.status + '）', false);
-      }
-      resolve();
-    };
-    xhr.onerror = function() {
-      done(el, '发送失败 ' + file.name + '（网络错误）', false);
-      resolve();
-    };
-    xhr.send(file);
-  });
-}
-
-function sendText() {
-  var ta = document.getElementById('txt');
-  var text = ta.value;
-  if (!text.trim()) return;
-  var btns = document.querySelectorAll('.btn');
-  var btn = btns[btns.length - 1];
-  btn.disabled = true;
-  var el = li('正在发送文本…');
-  var xhr = new XMLHttpRequest();
-  xhr.open('POST', '/web/text');
-  xhr.onload = function() {
-    btn.disabled = false;
-    if (xhr.status === 200) {
-      done(el, '文本已发送', true);
-      ta.value = '';
-    } else {
-      done(el, '发送失败（' + xhr.status + '）', false);
-    }
-  };
-  xhr.onerror = function() {
-    btn.disabled = false;
-    done(el, '发送失败（网络错误）', false);
-  };
-  xhr.send(new Blob([text], {type:'text/plain'}));
 }
 </script>
 </body>
@@ -825,10 +1347,32 @@ function sendText() {
             .timeout(const Duration(seconds: 60))
             .join();
         if (resp.statusCode == HttpStatus.ok && body.contains('"ok":true')) {
+          await TransferHistoryService.instance.add(TransferRecord(
+            id: '${DateTime.now().microsecondsSinceEpoch}_out',
+            kind: 'file',
+            direction: 'out',
+            name: sendName,
+            path: filePath,
+            size: total,
+            peerName: peer.name,
+            time: DateTime.now(),
+            ok: true,
+          ));
           return true;
         }
         lastSendError =
             '对方返回 ${resp.statusCode}（403=拒收/防火墙拦截，500=对方写入失败）';
+        await TransferHistoryService.instance.add(TransferRecord(
+          id: '${DateTime.now().microsecondsSinceEpoch}_out',
+          kind: 'file',
+          direction: 'out',
+          name: sendName,
+          path: filePath,
+          size: total,
+          peerName: peer.name,
+          time: DateTime.now(),
+          ok: false,
+        ));
         return false;
       } finally {
         client.close(force: true);
@@ -865,9 +1409,31 @@ function sendText() {
             .timeout(const Duration(seconds: 30))
             .join();
         if (resp.statusCode == HttpStatus.ok && body.contains('"ok":true')) {
+          await TransferHistoryService.instance.add(TransferRecord(
+            id: '${DateTime.now().microsecondsSinceEpoch}_outt',
+            kind: 'text',
+            direction: 'out',
+            name: text,
+            text: text,
+            size: text.length,
+            peerName: peer.name,
+            time: DateTime.now(),
+            ok: true,
+          ));
           return true;
         }
         lastSendError = '对方返回 ${resp.statusCode}（403=对方未信任本机/拒收）';
+        await TransferHistoryService.instance.add(TransferRecord(
+          id: '${DateTime.now().microsecondsSinceEpoch}_outt',
+          kind: 'text',
+          direction: 'out',
+          name: text,
+          text: text,
+          size: text.length,
+          peerName: peer.name,
+          time: DateTime.now(),
+          ok: false,
+        ));
         return false;
       } finally {
         client.close(force: true);
@@ -942,10 +1508,50 @@ class IncomingRequest {
   });
 }
 
+/// WS 房间里的一个浏览器客户端
+class WebPeer {
+  final String id;
+  String name;
+  final WebSocket socket;
+  final String ip;
+
+  WebPeer({
+    required this.id,
+    required this.name,
+    required this.socket,
+    required this.ip,
+  });
+}
+
+/// 一次进行中的 WS 文件传输状态（发送方连接持有；to=app 时同时挂在 _appInbound）
+class _WebInbound {
+  final String fid;
+  final String name;
+  final int size;
+  final String fromName;
+  final String from;
+  final String to;
+  int received;
+  bool done = false;
+  bool aborted = false;
+  IOSink? sink;
+
+  _WebInbound({
+    required this.fid,
+    required this.name,
+    required this.size,
+    required this.fromName,
+    required this.from,
+    required this.to,
+    this.received = 0,
+  });
+}
+
 enum LanEventType {
   receivingStarted,
   receivingStopped,
   peersChanged,
+  webPeersChanged,
   incomingStarted,
   incomingDone,
   incomingFailed,

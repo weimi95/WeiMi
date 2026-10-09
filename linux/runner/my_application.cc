@@ -5,6 +5,8 @@
 #include <gdk/gdkx.h>
 #endif
 
+#include <string.h>
+
 #include "flutter/generated_plugin_registrant.h"
 
 struct _MyApplication {
@@ -74,6 +76,89 @@ static void my_application_activate(GApplication* application) {
   gtk_widget_realize(GTK_WIDGET(view));
 
   fl_register_plugins(FL_PLUGIN_REGISTRY(view));
+
+  // 剪贴板文件通道：提供 x-special/gnome-copied-files 与 text/uri-list 两种 target，
+  // GNOME Files / KDE Dolphin / 大部分文件管理器可直接粘贴
+  static gchar* clip_payload = nullptr;  // "copy\nfile:///p1\nfile:///p2"
+
+  fl_method_channel_set_method_call_handler(
+      fl_method_channel_new(
+          fl_engine_get_binary_messenger(fl_view_get_engine(view)),
+          "com.weimi95.weimi/clipboard_files",
+          FL_METHOD_CODEC(fl_standard_method_codec_get_instance())),
+      [](FlMethodChannel* channel, FlMethodCall* call, gpointer user_data) {
+        (void)channel;
+        (void)user_data;
+        if (strcmp(fl_method_call_get_name(call), "copyFiles") != 0) {
+          g_autoptr(FlMethodResponse) ni =
+              fl_method_not_implemented_response_new();
+          fl_method_call_respond(call, ni, nullptr);
+          return;
+        }
+        FlValue* args = fl_method_call_get_args(call);
+        FlValue* paths_val = fl_value_lookup_string(args, "paths");
+        if (paths_val == nullptr ||
+            fl_value_get_type(paths_val) != FL_VALUE_TYPE_LIST) {
+          g_autoptr(FlMethodResponse) err =
+              fl_method_error_response_new("bad_args", "missing paths", nullptr);
+          fl_method_call_respond(call, err, nullptr);
+          return;
+        }
+        GString* buf = g_string_new("copy");
+        size_t n = fl_value_get_length(paths_val);
+        for (size_t i = 0; i < n; i++) {
+          FlValue* v = fl_value_get_list_value(paths_val, i);
+          if (fl_value_get_type(v) != FL_VALUE_TYPE_STRING) continue;
+          gchar* uri = g_filename_to_uri(fl_value_get_string(v), nullptr, nullptr);
+          if (uri == nullptr) continue;
+          g_string_append_c(buf, '\n');
+          g_string_append(buf, uri);
+          g_free(uri);
+        }
+        if (clip_payload != nullptr) g_free(clip_payload);
+        clip_payload = g_string_free(buf, FALSE);
+
+        static const GtkTargetEntry targets[] = {
+            {(gchar*)"x-special/gnome-copied-files", 0, 0},
+            {(gchar*)"text/uri-list", 0, 1},
+        };
+        GtkClipboard* clipboard =
+            gtk_clipboard_get_default(gdk_display_get_default());
+        gtk_clipboard_set_with_data(
+            clipboard, targets, G_N_ELEMENTS(targets),
+            [](GtkClipboard*, GtkSelectionData* selection_data, guint,
+               gpointer) {
+              const gchar* target_name = gdk_atom_name(
+                  gtk_selection_data_get_target(selection_data));
+              if (target_name == nullptr || clip_payload == nullptr) return;
+              GString* out = g_string_new("");
+              if (strcmp(target_name, "text/uri-list") == 0) {
+                // uri-list：去掉 "copy" 行，换行改 \r\n
+                gchar** lines = g_strsplit(clip_payload, "\n", -1);
+                for (int i = 0; lines[i] != nullptr; i++) {
+                  if (strcmp(lines[i], "copy") == 0) continue;
+                  g_string_append(out, lines[i]);
+                  g_string_append(out, "\r\n");
+                }
+                g_strfreev(lines);
+              } else {
+                g_string_append(out, clip_payload);
+              }
+              gtk_selection_data_set(
+                  selection_data,
+                  gdk_atom_intern(target_name, FALSE), 8,
+                  reinterpret_cast<const guchar*>(out->str),
+                  static_cast<gint>(out->len));
+              g_string_free(out, TRUE);
+            },
+            [](GtkClipboard*, gpointer) {}, nullptr);
+        gtk_clipboard_store(clipboard);
+
+        g_autoptr(FlMethodResponse) resp =
+            fl_method_success_response_new(fl_value_new_bool(TRUE));
+        fl_method_call_respond(call, resp, nullptr);
+      },
+      nullptr, nullptr);
 
   gtk_widget_grab_focus(GTK_WIDGET(view));
 }

@@ -4,6 +4,7 @@
 
 #include "flutter/generated_plugin_registrant.h"
 #include "file_association_plugin.h"
+#include "clipboard_plugin.h"
 
 FlutterWindow::FlutterWindow(const flutter::DartProject& project)
     : project_(project) {}
@@ -31,6 +32,9 @@ bool FlutterWindow::OnCreate() {
   auto plugin_registrar = flutter::PluginRegistrarManager::GetInstance()
       ->GetRegistrar<flutter::PluginRegistrarWindows>(registrar);
   FileAssociationPlugin::RegisterWithRegistrar(plugin_registrar);
+
+  ClipboardPluginRegisterWithRegistrar(
+      flutter_controller_->engine()->GetRegistrarForPlugin("ClipboardPlugin"));
   
   SetChildContent(flutter_controller_->view()->GetNativeWindow());
 
