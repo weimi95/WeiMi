@@ -17,7 +17,8 @@ class LanTransferScreen extends StatefulWidget {
   final String? initialText;
   final List<String> initialFiles;
 
-  const LanTransferScreen({super.key, this.initialText, this.initialFiles});
+  const LanTransferScreen(
+      {super.key, this.initialText, this.initialFiles = const []});
 
   @override
   State<LanTransferScreen> createState() => _LanTransferScreenState();
