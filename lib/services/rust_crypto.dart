@@ -6,7 +6,13 @@ import 'package:path/path.dart' as path;
 
 class RustCrypto {
   static ffi.DynamicLibrary? _lib;
-  
+
+  /// 供其他服务复用动态库（自动加载，已加载直接返回）
+  static ffi.DynamicLibrary ensureLib() {
+    _loadLibrary();
+    return _lib!;
+  }
+
   static void _loadLibrary() {
     if (_lib != null) return;
     

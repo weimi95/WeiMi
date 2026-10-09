@@ -863,3 +863,201 @@ mod tests {
         assert_eq!(decrypted, data);
     }
 }
+
+// ==================== 全盘文件名索引（方案A：多线程遍历 + 内存索引） ====================
+//
+// 设计：
+// - index_build：多线程工作队列遍历目录，把所有「文件」的完整路径存进进程级内存索引。
+//   跳过系统垃圾目录（回收站/卷信息/WindowsApps 等），跳过符号链接防止循环。
+//   上限 300 万条防止内存失控。返回索引条数（负数为错误）。
+// - index_search：文件名不区分大小写子串匹配，返回 \n 连接的路径串（两次调用模式：
+//   先 out_ptr=null 拿长度，再传缓冲区取数据）。阻塞调用，建议放后台线程/isolate。
+
+static INDEX_PATHS: std::sync::Mutex<Option<Vec<String>>> = std::sync::Mutex::new(None);
+
+const INDEX_SKIP_DIRS: &[&str] = &[
+    "$recycle.bin",
+    "system volume information",
+    "windowsapps",
+    "$windows.et",
+    "recovery",
+];
+
+fn index_skip_dir(name: &str) -> bool {
+    let lower = name.to_lowercase();
+    INDEX_SKIP_DIRS.contains(&lower.as_str())
+}
+
+#[no_mangle]
+pub extern "C" fn index_build(roots_ptr: *const *const c_char, num_roots: usize) -> i64 {
+    let mut roots: Vec<std::path::PathBuf> = Vec::new();
+    unsafe {
+        if roots_ptr.is_null() {
+            return -1;
+        }
+        let ptrs = slice::from_raw_parts(roots_ptr, num_roots);
+        for &rp in ptrs {
+            let cs = CStr::from_ptr(rp);
+            let s = cs.to_string_lossy().to_string();
+            if !s.is_empty() && std::path::Path::new(&s).exists() {
+                roots.push(std::path::PathBuf::from(&s));
+            }
+        }
+    }
+    if roots.is_empty() {
+        return -2;
+    }
+
+    let max_entries: usize = 3_000_000;
+    let queue: Arc<std::sync::Mutex<Vec<std::path::PathBuf>>> =
+        Arc::new(std::sync::Mutex::new(roots));
+    let paths: Arc<std::sync::Mutex<Vec<String>>> = Arc::new(std::sync::Mutex::new(Vec::new()));
+    // 正在处理目录的工作线程数（防止「队列空但还有目录要产生」的提前退出）
+    let busy = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let total = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+
+    let workers = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(4);
+    let mut handles = Vec::new();
+    for _ in 0..workers {
+        let queue = queue.clone();
+        let paths = paths.clone();
+        let busy = busy.clone();
+        let total = total.clone();
+        let stop = stop.clone();
+        handles.push(std::thread::spawn(move || {
+            let mut local: Vec<String> = Vec::new();
+            loop {
+                if stop.load(std::sync::atomic::Ordering::Relaxed) {
+                    break;
+                }
+                let dir = {
+                    let mut q = queue.lock().unwrap();
+                    match q.pop() {
+                        Some(d) => {
+                            busy.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                            d
+                        }
+                        None => {
+                            if busy.load(std::sync::atomic::Ordering::Relaxed) == 0 {
+                                stop.store(true, std::sync::atomic::Ordering::Relaxed);
+                                break;
+                            }
+                            drop(q);
+                            std::thread::sleep(std::time::Duration::from_millis(2));
+                            continue;
+                        }
+                    }
+                };
+                if let Ok(rd) = std::fs::read_dir(&dir) {
+                    for e in rd.flatten() {
+                        if stop.load(std::sync::atomic::Ordering::Relaxed) {
+                            break;
+                        }
+                        let name_os = e.file_name();
+                        let name = name_os.to_string_lossy().to_string();
+                        let Ok(ft) = e.file_type() else { continue };
+                        if ft.is_symlink() {
+                            continue;
+                        }
+                        let is_dir = ft.is_dir();
+                        if is_dir {
+                            if index_skip_dir(&name) {
+                                continue;
+                            }
+                            let mut q = queue.lock().unwrap();
+                            q.push(e.path());
+                        } else {
+                            local.push(e.path().to_string_lossy().to_string());
+                            if local.len() >= 4096 {
+                                let n = local.len();
+                                paths.lock().unwrap().extend(local.drain(..));
+                                total.fetch_add(n, std::sync::atomic::Ordering::Relaxed);
+                            }
+                        }
+                    }
+                }
+                busy.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+            }
+            if !local.is_empty() {
+                paths.lock().unwrap().extend(local);
+            }
+        }));
+    }
+    for h in handles {
+        let _ = h.join();
+    }
+
+    let final_paths = paths.lock().unwrap().clone();
+    let n = final_paths.len() as i64;
+    *INDEX_PATHS.lock().unwrap() = Some(final_paths);
+    n
+}
+
+#[no_mangle]
+pub extern "C" fn index_count() -> i64 {
+    match INDEX_PATHS.lock().unwrap().as_ref() {
+        Some(v) => v.len() as i64,
+        None => -1,
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn index_search(
+    query_ptr: *const c_char,
+    limit: usize,
+    out_ptr: *mut u8,
+    out_len: *mut usize,
+) -> i32 {
+    if out_len.is_null() {
+        return -3;
+    }
+    let query = if query_ptr.is_null() {
+        String::new()
+    } else {
+        unsafe { CStr::from_ptr(query_ptr) }
+            .to_string_lossy()
+            .to_lowercase()
+    };
+    let guard = INDEX_PATHS.lock().unwrap();
+    let data = match guard.as_ref() {
+        Some(d) => d,
+        None => return -1,
+    };
+    let mut results: Vec<&String> = Vec::new();
+    for p in data {
+        let bytes = p.as_bytes();
+        // 文件名起点 = 最后一个路径分隔符之后
+        let mut start = 0usize;
+        let mut i = bytes.len();
+        while i > 0 {
+            i -= 1;
+            if bytes[i] == b'/' || bytes[i] == b'\\' {
+                start = i + 1;
+                break;
+            }
+        }
+        let name = &p[start..];
+        if name.to_lowercase().contains(&query) {
+            results.push(p);
+            if results.len() >= limit {
+                break;
+            }
+        }
+    }
+    let joined = results.join("\n");
+    let out = joined.as_bytes();
+    unsafe {
+        if out_ptr.is_null() {
+            *out_len = out.len();
+        } else {
+            let cap = *out_len;
+            let n = out.len().min(cap);
+            std::ptr::copy_nonoverlapping(out.as_ptr(), out_ptr, n);
+            *out_len = n;
+        }
+    }
+    0
+}

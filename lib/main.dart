@@ -248,6 +248,8 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   bool _isDragging = false;
   final GlobalKey<RecentFilesScreenState> _recentKey =
       GlobalKey<RecentFilesScreenState>();
+  final GlobalKey<WeiMiVaultScreenState> _filesKey =
+      GlobalKey<WeiMiVaultScreenState>();
 
   // Helper to get translations
   String t(String key) => widget.localizationService.translate(key);
@@ -1072,7 +1074,19 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
         bodyContent = _buildFilesTab();
     }
 
-    return Scaffold(
+    // 系统返回键：文件页在子目录/多选状态时先内部消化（逐级返回/清选择），
+    // 到根视图才放行退出应用
+    return PopScope(
+      canPop: false,
+      onPopInvokedWithResult: (didPop, result) {
+        if (didPop) return;
+        final handled =
+            _currentTab == 1 && (_filesKey.currentState?.handleSystemBack() ?? false);
+        if (!handled) {
+          SystemNavigator.pop(); // 退出到手机桌面
+        }
+      },
+      child: Scaffold(
       appBar: AppBar(
         title: Text(t('appTitle'),
             style: const TextStyle(fontWeight: FontWeight.bold)),
@@ -1242,6 +1256,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
           ),
         ],
       ),
+      ),
     );
   }
 
@@ -1339,6 +1354,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
 
   Widget _buildFilesTab() {
     return WeiMiVaultScreen(
+      key: _filesKey,
       showSystemDirs: true,
       onEncryptFiles: _handleEncryptFile,
       onDecryptFiles: _handleDecryptFile,

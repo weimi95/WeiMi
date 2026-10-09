@@ -1,10 +1,12 @@
 import 'dart:io';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:file_picker/file_picker.dart';
 import 'package:path/path.dart' as p;
 import 'package:permission_handler/permission_handler.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import '../models/file_item.dart';
+import '../services/disk_index_service.dart';
 import '../services/encryption_service.dart';
 import '../services/file_batch_ops.dart';
 import '../services/file_operations_service.dart';
@@ -38,7 +40,7 @@ class WeiMiVaultScreen extends StatefulWidget {
   });
 
   @override
-  State<WeiMiVaultScreen> createState() => _WeiMiVaultScreenState();
+  State<WeiMiVaultScreen> createState() => WeiMiVaultScreenState();
 }
 
 /// 目录条目（根视图折叠列表里的一项）
@@ -58,7 +60,7 @@ class _DirEntry {
   });
 }
 
-class _WeiMiVaultScreenState extends State<WeiMiVaultScreen> {
+class WeiMiVaultScreenState extends State<WeiMiVaultScreen> {
   static const String _kCustomDirsKey = 'weimi_custom_dirs';
   static const String _kVaultDirKey = 'weimi_vault_dir';
   static const String _kExpandedDirsKey = 'weimi_expanded_dirs';
@@ -87,6 +89,9 @@ class _WeiMiVaultScreenState extends State<WeiMiVaultScreen> {
   // ============ 固定搜索框（根视图与浏览视图共用） ============
   String _fileQuery = '';
   final TextEditingController _fileSearchCtrl = TextEditingController();
+
+  bool get _isDesktop => !Platform.isAndroid && !Platform.isIOS;
+  int _lastSelectIndex = -1; // 浏览视图 Shift 范围选择的锚点
 
   @override
   void initState() {
@@ -394,6 +399,19 @@ class _WeiMiVaultScreenState extends State<WeiMiVaultScreen> {
     }
   }
 
+  /// 系统返回键处理：true = 已内部消化（回到上一级/清除选择），false = 在根视图，允许退出应用
+  bool handleSystemBack() {
+    if (_selectedPaths.isNotEmpty) {
+      _clearSelection();
+      return true;
+    }
+    if (_historyIndex > 0) {
+      _goBack();
+      return true;
+    }
+    return false;
+  }
+
   // ============ 文件操作 ============
 
   Future<void> _openFile(FileItem item) async {
@@ -415,18 +433,7 @@ class _WeiMiVaultScreenState extends State<WeiMiVaultScreen> {
 
     switch (result) {
       case FileAction.view:
-        final isEnc = await EncryptionService.isEncryptedFile(item.fullPath);
-        if (isEnc) {
-          final hint = await EncryptionService.getPasswordHint(item.fullPath);
-          final password = await _showPasswordDialog(hint: hint);
-          if (password != null) {
-            await FileViewerService.openFile(
-              context, item.fullPath, password: password, isEncrypted: true,
-            );
-          }
-        } else {
-          await FileViewerService.openFile(context, item.fullPath);
-        }
+        await _viewFile(item);
         break;
 
       case FileAction.encrypt:
@@ -446,16 +453,37 @@ class _WeiMiVaultScreenState extends State<WeiMiVaultScreen> {
           );
           break;
         }
-        final hint = await EncryptionService.getPasswordHint(item.fullPath);
-        final password = await _showPasswordDialog(hint: hint);
-        if (password == null || !mounted) return;
-        _decryptFile(item.fullPath, password);
+        await _decryptWithDialog(item);
         break;
 
       case FileAction.delete:
         await _deleteFile(item);
         break;
     }
+  }
+
+  /// 内置查看器打开（加密文件先问密码）
+  Future<void> _viewFile(FileItem item) async {
+    final isEnc = await EncryptionService.isEncryptedFile(item.fullPath);
+    if (isEnc) {
+      final hint = await EncryptionService.getPasswordHint(item.fullPath);
+      final password = await _showPasswordDialog(hint: hint);
+      if (password != null) {
+        await FileViewerService.openFile(
+          context, item.fullPath, password: password, isEncrypted: true,
+        );
+      }
+    } else {
+      await FileViewerService.openFile(context, item.fullPath);
+    }
+  }
+
+  /// 问密码后解密单个文件（右键菜单/操作面板共用）
+  Future<void> _decryptWithDialog(FileItem item) async {
+    final hint = await EncryptionService.getPasswordHint(item.fullPath);
+    final password = await _showPasswordDialog(hint: hint);
+    if (password == null || !mounted) return;
+    _decryptFile(item.fullPath, password);
   }
 
   Future<void> _encryptFile(String filePath) async {
@@ -583,6 +611,172 @@ class _WeiMiVaultScreenState extends State<WeiMiVaultScreen> {
 
   void _selectAllVisible(Iterable<String> paths) {
     setState(() => _selectedPaths.addAll(paths));
+  }
+
+  // ============ 桌面端交互（单击选中/双击打开/右键菜单/Ctrl+Shift/Delete） ============
+
+  /// 桌面端单击：Ctrl=加减选，Shift=范围选，普通=单选。文件夹直接进入。
+  void _desktopTap(FileItem item, int index, List<FileItem> scope) {
+    if (item.isDirectory) {
+      _navigateTo(item.fullPath);
+      return;
+    }
+    final ctrl = HardwareKeyboard.instance.isControlPressed;
+    final shift = HardwareKeyboard.instance.isShiftPressed;
+    if (shift && _lastSelectIndex >= 0 && _lastSelectIndex < scope.length) {
+      final a = _lastSelectIndex < index ? _lastSelectIndex : index;
+      final b = _lastSelectIndex < index ? index : _lastSelectIndex;
+      setState(() {
+        for (var i = a; i <= b; i++) {
+          if (!scope[i].isDirectory) _selectedPaths.add(scope[i].fullPath);
+        }
+      });
+      return;
+    }
+    if (ctrl) {
+      _toggleSelect(item.fullPath);
+    } else {
+      setState(() {
+        _selectedPaths.clear();
+        _selectedPaths.add(item.fullPath);
+      });
+    }
+    _lastSelectIndex = index;
+  }
+
+  /// 桌面端双击：文件夹进入，文件走操作面板（查看/加密/解密/删除）
+  void _desktopOpen(FileItem item) {
+    if (item.isDirectory) {
+      _navigateTo(item.fullPath);
+    } else {
+      _openFile(item);
+    }
+  }
+
+  PopupMenuItem<String> _ctxMenuItem(String value, IconData icon, String label,
+      {Color? color}) {
+    return PopupMenuItem<String>(
+      value: value,
+      height: 40,
+      child: Row(children: [
+        Icon(icon, size: 18, color: color ?? Colors.black87),
+        const SizedBox(width: 10),
+        Text(label, style: TextStyle(color: color)),
+      ]),
+    );
+  }
+
+  /// 桌面端右键菜单：右键未选中项时先重置为该项；多选时给批量动作
+  Future<void> _showContextMenu(
+      FileItem item, Offset pos, int index, List<FileItem> scope) async {
+    if (!item.isDirectory && !_selectedPaths.contains(item.fullPath)) {
+      setState(() {
+        _selectedPaths.clear();
+        _selectedPaths.add(item.fullPath);
+      });
+      _lastSelectIndex = index;
+    }
+    final multi = !item.isDirectory && _selectedPaths.length > 1;
+    final List<PopupMenuEntry<String>> entries;
+    if (item.isDirectory) {
+      entries = [_ctxMenuItem('open', Icons.folder_open, '打开')];
+    } else if (multi) {
+      entries = [
+        _ctxMenuItem('share', Icons.share_outlined, '分享所选 (${_selectedPaths.length})'),
+        _ctxMenuItem('move', Icons.drive_file_move_outlined, '移动所选'),
+        _ctxMenuItem('copy', Icons.copy_all_outlined, '复制所选'),
+        _ctxMenuItem('delete', Icons.delete_outline, '删除所选', color: Colors.red),
+      ];
+    } else {
+      entries = [
+        _ctxMenuItem('view', Icons.visibility_outlined, '查看'),
+        if (!item.isEncryptedFile)
+          _ctxMenuItem('encrypt', Icons.lock_outline, '加密'),
+        if (item.isEncryptedFile)
+          _ctxMenuItem('decrypt', Icons.lock_open_outlined, '解密'),
+        const PopupMenuDivider(),
+        _ctxMenuItem('copypath', Icons.content_copy, '复制路径'),
+        _ctxMenuItem('delete', Icons.delete_outline, '删除', color: Colors.red),
+      ];
+    }
+    final action = await showMenu<String>(
+      context: context,
+      position: RelativeRect.fromLTRB(pos.dx, pos.dy, pos.dx + 1, pos.dy + 1),
+      items: entries,
+    );
+    if (action == null || !mounted) return;
+    switch (action) {
+      case 'open':
+        _navigateTo(item.fullPath);
+        break;
+      case 'view':
+        await _viewFile(item);
+        break;
+      case 'encrypt':
+        _encryptFile(item.fullPath);
+        break;
+      case 'decrypt':
+        await _decryptWithDialog(item);
+        break;
+      case 'copypath':
+        await Clipboard.setData(ClipboardData(text: item.fullPath));
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(content: Text('路径已复制'), duration: Duration(seconds: 1)),
+          );
+        }
+        break;
+      case 'share':
+        _shareSelected();
+        break;
+      case 'move':
+        _moveSelected();
+        break;
+      case 'copy':
+        _copySelected();
+        break;
+      case 'delete':
+        _deleteSelected();
+        break;
+    }
+  }
+
+  /// Ctrl+A：全选当前可见文件
+  void _selectAllVisibleFiles() {
+    setState(() {
+      _selectedPaths
+          .addAll([for (final it in _browseItems) if (!it.isDirectory) it.fullPath]);
+    });
+  }
+
+  Future<void> _deleteSelectedFromKeyboard() async {
+    if (_selectedPaths.isEmpty) return;
+    await _deleteSelected();
+  }
+
+  // ============ 全盘搜索（桌面端） ============
+
+  void _openGlobalSearch() {
+    showDialog<String>(
+      context: context,
+      builder: (ctx) => _GlobalSearchDialog(initialQuery: _fileQuery),
+    ).then((path) {
+      if (path == null || !mounted) return;
+      try {
+        if (FileSystemEntity.isDirectorySync(path)) {
+          _navigateTo(path);
+        } else {
+          final stat = FileSystemEntity.statSync(path);
+          _openFile(FileItem(
+            name: p.basename(path),
+            fullPath: path,
+            isDirectory: false,
+            size: stat.size,
+            modified: stat.modified,
+          ));
+        }
+      } catch (_) {}
+    });
   }
 
   /// 操作后统一刷新：浏览视图刷新当前目录，根视图失效展开缓存
@@ -770,16 +964,29 @@ class _WeiMiVaultScreenState extends State<WeiMiVaultScreen> {
             ),
       body: _loading
           ? const Center(child: CircularProgressIndicator())
-          : Column(
-              children: [
-                // 固定顶部搜索框（根视图与浏览视图都显示）
-                if (!_selecting) _buildFileSearchField(),
-                Expanded(
-                  child: isRoot
-                      ? _buildRootView()
-                      : (_items.isEmpty ? _emptyState : _buildFileList()),
+          : Focus(
+              autofocus: true,
+              child: CallbackShortcuts(
+                bindings: _isDesktop
+                    ? {
+                        const SingleActivator(LogicalKeyboardKey.keyA, control: true):
+                            _selectAllVisibleFiles,
+                        const SingleActivator(LogicalKeyboardKey.delete):
+                            _deleteSelectedFromKeyboard,
+                      }
+                    : const {},
+                child: Column(
+                  children: [
+                    // 固定顶部搜索框（根视图与浏览视图都显示）
+                    if (!_selecting) _buildFileSearchField(),
+                    Expanded(
+                      child: isRoot
+                          ? _buildRootView()
+                          : (_items.isEmpty ? _emptyState : _buildFileList()),
+                    ),
+                  ],
                 ),
-              ],
+              ),
             ),
       bottomSheet: _selecting && !_loading
           ? FileSelectionBar(
@@ -810,15 +1017,25 @@ class _WeiMiVaultScreenState extends State<WeiMiVaultScreen> {
         decoration: InputDecoration(
           isDense: true,
           prefixIcon: const Icon(Icons.search, size: 20),
-          suffixIcon: _fileQuery.isEmpty
-              ? null
-              : IconButton(
-                  icon: const Icon(Icons.clear, size: 18),
-                  onPressed: () {
-                    _fileSearchCtrl.clear();
-                    setState(() => _fileQuery = '');
-                  },
+          suffixIcon: Row(mainAxisSize: MainAxisSize.min, children: [
+            if (_isDesktop)
+              Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 4),
+                child: ActionChip(
+                  label: const Text('全盘', style: TextStyle(fontSize: 12)),
+                  visualDensity: VisualDensity.compact,
+                  onPressed: _openGlobalSearch,
                 ),
+              ),
+            if (_fileQuery.isNotEmpty)
+              IconButton(
+                icon: const Icon(Icons.clear, size: 18),
+                onPressed: () {
+                  _fileSearchCtrl.clear();
+                  setState(() => _fileQuery = '');
+                },
+              ),
+          ]),
           hintText: '搜索文件',
           border: OutlineInputBorder(
             borderRadius: BorderRadius.circular(10),
@@ -1207,14 +1424,22 @@ class _WeiMiVaultScreenState extends State<WeiMiVaultScreen> {
         trailing: item.isEncryptedFile && !_selecting
             ? const Icon(Icons.lock, size: 14, color: Colors.blue)
             : null,
-        onTap: () {
-          if (_selecting) {
-            if (selectable) _toggleSelect(item.fullPath);
-          } else {
-            _openFile(item);
-          }
-        },
-        onLongPress: selectable ? () => _toggleSelect(item.fullPath) : null,
+        onTap: _isDesktop
+            ? () => _desktopTap(item, -1, const [])
+            : () {
+                if (_selecting) {
+                  if (selectable) _toggleSelect(item.fullPath);
+                } else {
+                  _openFile(item);
+                }
+              },
+        onDoubleTap: _isDesktop ? () => _desktopOpen(item) : null,
+        onSecondaryTapUp: _isDesktop
+            ? (d) => _showContextMenu(item, d.globalPosition, -1, const [])
+            : null,
+        onLongPress: selectable && !_isDesktop
+            ? () => _toggleSelect(item.fullPath)
+            : null,
       ),
     );
   }
@@ -1273,15 +1498,24 @@ class _WeiMiVaultScreenState extends State<WeiMiVaultScreen> {
                     item: item,
                     selected: selected,
                     selecting: _selecting,
-                    onTap: () {
-                      if (_selecting) {
-                        if (selectable) _toggleSelect(item.fullPath);
-                      } else {
-                        _openFile(item);
-                      }
-                    },
-                    onLongPress:
-                        selectable ? () => _toggleSelect(item.fullPath) : null,
+                    onTap: _isDesktop
+                        ? () => _desktopTap(item, index, items)
+                        : () {
+                            if (_selecting) {
+                              if (selectable) _toggleSelect(item.fullPath);
+                            } else {
+                              _openFile(item);
+                            }
+                          },
+                    onDoubleTap:
+                        _isDesktop ? () => _desktopOpen(item) : null,
+                    onSecondaryTapUp: _isDesktop
+                        ? (d) => _showContextMenu(
+                            item, d.globalPosition, index, items)
+                        : null,
+                    onLongPress: selectable && !_isDesktop
+                        ? () => _toggleSelect(item.fullPath)
+                        : null,
                   );
                 },
               );
@@ -1304,7 +1538,7 @@ class _WeiMiVaultScreenState extends State<WeiMiVaultScreen> {
         childAspectRatio: 0.78,
       ),
       itemCount: items.length,
-      itemBuilder: (context, i) => _buildCard(items[i], null),
+      itemBuilder: (context, i) => _buildCard(items[i], null, index: i, scope: items),
     );
   }
 
@@ -1360,7 +1594,8 @@ class _WeiMiVaultScreenState extends State<WeiMiVaultScreen> {
             for (final it in items)
               Padding(
                 padding: const EdgeInsets.only(bottom: 10),
-                child: _buildCard(it, hs[it] ?? 160),
+                child: _buildCard(it, hs[it] ?? 160,
+                    index: _browseItems.indexOf(it), scope: _browseItems),
               ),
           ],
         ),
@@ -1378,7 +1613,8 @@ class _WeiMiVaultScreenState extends State<WeiMiVaultScreen> {
   }
 
   /// 文件/文件夹卡片（宫格与瀑布流共用）
-  Widget _buildCard(FileItem item, double? thumbHeight) {
+  Widget _buildCard(FileItem item, double? thumbHeight,
+      {int index = -1, List<FileItem> scope = const []}) {
     final selectable = !item.isDirectory;
     final selected = selectable && _selectedPaths.contains(item.fullPath);
 
@@ -1411,14 +1647,22 @@ class _WeiMiVaultScreenState extends State<WeiMiVaultScreen> {
           );
 
     return InkWell(
-      onTap: () {
-        if (_selecting) {
-          if (selectable) _toggleSelect(item.fullPath);
-        } else {
-          _openFile(item);
-        }
-      },
-      onLongPress: selectable ? () => _toggleSelect(item.fullPath) : null,
+      onTap: _isDesktop
+          ? () => _desktopTap(item, index, scope)
+          : () {
+              if (_selecting) {
+                if (selectable) _toggleSelect(item.fullPath);
+              } else {
+                _openFile(item);
+              }
+            },
+      onDoubleTap: _isDesktop ? () => _desktopOpen(item) : null,
+      onSecondaryTapUp: _isDesktop
+          ? (d) => _showContextMenu(item, d.globalPosition, index, scope)
+          : null,
+      onLongPress: selectable && !_isDesktop
+          ? () => _toggleSelect(item.fullPath)
+          : null,
       borderRadius: BorderRadius.circular(10),
       child: Container(
         decoration: BoxDecoration(
@@ -1613,6 +1857,8 @@ class _FileListItem extends StatelessWidget {
   final FileItem item;
   final VoidCallback onTap;
   final VoidCallback? onLongPress;
+  final VoidCallback? onDoubleTap;
+  final GestureTapUpCallback? onSecondaryTapUp;
   final bool selected;
   final bool selecting;
 
@@ -1620,6 +1866,8 @@ class _FileListItem extends StatelessWidget {
     required this.item,
     required this.onTap,
     this.onLongPress,
+    this.onDoubleTap,
+    this.onSecondaryTapUp,
     this.selected = false,
     this.selecting = false,
   });
@@ -1650,6 +1898,202 @@ class _FileListItem extends StatelessWidget {
           : null,
       onTap: onTap,
       onLongPress: onLongPress,
+      onDoubleTap: onDoubleTap,
+      onSecondaryTapUp: onSecondaryTapUp,
+    );
+  }
+}
+
+/// 全盘搜索对话框（桌面端）：文件名子串匹配，返回选中的路径
+class _GlobalSearchDialog extends StatefulWidget {
+  final String initialQuery;
+  const _GlobalSearchDialog({required this.initialQuery});
+
+  @override
+  State<_GlobalSearchDialog> createState() => _GlobalSearchDialogState();
+}
+
+class _GlobalSearchDialogState extends State<_GlobalSearchDialog> {
+  late final TextEditingController _ctrl;
+  List<String> _results = [];
+  bool _busy = false; // 建索引或搜索中
+  String _busyText = '';
+
+  @override
+  void initState() {
+    super.initState();
+    _ctrl = TextEditingController(text: widget.initialQuery);
+  }
+
+  @override
+  void dispose() {
+    _ctrl.dispose();
+    super.dispose();
+  }
+
+  Future<void> _doSearch() async {
+    final q = _ctrl.text.trim();
+    if (q.isEmpty || _busy) return;
+    setState(() {
+      _busy = true;
+      _results = [];
+      _busyText = DiskIndexService.isBuilt ? '搜索中...' : '首次使用，正在建立全盘索引（约 1~2 分钟）...';
+    });
+    try {
+      if (!DiskIndexService.isBuilt) {
+        final n = await DiskIndexService.buildIndex(DiskIndexService.defaultRoots());
+        if (!mounted) return;
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(content: Text('索引完成：$n 个文件')),
+          );
+        }
+      }
+      final r = await DiskIndexService.search(q);
+      if (!mounted) return;
+      setState(() {
+        _results = r;
+        _busy = false;
+      });
+    } catch (e) {
+      if (!mounted) return;
+      setState(() => _busy = false);
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('搜索失败: $e'), backgroundColor: Colors.red),
+      );
+    }
+  }
+
+  Future<void> _rebuildIndex() async {
+    if (_busy) return;
+    setState(() {
+      _busy = true;
+      _results = [];
+      _busyText = '正在重建全盘索引（约 1~2 分钟）...';
+    });
+    try {
+      final n = await DiskIndexService.buildIndex(DiskIndexService.defaultRoots());
+      if (!mounted) return;
+      setState(() => _busy = false);
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('索引完成：$n 个文件')),
+      );
+    } catch (e) {
+      if (!mounted) return;
+      setState(() => _busy = false);
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('建索引失败: $e'), backgroundColor: Colors.red),
+      );
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final count = DiskIndexService.indexedCount;
+    return AlertDialog(
+      titlePadding: const EdgeInsets.fromLTRB(20, 16, 12, 0),
+      contentPadding: const EdgeInsets.fromLTRB(20, 8, 20, 8),
+      title: Row(children: [
+        const Expanded(child: Text('全盘搜索')),
+        if (count != null)
+          IconButton(
+            tooltip: '重建索引',
+            icon: const Icon(Icons.refresh, size: 20),
+            onPressed: _rebuildIndex,
+          ),
+      ]),
+      content: SizedBox(
+        width: 560,
+        height: 420,
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            TextField(
+              controller: _ctrl,
+              autofocus: true,
+              decoration: InputDecoration(
+                isDense: true,
+                prefixIcon: const Icon(Icons.search, size: 20),
+                hintText: '输入文件名关键词，匹配电脑上的所有文件',
+                border: OutlineInputBorder(
+                  borderRadius: BorderRadius.circular(10),
+                ),
+              ),
+              onSubmitted: (_) => _doSearch(),
+            ),
+            const SizedBox(height: 10),
+            Row(children: [
+              FilledButton.icon(
+                onPressed: _busy ? null : _doSearch,
+                icon: const Icon(Icons.search, size: 18),
+                label: const Text('搜索'),
+              ),
+              const SizedBox(width: 10),
+              Expanded(
+                child: Text(
+                  _busy
+                      ? _busyText
+                      : count != null
+                          ? '索引已就绪（$count 个文件）'
+                          : '首次搜索会先建立全盘索引',
+                  style: TextStyle(fontSize: 12, color: Colors.grey.shade600),
+                  overflow: TextOverflow.ellipsis,
+                ),
+              ),
+            ]),
+            if (_busy)
+              const Padding(
+                padding: EdgeInsets.only(top: 12),
+                child: LinearProgressIndicator(),
+              ),
+            const SizedBox(height: 8),
+            Expanded(
+              child: _results.isEmpty && !_busy
+                  ? Center(
+                      child: Text(
+                        _ctrl.text.trim().isEmpty ? '输入关键词开始搜索' : '没有匹配的文件',
+                        style: TextStyle(color: Colors.grey.shade500, fontSize: 13),
+                      ),
+                    )
+                  : Scrollbar(
+                      thumbVisibility: true,
+                      child: ListView.builder(
+                        itemCount: _results.length,
+                        itemBuilder: (ctx, i) {
+                          final path = _results[i];
+                          final isDir = FileSystemEntity.isDirectorySync(path);
+                          final name = path
+                              .split(Platform.isWindows ? '\\' : '/')
+                              .last;
+                          return ListTile(
+                            dense: true,
+                            leading: Icon(
+                              isDir ? Icons.folder : Icons.insert_drive_file,
+                              size: 20,
+                              color: isDir ? Colors.amber.shade700 : Colors.grey,
+                            ),
+                            title: Text(name,
+                                style: const TextStyle(fontSize: 14)),
+                            subtitle: Text(path,
+                                style: const TextStyle(
+                                    fontSize: 11, color: Colors.grey),
+                                maxLines: 1,
+                                overflow: TextOverflow.ellipsis),
+                            onTap: () => Navigator.pop(context, path),
+                          );
+                        },
+                      ),
+                    ),
+            ),
+          ],
+        ),
+      ),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.pop(context),
+          child: const Text('关闭'),
+        ),
+      ],
     );
   }
 }

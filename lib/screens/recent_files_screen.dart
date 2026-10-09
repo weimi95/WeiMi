@@ -2,6 +2,7 @@ import 'dart:convert';
 import 'dart:io';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
 
@@ -127,6 +128,96 @@ class RecentFilesScreenState extends State<RecentFilesScreen> {
     setState(() {
       if (!_selectedPaths.remove(path)) _selectedPaths.add(path);
     });
+  }
+
+  // ============ 桌面端交互 ============
+
+  bool get _isDesktop => !Platform.isAndroid && !Platform.isIOS;
+
+  /// 桌面端单击：Ctrl=加减选，普通=单选（双击打开，右键菜单）
+  void _desktopTapPath(String path) {
+    if (HardwareKeyboard.instance.isControlPressed) {
+      _toggleSelect(path);
+      return;
+    }
+    setState(() {
+      _selectedPaths.clear();
+      _selectedPaths.add(path);
+    });
+  }
+
+  Widget _ctxMenuItem(String value, IconData icon, String label,
+      {Color? color}) {
+    return PopupMenuItem<String>(
+      value: value,
+      height: 40,
+      child: Row(children: [
+        Icon(icon, size: 18, color: color ?? Colors.black87),
+        const SizedBox(width: 10),
+        Text(label, style: TextStyle(color: color)),
+      ]),
+    );
+  }
+
+  Future<void> _showContextMenuAt(RecentFileInfo f, Offset pos) async {
+    if (!_selectedPaths.contains(f.path)) {
+      setState(() {
+        _selectedPaths.clear();
+        _selectedPaths.add(f.path);
+      });
+    }
+    final multi = _selectedPaths.length > 1;
+    final List<PopupMenuEntry<String>> entries;
+    if (multi) {
+      entries = [
+        _ctxMenuItem('open', Icons.open_in_new, '打开所选第一个'),
+        _ctxMenuItem('share', Icons.share_outlined, '分享所选 (${_selectedPaths.length})'),
+        _ctxMenuItem('move', Icons.drive_file_move_outlined, '移动所选'),
+        _ctxMenuItem('copy', Icons.copy_all_outlined, '复制所选'),
+        _ctxMenuItem('delete', Icons.delete_outline, '删除所选', color: Colors.red),
+      ];
+    } else {
+      entries = [
+        _ctxMenuItem('open', Icons.open_in_new, '打开'),
+        _ctxMenuItem('share', Icons.share_outlined, '分享'),
+        _ctxMenuItem('move', Icons.drive_file_move_outlined, '移动'),
+        _ctxMenuItem('copypath', Icons.content_copy, '复制路径'),
+        _ctxMenuItem('delete', Icons.delete_outline, '删除', color: Colors.red),
+      ];
+    }
+    final action = await showMenu<String>(
+      context: context,
+      position: RelativeRect.fromLTRB(pos.dx, pos.dy, pos.dx + 1, pos.dy + 1),
+      items: entries,
+    );
+    if (action == null || !mounted) return;
+    switch (action) {
+      case 'open':
+        widget.onOpenFile(f.path);
+        break;
+      case 'share':
+        FileBatchOps.share(context, _selectedPaths.toList());
+        break;
+      case 'move':
+        FileBatchOps.moveTo(context, _selectedPaths.toList(),
+            afterChange: () => _afterChange(_selectedPaths));
+        break;
+      case 'copy':
+        FileBatchOps.copyTo(context, _selectedPaths.toList());
+        break;
+      case 'delete':
+        FileBatchOps.delete(context, _selectedPaths.toList(),
+            afterChange: () => _afterChange(_selectedPaths));
+        break;
+      case 'copypath':
+        await Clipboard.setData(ClipboardData(text: f.path));
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(content: Text('路径已复制'), duration: Duration(seconds: 1)),
+          );
+        }
+        break;
+    }
   }
 
   Future<void> _afterChange(Iterable<String> touched) async {
@@ -345,14 +436,20 @@ class RecentFilesScreenState extends State<RecentFilesScreen> {
     final dirPath = f.path.substring(0, f.path.length - f.name.length - 1);
     final selected = _selectedPaths.contains(f.path);
     return InkWell(
-      onTap: () {
-        if (_selecting) {
-          _toggleSelect(f.path);
-        } else {
-          widget.onOpenFile(f.path);
-        }
-      },
-      onLongPress: () => _toggleSelect(f.path),
+      onTap: _isDesktop
+          ? () => _desktopTapPath(f.path)
+          : () {
+              if (_selecting) {
+                _toggleSelect(f.path);
+              } else {
+                widget.onOpenFile(f.path);
+              }
+            },
+      onDoubleTap: _isDesktop ? () => widget.onOpenFile(f.path) : null,
+      onSecondaryTapUp: _isDesktop
+          ? (d) => _showContextMenuAt(f, d.globalPosition)
+          : null,
+      onLongPress: _isDesktop ? null : () => _toggleSelect(f.path),
       child: Padding(
         padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
         child: Row(
@@ -426,14 +523,20 @@ class RecentFilesScreenState extends State<RecentFilesScreen> {
   Widget _buildGridCard(RecentFileInfo f) {
     final selected = _selectedPaths.contains(f.path);
     return InkWell(
-      onTap: () {
-        if (_selecting) {
-          _toggleSelect(f.path);
-        } else {
-          widget.onOpenFile(f.path);
-        }
-      },
-      onLongPress: () => _toggleSelect(f.path),
+      onTap: _isDesktop
+          ? () => _desktopTapPath(f.path)
+          : () {
+              if (_selecting) {
+                _toggleSelect(f.path);
+              } else {
+                widget.onOpenFile(f.path);
+              }
+            },
+      onDoubleTap: _isDesktop ? () => widget.onOpenFile(f.path) : null,
+      onSecondaryTapUp: _isDesktop
+          ? (d) => _showContextMenuAt(f, d.globalPosition)
+          : null,
+      onLongPress: _isDesktop ? null : () => _toggleSelect(f.path),
       borderRadius: BorderRadius.circular(10),
       child: Container(
         decoration: BoxDecoration(
@@ -481,14 +584,20 @@ class RecentFilesScreenState extends State<RecentFilesScreen> {
   Widget _buildWaterfallCard(RecentFileInfo f, double thumbHeight) {
     final selected = _selectedPaths.contains(f.path);
     return InkWell(
-      onTap: () {
-        if (_selecting) {
-          _toggleSelect(f.path);
-        } else {
-          widget.onOpenFile(f.path);
-        }
-      },
-      onLongPress: () => _toggleSelect(f.path),
+      onTap: _isDesktop
+          ? () => _desktopTapPath(f.path)
+          : () {
+              if (_selecting) {
+                _toggleSelect(f.path);
+              } else {
+                widget.onOpenFile(f.path);
+              }
+            },
+      onDoubleTap: _isDesktop ? () => widget.onOpenFile(f.path) : null,
+      onSecondaryTapUp: _isDesktop
+          ? (d) => _showContextMenuAt(f, d.globalPosition)
+          : null,
+      onLongPress: _isDesktop ? null : () => _toggleSelect(f.path),
       borderRadius: BorderRadius.circular(10),
       child: Container(
         decoration: BoxDecoration(
