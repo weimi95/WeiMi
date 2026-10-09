@@ -1,32 +1,39 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
+import 'package:flutter/foundation.dart';
+import 'package:flutter/services.dart';
 import 'package:path/path.dart' as p;
 import 'package:shared_preferences/shared_preferences.dart';
+import 'trusted_devices_service.dart';
 
-/// 局域网传输服务（方案 B：自研轻量协议，对标 Landrop）
+/// 微密飞传服务（方案 B：自研轻量协议，对标 Landrop）
 ///
 /// - 发现：UDP 广播（端口 52346），JSON 消息，announce 广播 / reply 单播应答
-/// - 传输：HTTP POST 直传（端口 52345），明文原样收发，无加密环节
+/// - 传输：HTTP POST 直传（端口 52345 起，被占用自动 +1），明文原样收发
 /// - 纯 Dart 实现（dart:io 的 RawDatagramSocket / HttpServer / HttpClient），
 ///   无平台通道、无新增第三方依赖，Android / Windows / macOS / Linux 全平台可用
+/// - Android 后台保活：接收开启时拉起前台服务（WeiMiTransferService）
 ///
 /// UDP JSON 协议：
 ///   {"app":"weimi","action":"announce"|"reply","id":设备ID,"name":设备名,
-///    "httpPort":52345,"v":1}
+///    "httpPort":实际HTTP端口,"v":1}
 ///
 /// HTTP 协议：
-///   POST /weimi/send
-///   Header: X-Weimi-App / X-Sender-Id / X-Sender-Name(URL编码) / X-File-Name(URL编码) /
-///           X-File-Size
-///   Body: 文件字节流
-///   Response: 200 {"ok":true,"path":"..."} / 403 拒收 / 500 失败
+///   POST /weimi/send   文件
+///   POST /weimi/text   文本（UTF-8）
+///   Header: X-Weimi-App / X-Sender-Id / X-Sender-Name(URL编码) /
+///           X-File-Name(URL编码) / X-File-Size | X-Text-Length
+///   Response: 200 {"ok":true,...} / 403 拒收 / 500 失败
 class LanTransferService {
   static const int discoveryPort = 52346;
-  static const int httpPort = 52345;
+  static const int defaultHttpPort = 52345;
+  static const int maxHttpPort = defaultHttpPort + 20;
   static const String _magic = 'weimi';
   static const String _kDeviceIdKey = 'lan_device_id';
   static const String _kDeviceNameKey = 'lan_device_name';
+  static const MethodChannel _fgsChannel =
+      MethodChannel('com.weimi95.weimi/transfer');
 
   // ============ 身份 ============
   String _identityId = '';
@@ -36,6 +43,8 @@ class LanTransferService {
   final Map<String, LanPeer> _peers = {}; // key: deviceId
   bool _receiving = false;
   bool _discovering = false;
+  bool _backgroundMode = false;
+  int _httpPort = defaultHttpPort;
   Timer? _announceTimer;
   Timer? _pruneTimer;
   RawDatagramSocket? _udpSocket;
@@ -48,7 +57,8 @@ class LanTransferService {
       StreamController<LanEvent>.broadcast();
   Stream<LanEvent> get events => _events.stream;
 
-  /// 收到传入文件请求时的确认回调（UI 弹窗），返回 true 才接收
+  /// 收到传入请求时的确认回调（UI 弹窗），返回 true 才接收。
+  /// 仅前台且对方未信任时调用；信任设备与后台模式不经过此回调。
   Future<bool> Function(IncomingRequest request)? confirmHandler;
 
   /// 最近一次发送失败的错误详情（诊断用）
@@ -59,10 +69,17 @@ class LanTransferService {
 
   String get selfName => _selfName;
   bool get isReceiving => _receiving;
+  bool get backgroundMode => _backgroundMode;
+  int get httpPortActual => _httpPort;
   List<LanPeer> get peers => _peers.values.toList();
+
+  /// App 退到后台时置 true（HomePage 生命周期驱动）：
+  /// 此时无法弹确认框 —— 信任设备直收、非信任设备拒收。
+  set backgroundMode(bool v) => _backgroundMode = v;
 
   Future<void> _ensureIdentity() async {
     if (_identityId.isNotEmpty) return;
+    await TrustedDevices.instance.load();
     final prefs = await SharedPreferences.getInstance();
     String? id = prefs.getString(_kDeviceIdKey);
     if (id == null || id.isEmpty) {
@@ -124,7 +141,7 @@ class LanTransferService {
 
   // ============ 接收端 ============
 
-  /// 开启接收（UDP 应答 + HTTP 服务器）。重复调用幂等。
+  /// 开启接收（UDP 应答 + HTTP 服务器 + Android 前台服务）。重复调用幂等。
   Future<void> startReceiving() async {
     if (_receiving) return;
     await _ensureIdentity();
@@ -141,10 +158,7 @@ class LanTransferService {
     }
 
     if (_httpServer == null) {
-      final server =
-          await HttpServer.bind(InternetAddress.anyIPv4, httpPort, shared: true);
-      server.listen(_onHttpRequest, onError: (_) {});
-      _httpServer = server;
+      await _bindHttpServer();
     }
 
     _receiving = true;
@@ -152,6 +166,47 @@ class LanTransferService {
     _announceTimer =
         Timer.periodic(const Duration(seconds: 2), (_) => _broadcastAnnounce());
     _events.add(LanEvent(LanEventType.receivingStarted));
+    _startAndroidForeground();
+  }
+
+  /// HTTP 端口被占用时自动 +1（最多试到 52365），announce 带实际端口
+  Future<void> _bindHttpServer() async {
+    SocketException? lastErr;
+    for (int port = defaultHttpPort; port <= maxHttpPort; port++) {
+      try {
+        _httpServer = await HttpServer.bind(
+            InternetAddress.anyIPv4, port,
+            shared: true);
+        _httpPort = port;
+        if (port != defaultHttpPort) {
+          debugPrint('微密飞传：端口 $defaultHttpPort 被占用，改用 $port');
+        }
+        _httpServer!.listen(_onHttpRequest, onError: (_) {});
+        return;
+      } on SocketException catch (e) {
+        lastErr = e;
+      }
+    }
+    throw lastErr ?? SocketException('无可用的 HTTP 端口（52345-52365）');
+  }
+
+  /// Android 前台服务（后台保活）。失败不阻塞接收。
+  Future<void> _startAndroidForeground() async {
+    if (!Platform.isAndroid) return;
+    try {
+      await _fgsChannel.invokeMethod('startForeground');
+    } catch (e) {
+      debugPrint('startForeground failed: $e');
+    }
+  }
+
+  Future<void> _stopAndroidForeground() async {
+    if (!Platform.isAndroid) return;
+    try {
+      await _fgsChannel.invokeMethod('stopForeground');
+    } catch (e) {
+      debugPrint('stopForeground failed: $e');
+    }
   }
 
   /// 停止接收（不再广播自己；UDP/HTTP 端口保留以便后续快速重开）
@@ -161,6 +216,7 @@ class LanTransferService {
     _announceTimer?.cancel();
     _announceTimer = null;
     _events.add(LanEvent(LanEventType.receivingStopped));
+    _stopAndroidForeground();
   }
 
   void _onUdpDatagram(RawSocketEvent ev) {
@@ -176,7 +232,8 @@ class LanTransferService {
         id: msg['id'] as String,
         name: (msg['name'] as String?) ?? '未知设备',
         ip: dg.address.address,
-        httpPort: (msg['httpPort'] as int?) ?? httpPort,
+        httpPort: (msg['httpPort'] as int?) ?? defaultHttpPort,
+        trusted: TrustedDevices.instance.isTrustedSync(msg['id'] as String),
         lastSeen: DateTime.now(),
       );
       _addOrUpdatePeer(peer);
@@ -195,7 +252,7 @@ class LanTransferService {
       'action': 'reply',
       'id': _identityId,
       'name': _selfName,
-      'httpPort': httpPort,
+      'httpPort': _httpPort,
       'v': 1,
     }));
     try {
@@ -211,7 +268,7 @@ class LanTransferService {
       'action': 'announce',
       'id': _identityId,
       'name': _selfName,
-      'httpPort': httpPort,
+      'httpPort': _httpPort,
       'v': 1,
     }));
     // 对每个本机网段的定向广播都发一遍，多网卡/虚拟网卡环境也能被同网段设备发现
@@ -254,6 +311,10 @@ class LanTransferService {
         await _handleIncomingFile(req);
         return;
       }
+      if (req.method == 'POST' && req.uri.path == '/weimi/text') {
+        await _handleIncomingText(req);
+        return;
+      }
       req.response.statusCode = HttpStatus.notFound;
       await req.response.close();
     } catch (e) {
@@ -265,40 +326,54 @@ class LanTransferService {
     }
   }
 
-  Future<void> _handleIncomingFile(HttpRequest req) async {
-    String h(String name) {
-      final v = req.headers.value(name) ?? '';
-      if (v.isEmpty) return v;
-      try {
-        return Uri.decodeComponent(v);
-      } catch (_) {
-        return v;
-      }
+  String _header(HttpRequest req, String name) {
+    final v = req.headers.value(name) ?? '';
+    if (v.isEmpty) return v;
+    try {
+      return Uri.decodeComponent(v);
+    } catch (_) {
+      return v;
     }
-    if (h('X-Weimi-App') != _magic) {
+  }
+
+  /// 接收决策：信任设备免确认直收；后台模式无法弹窗（非信任拒收）；
+  /// 前台未信任走 confirmHandler 弹窗；无 UI 可弹时拒收。
+  Future<bool> _decideAccept(
+      {required String senderId,
+      required Future<bool> Function() ask}) async {
+    if (TrustedDevices.instance.isTrustedSync(senderId)) return true;
+    if (_backgroundMode) return false;
+    return ask();
+  }
+
+  Future<void> _handleIncomingFile(HttpRequest req) async {
+    if (_header(req, 'X-Weimi-App') != _magic) {
       req.response.statusCode = HttpStatus.forbidden;
       await req.response.close();
       return;
     }
 
     final request = IncomingRequest(
-      senderId: h('X-Sender-Id'),
-      senderName: h('X-Sender-Name').isEmpty ? '未知设备' : h('X-Sender-Name'),
+      senderId: _header(req, 'X-Sender-Id'),
+      senderName:
+          _header(req, 'X-Sender-Name').isEmpty ? '未知设备' : _header(req, 'X-Sender-Name'),
       fileName:
-          _safeFileName(h('X-File-Name').isEmpty ? 'unnamed' : h('X-File-Name')),
-      fileSize: int.tryParse(h('X-File-Size')) ?? 0,
+          _safeFileName(_header(req, 'X-File-Name').isEmpty ? 'unnamed' : _header(req, 'X-File-Name')),
+      fileSize: int.tryParse(_header(req, 'X-File-Size')) ?? 0,
     );
 
-    bool accepted = true;
-    if (confirmHandler != null) {
-      accepted = await confirmHandler!(request);
-    }
+    final accepted = await _decideAccept(
+      senderId: request.senderId,
+      ask: () => handlerAsk(request),
+    );
     if (!accepted) {
       req.response.statusCode = HttpStatus.forbidden;
       req.response.write(json.encode({'ok': false, 'error': 'rejected'}));
       await req.response.close();
       _events.add(LanEvent(LanEventType.incomingRejected,
-          name: request.fileName, from: request.senderName));
+          name: request.fileName,
+          from: request.senderName,
+          trusted: TrustedDevices.instance.isTrustedSync(request.senderId)));
       return;
     }
 
@@ -332,6 +407,62 @@ class LanTransferService {
       await req.response.close();
       _events.add(LanEvent(LanEventType.incomingFailed,
           name: request.fileName, from: request.senderName, error: '$e'));
+    }
+  }
+
+  /// 走 UI 确认弹窗（仅前台未信任设备）
+  Future<bool> handlerAsk(IncomingRequest request) async {
+    final handler = confirmHandler;
+    if (handler == null) return false;
+    return handler(request);
+  }
+
+  Future<void> _handleIncomingText(HttpRequest req) async {
+    if (_header(req, 'X-Weimi-App') != _magic) {
+      req.response.statusCode = HttpStatus.forbidden;
+      await req.response.close();
+      return;
+    }
+    final senderId = _header(req, 'X-Sender-Id');
+    final senderName = _header(req, 'X-Sender-Name').isEmpty
+        ? '未知设备'
+        : _header(req, 'X-Sender-Name');
+
+    final accepted = await _decideAccept(
+      senderId: senderId,
+      ask: () async {
+        final handler = confirmHandler;
+        if (handler == null) return false;
+        return handler(IncomingRequest(
+          senderId: senderId,
+          senderName: senderName,
+          fileName: '一条文本消息',
+          fileSize: req.contentLength,
+        ));
+      },
+    );
+    if (!accepted) {
+      req.response.statusCode = HttpStatus.forbidden;
+      req.response.write(json.encode({'ok': false, 'error': 'rejected'}));
+      await req.response.close();
+      return;
+    }
+
+    try {
+      final bytes = <int>[];
+      await for (final chunk in req) {
+        bytes.addAll(chunk);
+      }
+      final text = utf8.decode(bytes, allowMalformed: true);
+      req.response.statusCode = HttpStatus.ok;
+      req.response.write(json.encode({'ok': true}));
+      await req.response.close();
+      _events.add(LanEvent(LanEventType.incomingText,
+          from: senderName, content: text));
+    } catch (e) {
+      req.response.statusCode = HttpStatus.internalServerError;
+      req.response.write(json.encode({'ok': false, 'error': '$e'}));
+      await req.response.close();
     }
   }
 
@@ -423,6 +554,45 @@ class LanTransferService {
     }
   }
 
+  /// 发送一段文本（UTF-8）。
+  Future<bool> sendText({
+    required LanPeer peer,
+    required String text,
+  }) async {
+    lastSendError = '';
+    try {
+      final bytes = utf8.encode(text);
+      final client = HttpClient();
+      client.connectionTimeout = const Duration(seconds: 10);
+      try {
+        final req = await client
+            .postUrl(Uri.parse('http://${peer.ip}:${peer.httpPort}/weimi/text'));
+        req.headers.set('X-Weimi-App', _magic);
+        req.headers.set('X-Sender-Id', _identityId);
+        req.headers.set('X-Sender-Name', Uri.encodeComponent(_selfName));
+        req.headers.set('X-Text-Length', '${bytes.length}');
+        req.headers.contentLength = bytes.length;
+        req.add(bytes);
+        await req.flush();
+        final resp = await req.close();
+        final body = await resp
+            .transform(utf8.decoder)
+            .timeout(const Duration(seconds: 30))
+            .join();
+        if (resp.statusCode == HttpStatus.ok && body.contains('"ok":true')) {
+          return true;
+        }
+        lastSendError = '对方返回 ${resp.statusCode}（403=对方未信任本机/拒收）';
+        return false;
+      } finally {
+        client.close(force: true);
+      }
+    } catch (e) {
+      lastSendError = '$e';
+      return false;
+    }
+  }
+
   // ============ 发现 ============
 
   /// 开始扫描（打开传输页时调用）：开启接收并立即广播一轮 announce
@@ -451,6 +621,7 @@ class LanPeer {
   final String name;
   final String ip;
   final int httpPort;
+  final bool trusted;
   DateTime lastSeen;
 
   LanPeer({
@@ -458,8 +629,18 @@ class LanPeer {
     required this.name,
     required this.ip,
     required this.httpPort,
+    this.trusted = false,
     required this.lastSeen,
   });
+
+  LanPeer copyWith({bool? trusted}) => LanPeer(
+        id: id,
+        name: name,
+        ip: ip,
+        httpPort: httpPort,
+        trusted: trusted ?? this.trusted,
+        lastSeen: lastSeen,
+      );
 }
 
 class IncomingRequest {
@@ -484,6 +665,7 @@ enum LanEventType {
   incomingDone,
   incomingFailed,
   incomingRejected,
+  incomingText,
 }
 
 class LanEvent {
@@ -492,6 +674,9 @@ class LanEvent {
   final String? from;
   final String? path;
   final String? error;
+  final String? content;
+  final bool trusted;
 
-  LanEvent(this.type, {this.name, this.from, this.path, this.error});
+  LanEvent(this.type,
+      {this.name, this.from, this.path, this.error, this.content, this.trusted = false});
 }

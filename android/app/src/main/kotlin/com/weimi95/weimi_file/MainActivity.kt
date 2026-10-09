@@ -15,7 +15,12 @@ import java.io.FileOutputStream
 class MainActivity : FlutterActivity() {
     private val CHANNEL = "com.weimi95.weimi/file_association"
     private val VIDEO_THUMB_CHANNEL = "com.weimi95.weimi/video_thumb"
+    private val SHARE_CHANNEL = "com.weimi95.weimi/share"
+    private val TRANSFER_CHANNEL = "com.weimi95.weimi/transfer"
     private var initialFilePath: String? = null
+    private var sharedText: String? = null
+    private val sharedPaths: MutableList<String> = mutableListOf()
+    private var shareChannel: MethodChannel? = null
 
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
@@ -56,6 +61,54 @@ class MainActivity : FlutterActivity() {
                     else -> result.notImplemented()
                 }
             }
+
+        // 系统分享接收（任意 App 分享 → 微密文件 → 飞传页直接发送）
+        shareChannel = MethodChannel(flutterEngine.dartExecutor.binaryMessenger, SHARE_CHANNEL).also {
+            it.setMethodCallHandler { call, result ->
+                when (call.method) {
+                    "getInitialShare" -> result.success(sharePayload())
+                    else -> result.notImplemented()
+                }
+            }
+        }
+
+        // 微密飞传 Android 前台服务（后台保活）
+        MethodChannel(flutterEngine.dartExecutor.binaryMessenger, TRANSFER_CHANNEL)
+            .setMethodCallHandler { call, result ->
+                when (call.method) {
+                    "startForeground" -> {
+                        if (Build.VERSION.SDK_INT >= 33 &&
+                            checkSelfPermission(android.Manifest.permission.POST_NOTIFICATIONS) !=
+                            android.content.pm.PackageManager.PERMISSION_GRANTED
+                        ) {
+                            requestPermissions(arrayOf(android.Manifest.permission.POST_NOTIFICATIONS), 1001)
+                        }
+                        try {
+                            androidx.core.content.ContextCompat.startForegroundService(
+                                this, Intent(this, WeiMiTransferService::class.java)
+                            )
+                            result.success(true)
+                        } catch (e: Exception) {
+                            result.success(false)
+                        }
+                    }
+                    "stopForeground" -> {
+                        try {
+                            stopService(Intent(this, WeiMiTransferService::class.java))
+                        } catch (e: Exception) {
+                        }
+                        result.success(true)
+                    }
+                    else -> result.notImplemented()
+                }
+            }
+    }
+
+    private fun sharePayload(): Map<String, Any> {
+        return mapOf(
+            "text" to (sharedText ?: ""),
+            "paths" to sharedPaths.toList()
+        )
     }
 
     /// 抽视频第一关键帧，压缩为 JPEG。失败返回 null（UI 退化为类型图标）。
@@ -167,7 +220,16 @@ class MainActivity : FlutterActivity() {
 
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
+        val isShare = intent.action == Intent.ACTION_SEND ||
+                intent.action == Intent.ACTION_SEND_MULTIPLE
         handleIntent(intent)
+        if (isShare) {
+            // 通知 Dart 侧（app 已在前台运行中）
+            try {
+                shareChannel?.invokeMethod("onShare", sharePayload())
+            } catch (e: Exception) {
+            }
+        }
     }
 
     private fun handleIntent(intent: Intent) {
@@ -179,6 +241,15 @@ class MainActivity : FlutterActivity() {
                 }
             }
             Intent.ACTION_SEND -> {
+                // 文本分享
+                val text: String? = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                    intent.getStringExtra(Intent.EXTRA_TEXT)
+                } else {
+                    @Suppress("DEPRECATION")
+                    intent.getStringExtra(Intent.EXTRA_TEXT)
+                }
+                if (text != null) sharedText = text
+                // 文件分享
                 val uri: Uri? = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
                     intent.getParcelableExtra(Intent.EXTRA_STREAM, Uri::class.java)
                 } else {
@@ -186,7 +257,8 @@ class MainActivity : FlutterActivity() {
                     intent.getParcelableExtra(Intent.EXTRA_STREAM)
                 }
                 if (uri != null) {
-                    initialFilePath = getRealPathFromUri(uri)
+                    val path = getRealPathFromUri(uri)
+                    if (path != null && !sharedPaths.contains(path)) sharedPaths.add(path)
                 }
             }
             Intent.ACTION_SEND_MULTIPLE -> {
@@ -196,8 +268,11 @@ class MainActivity : FlutterActivity() {
                     @Suppress("DEPRECATION")
                     intent.getParcelableArrayListExtra(Intent.EXTRA_STREAM)
                 }
-                if (uris != null && uris.isNotEmpty()) {
-                    initialFilePath = getRealPathFromUri(uris[0])
+                if (uris != null) {
+                    for (uri in uris) {
+                        val path = getRealPathFromUri(uri)
+                        if (path != null && !sharedPaths.contains(path)) sharedPaths.add(path)
+                    }
                 }
             }
         }

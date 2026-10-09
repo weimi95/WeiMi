@@ -1,10 +1,13 @@
 import 'dart:io';
 import 'dart:convert';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:file_picker/file_picker.dart';
 import 'package:desktop_drop/desktop_drop.dart';
 import 'package:cross_file/cross_file.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import 'package:system_tray/system_tray.dart';
+import 'package:window_manager/window_manager.dart';
 import 'services/file_operations_service.dart';
 import 'services/encryption_service.dart';
 import 'services/file_viewer_service.dart';
@@ -16,8 +19,10 @@ import 'screens/about_screen.dart';
 import 'screens/language_screen.dart';
 import 'screens/wei_mi_vault_screen.dart';
 import 'screens/recent_files_screen.dart';
+import 'screens/settings_screen.dart';
 import 'services/lan_transfer_service.dart';
 import 'services/view_prefs_service.dart';
+import 'services/share_receive_service.dart';
 import 'widgets/file_thumbnail.dart';
 import 'package:path_provider/path_provider.dart';
 
@@ -27,6 +32,71 @@ const int kPasswordMaxLength = 32;
 
 // 上次加密/解密输出目录的 SharedPreferences key
 const String kLastOutputDirKey = 'last_output_dir';
+
+/// 桌面端窗口关闭拦截：enabled（关闭时最小化到托盘）时点关闭只隐藏窗口
+class _WindowCloseHandler extends WindowListener {
+  @override
+  void onWindowClose() async {
+    final prefs = await SharedPreferences.getInstance();
+    if (prefs.getBool('desk_close_to_tray') ?? true) {
+      await windowManager.hide();
+    } else {
+      await windowManager.destroy();
+    }
+  }
+}
+
+final _windowCloseHandler = _WindowCloseHandler();
+
+/// 从 assets 解出托盘图标到临时目录（system_tray 需要文件路径）
+Future<String?> _extractTrayIcon() async {
+  try {
+    final dir = await getTemporaryDirectory();
+    final name = Platform.isWindows ? 'tray_icon.ico' : 'tray_icon.png';
+    final data = await rootBundle.load('assets/images/$name');
+    final f = File('${dir.path}${Platform.pathSeparator}$name');
+    await f.writeAsBytes(data.buffer.asUint8List());
+    return f.path;
+  } catch (e) {
+    debugPrint('extract tray icon failed: $e');
+    return null;
+  }
+}
+
+/// 初始化系统托盘（桌面端）：左键显示主窗口，右键菜单 显示/退出
+Future<void> _initSystemTray() async {
+  try {
+    final iconPath = await _extractTrayIcon();
+    if (iconPath == null) return;
+    final tray = SystemTray();
+    await tray.initSystemTray(
+      title: '微密文件',
+      iconPath: iconPath,
+      toolTip: '微密文件',
+    );
+    final menu = Menu();
+    await menu.buildFrom([
+      MenuItemLabel(label: '显示主窗口', onClick: (_) async {
+        await windowManager.show();
+        await windowManager.focus();
+      }),
+      MenuSeparator(),
+      MenuItemLabel(label: '退出', onClick: (_) async {
+        await windowManager.setPreventClose(false);
+        await windowManager.destroy();
+      }),
+    ]);
+    await tray.setContextMenu(menu);
+    tray.registerSystemTrayEventHandler((eventName) {
+      if (eventName == kSystemTrayEventClick) {
+        windowManager.show();
+        windowManager.focus();
+      }
+    });
+  } catch (e) {
+    debugPrint('init system tray failed: $e');
+  }
+}
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -43,8 +113,41 @@ void main() async {
     LanTransferService.instance.fallbackDir = docs.path;
   } catch (_) {}
 
+  // 启动时自动开启微密飞传接收（设置项）
+  try {
+    final prefs = await SharedPreferences.getInstance();
+    if (prefs.getBool('lan_autostart') == true) {
+      LanTransferService.instance.startReceiving();
+    }
+  } catch (_) {}
+
+  // 系统分享接收（Android SEND/SEND_MULTIPLE → 飞传页）
+  await ShareReceiveService.instance.init();
+
   if (Platform.isWindows) {
     await FileAssociationService.registerFileAssociation();
+  }
+
+  // 桌面端：窗口管理（关闭最小化到托盘）+ 系统托盘
+  if (!Platform.isAndroid && !Platform.isIOS) {
+    try {
+      await windowManager.ensureInitialized();
+      const opts = WindowOptions(
+        size: Size(1100, 800),
+        minimumSize: Size(700, 500),
+        title: '微密文件',
+      );
+      final prefs = await SharedPreferences.getInstance();
+      final closeToTray = prefs.getBool('desk_close_to_tray') ?? true;
+      await windowManager.waitUntilReadyToShow(opts, () async {
+        await windowManager.show();
+        await windowManager.setPreventClose(closeToTray);
+      });
+      windowManager.addListener(_windowCloseHandler);
+      _initSystemTray();
+    } catch (e) {
+      debugPrint('window/tray init failed: $e');
+    }
   }
 
   runApp(const MyApp());
@@ -84,6 +187,7 @@ class _MyAppState extends State<MyApp> {
 
         return MaterialApp(
           title: localizationService.translate('appTitle'),
+          navigatorKey: ShareReceiveService.navigatorKey,
           locale: localizationService.currentLocale,
           localizationsDelegates: const [],
           theme: ThemeData(
@@ -135,6 +239,13 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
     _checkInitialFile();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    // 退到后台时飞传无法弹确认框：信任设备直收、非信任拒收
+    LanTransferService.instance.backgroundMode =
+        state == AppLifecycleState.paused || state == AppLifecycleState.hidden;
   }
 
   @override
@@ -979,6 +1090,13 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                 case 'group_year':
                   ViewPrefsService.instance.setGroup(GroupMode.year);
                   break;
+                case 'settings':
+                  Navigator.push(
+                    context,
+                    MaterialPageRoute(
+                        builder: (context) => const SettingsScreen()),
+                  );
+                  break;
                 case 'language':
                   Navigator.push(
                     context,
@@ -1051,6 +1169,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                     '最近页：按年分区',
                     checked: group == GroupMode.year),
                 const PopupMenuDivider(),
+                item('settings', Icons.settings_outlined, '设置'),
                 item('language', Icons.language, t('language')),
                 item('about', Icons.info_outline, t('about')),
               ];

@@ -79,6 +79,12 @@ dependencies:
   # Drag and drop support for desktop
   desktop_drop: ^0.5.0
 
+  # Desktop window management (close-to-tray)
+  window_manager: ^0.4.3
+
+  # Desktop system tray icon
+  system_tray: ^2.0.3
+
 dev_dependencies:
   flutter_test:
     sdk: flutter
