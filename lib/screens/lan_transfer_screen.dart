@@ -501,6 +501,58 @@ class _LanTransferScreenState extends State<LanTransferScreen> {
             ),
           ),
           const SizedBox(height: 16),
+          // 网页快传地址卡（Snapdrop 式：浏览器打开即可发文件给本机）
+          Container(
+            padding: const EdgeInsets.all(14),
+            decoration: BoxDecoration(
+              color: Colors.teal.withAlpha(15),
+              borderRadius: BorderRadius.circular(12),
+              border: Border.all(color: Colors.teal.withAlpha(50)),
+            ),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Row(
+                  children: [
+                    const Icon(Icons.language, size: 20, color: Colors.teal),
+                    const SizedBox(width: 8),
+                    const Expanded(
+                      child: Text('网页快传',
+                          style: TextStyle(
+                              fontWeight: FontWeight.w600, fontSize: 15)),
+                    ),
+                    IconButton(
+                      icon: const Icon(Icons.copy, size: 18),
+                      tooltip: '复制地址',
+                      onPressed: () {
+                        Clipboard.setData(ClipboardData(
+                            text: 'http://$_ip:${_svc.httpPortActual}'));
+                        ScaffoldMessenger.of(context).showSnackBar(
+                            const SnackBar(content: Text('已复制网页快传地址')));
+                      },
+                    ),
+                  ],
+                ),
+                Text('http://$_ip:${_svc.httpPortActual}',
+                    style: const TextStyle(
+                        fontSize: 15,
+                        fontWeight: FontWeight.w600,
+                        color: Colors.teal)),
+                const SizedBox(height: 4),
+                Text(
+                  _svc.webShareEnabled
+                      ? '同一 WiFi 下任何设备用浏览器打开此地址，即可发送文件/文本给本机（免确认直接接收，重名自动加序号）'
+                      : '网页快传已在设置中关闭',
+                  style: TextStyle(
+                      fontSize: 12,
+                      color: _svc.webShareEnabled
+                          ? Colors.grey.shade600
+                          : Colors.orange),
+                ),
+              ],
+            ),
+          ),
+          const SizedBox(height: 16),
           // 附近设备
           Row(
             children: [

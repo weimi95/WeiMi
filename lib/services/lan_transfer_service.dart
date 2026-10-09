@@ -25,6 +25,12 @@ import 'trusted_devices_service.dart';
 ///   Header: X-Weimi-App / X-Sender-Id / X-Sender-Name(URL编码) /
 ///           X-File-Name(URL编码) / X-File-Size | X-Text-Length
 ///   Response: 200 {"ok":true,...} / 403 拒收 / 500 失败
+///
+/// 网页快传（Snapdrop 式）：
+///   GET  /              网页快传首页（浏览器打开即可发文件/文本给本机）
+///   POST /web/upload?name=文件名   浏览器上传文件（免确认直接收）
+///   POST /web/text      浏览器发送文本
+///   开关：web_share_enabled（默认开），关闭后 GET / 返回 404
 class LanTransferService {
   static const int discoveryPort = 52346;
   static const int defaultHttpPort = 52345;
@@ -32,6 +38,7 @@ class LanTransferService {
   static const String _magic = 'weimi';
   static const String _kDeviceIdKey = 'lan_device_id';
   static const String _kDeviceNameKey = 'lan_device_name';
+  static const String _kWebShareKey = 'web_share_enabled';
   static const MethodChannel _fgsChannel =
       MethodChannel('com.weimi95.weimi/transfer');
 
@@ -44,6 +51,7 @@ class LanTransferService {
   bool _receiving = false;
   bool _discovering = false;
   bool _backgroundMode = false;
+  bool _webShareEnabled = true;
   int _httpPort = defaultHttpPort;
   Timer? _announceTimer;
   Timer? _pruneTimer;
@@ -70,6 +78,7 @@ class LanTransferService {
   String get selfName => _selfName;
   bool get isReceiving => _receiving;
   bool get backgroundMode => _backgroundMode;
+  bool get webShareEnabled => _webShareEnabled;
   int get httpPortActual => _httpPort;
   List<LanPeer> get peers => _peers.values.toList();
 
@@ -90,6 +99,14 @@ class LanTransferService {
     final name = prefs.getString(_kDeviceNameKey);
     _selfName =
         (name == null || name.isEmpty) ? Platform.localHostname : name;
+    _webShareEnabled = prefs.getBool(_kWebShareKey) ?? true;
+  }
+
+  /// 网页快传开关（默认开）
+  Future<void> setWebShareEnabled(bool v) async {
+    _webShareEnabled = v;
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setBool(_kWebShareKey, v);
   }
 
   Future<void> setSelfName(String name) async {
@@ -307,12 +324,34 @@ class LanTransferService {
 
   Future<void> _onHttpRequest(HttpRequest req) async {
     try {
+      // ============ 网页快传（Snapdrop 式） ============
+      if (req.method == 'GET' &&
+          (req.uri.path == '/' || req.uri.path == '/index.html')) {
+        if (_webShareEnabled) {
+          req.response.headers.contentType = ContentType.html;
+          req.response.headers.add('Cache-Control', 'no-cache');
+          req.response.write(_webSharePage());
+        } else {
+          req.response.statusCode = HttpStatus.notFound;
+        }
+        await req.response.close();
+        return;
+      }
+      if (req.method == 'POST' && req.uri.path == '/web/upload') {
+        await _guardReceiving(req, _handleWebUpload);
+        return;
+      }
+      if (req.method == 'POST' && req.uri.path == '/web/text') {
+        await _guardReceiving(req, _handleWebText);
+        return;
+      }
+      // ============ App 间传输 ============
       if (req.method == 'POST' && req.uri.path == '/weimi/send') {
-        await _handleIncomingFile(req);
+        await _guardReceiving(req, _handleIncomingFile);
         return;
       }
       if (req.method == 'POST' && req.uri.path == '/weimi/text') {
-        await _handleIncomingText(req);
+        await _guardReceiving(req, _handleIncomingText);
         return;
       }
       req.response.statusCode = HttpStatus.notFound;
@@ -326,8 +365,19 @@ class LanTransferService {
     }
   }
 
-  String _header(HttpRequest req, String name) {
-    final v = req.headers.value(name) ?? '';
+  /// 接收开关关闭时拒收所有上传（端口保留供快速重开，但不收新数据）
+  Future<void> _guardReceiving(
+      HttpRequest req, Future<void> Function(HttpRequest) handler) async {
+    if (!_receiving) {
+      req.response.statusCode = HttpStatus.serviceUnavailable;
+      req.response.write(json.encode({'ok': false, 'error': 'receiving off'}));
+      await req.response.close();
+      return;
+    }
+    await handler(req);
+  }
+
+  String _header(HttpRequest req, String name) {    final v = req.headers.value(name) ?? '';
     if (v.isEmpty) return v;
     try {
       return Uri.decodeComponent(v);
@@ -466,8 +516,242 @@ class LanTransferService {
     }
   }
 
-  /// 接收文件保存目录：优先「加密文件存放目录」，否则注入的兜底目录
-  Future<String> _resolveSaveDir() async {
+  // ============ 网页快传处理 ============
+
+  /// 浏览器上传文件：免确认直接收（老板拍板），重名自动加序号
+  Future<void> _handleWebUpload(HttpRequest req) async {
+    if (!_webShareEnabled) {
+      req.response.statusCode = HttpStatus.notFound;
+      await req.response.close();
+      return;
+    }
+    final from = '网页访客(${req.remoteAddress.address})';
+    final name = _safeFileName(req.uri.queryParameters['name'] ?? 'unnamed');
+    try {
+      final savePath = await _resolveSavePath(name);
+      _events.add(LanEvent(LanEventType.incomingStarted,
+          name: name, from: from));
+      final sink = File(savePath).openWrite();
+      try {
+        await for (final chunk in req) {
+          sink.add(chunk);
+        }
+        await sink.flush();
+      } finally {
+        await sink.close();
+      }
+      req.response.headers.contentType = ContentType.json;
+      req.response.statusCode = HttpStatus.ok;
+      req.response.write(json.encode({'ok': true, 'path': savePath}));
+      await req.response.close();
+      _events.add(LanEvent(LanEventType.incomingDone,
+          name: name, from: from, path: savePath));
+    } catch (e) {
+      req.response.statusCode = HttpStatus.internalServerError;
+      req.response.write(json.encode({'ok': false, 'error': '$e'}));
+      await req.response.close();
+      _events.add(LanEvent(LanEventType.incomingFailed,
+          name: name, from: from, error: '$e'));
+    }
+  }
+
+  /// 浏览器发送文本：免确认直接收
+  Future<void> _handleWebText(HttpRequest req) async {
+    if (!_webShareEnabled) {
+      req.response.statusCode = HttpStatus.notFound;
+      await req.response.close();
+      return;
+    }
+    final from = '网页访客(${req.remoteAddress.address})';
+    try {
+      final bytes = <int>[];
+      await for (final chunk in req) {
+        bytes.addAll(chunk);
+      }
+      final text = utf8.decode(bytes, allowMalformed: true);
+      req.response.headers.contentType = ContentType.json;
+      req.response.statusCode = HttpStatus.ok;
+      req.response.write(json.encode({'ok': true}));
+      await req.response.close();
+      _events.add(LanEvent(LanEventType.incomingText, from: from, content: text));
+    } catch (e) {
+      req.response.statusCode = HttpStatus.internalServerError;
+      req.response.write(json.encode({'ok': false, 'error': '$e'}));
+      await req.response.close();
+    }
+  }
+
+  /// 网页快传首页（单文件、零外部资源、手机/电脑浏览器都可用）。
+  /// 用 raw string，JS 里的 $ 不做 Dart 插值。
+  String _webSharePage() {
+    return r'''<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1">
+<title>微密飞传 · 网页快传</title>
+<style>
+  * { margin:0; padding:0; box-sizing:border-box; -webkit-tap-highlight-color:transparent; }
+  body { font-family:-apple-system,"PingFang SC","Microsoft YaHei",sans-serif;
+         background:#f2f5f9; min-height:100vh; display:flex; flex-direction:column; }
+  header { background:linear-gradient(135deg,#1e6fd9,#2fa3e8); color:#fff;
+           padding:22px 16px 18px; text-align:center; }
+  header h1 { font-size:20px; font-weight:600; }
+  header p { font-size:12px; opacity:.85; margin-top:4px; }
+  main { flex:1; max-width:520px; width:100%; margin:0 auto; padding:16px; }
+  .drop { background:#fff; border:2px dashed #9db8d6; border-radius:14px;
+          padding:34px 16px; text-align:center; cursor:pointer; transition:.2s; }
+  .drop.on, .drop:hover { border-color:#1e6fd9; background:#f0f7ff; }
+  .drop .ic { font-size:40px; }
+  .drop b { display:block; margin-top:8px; font-size:15px; color:#24405e; }
+  .drop span { display:block; margin-top:4px; font-size:12px; color:#7d90a5; }
+  .card { background:#fff; border-radius:14px; padding:14px; margin-top:14px; }
+  .card h3 { font-size:14px; color:#24405e; margin-bottom:8px; }
+  textarea { width:100%; height:90px; border:1px solid #d5dfeb; border-radius:10px;
+             padding:10px; font-size:14px; resize:vertical; outline:none; }
+  textarea:focus { border-color:#2fa3e8; }
+  .btn { display:inline-block; border:none; border-radius:10px; padding:10px 22px;
+         font-size:14px; color:#fff; background:#1e6fd9; cursor:pointer; }
+  .btn:disabled { background:#a9c4e4; }
+  .btn.sec { background:#eef4fb; color:#1e6fd9; }
+  .row { display:flex; gap:10px; justify-content:flex-end; margin-top:10px; }
+  ul { list-style:none; margin-top:10px; }
+  li { font-size:13px; color:#24405e; padding:8px 10px; border-radius:8px;
+       background:#f2f7fd; margin-bottom:6px; word-break:break-all; }
+  li .bar { height:4px; background:#d8e6f5; border-radius:2px; margin-top:6px; overflow:hidden; }
+  li .bar i { display:block; height:100%; width:0; background:#2fa3e8; transition:width .15s; }
+  li.ok { background:#eef9ef; color:#1d7a34; }
+  li.err { background:#fdeeee; color:#b23434; }
+  footer { text-align:center; font-size:11px; color:#93a4b8; padding:12px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>微密飞传 · 网页快传</h1>
+  <p>同一 WiFi 下，选择文件或输入文本即可发送到这台设备</p>
+</header>
+<main>
+  <div class="drop" id="drop" onclick="document.getElementById('file').click()">
+    <div class="ic">📤</div>
+    <b>点按选择文件，或把文件拖到这里</b>
+    <span>支持多选，文件将保存到对方设备的接收目录</span>
+  </div>
+  <input type="file" id="file" multiple hidden>
+  <div class="card">
+    <h3>发送文本</h3>
+    <textarea id="txt" placeholder="输入要发送的文本内容"></textarea>
+    <div class="row">
+      <button class="btn" onclick="sendText()">发送文本</button>
+    </div>
+  </div>
+  <ul id="list"></ul>
+</main>
+<footer>微密文件 · 局域网直传，数据不经外部服务器</footer>
+<script>
+var list = document.getElementById('list');
+var drop = document.getElementById('drop');
+
+function li(text, cls) {
+  var el = document.createElement('li');
+  el.textContent = text;
+  if (cls) el.className = cls;
+  list.appendChild(el);
+  return el;
+}
+function done(el, text, ok) {
+  el.textContent = text;
+  el.className = ok ? 'ok' : 'err';
+  var bar = el.querySelector('.bar');
+  if (bar) bar.remove();
+}
+
+document.getElementById('file').addEventListener('change', function() {
+  uploadAll(this.files);
+  this.value = '';
+});
+
+['dragover','dragenter'].forEach(function(ev){
+  drop.addEventListener(ev, function(e){ e.preventDefault(); drop.classList.add('on'); });
+});
+['dragleave','drop'].forEach(function(ev){
+  drop.addEventListener(ev, function(e){ e.preventDefault(); drop.classList.remove('on'); });
+});
+drop.addEventListener('drop', function(e){
+  if (e.dataTransfer && e.dataTransfer.files.length) uploadAll(e.dataTransfer.files);
+});
+
+function uploadAll(files) {
+  var arr = Array.prototype.slice.call(files);
+  (function next() {
+    if (!arr.length) return;
+    uploadOne(arr.shift()).then(next);
+  })();
+}
+
+function uploadOne(file) {
+  return new Promise(function(resolve) {
+    var el = li('正在发送 ' + file.name + '（0%）');
+    var bar = document.createElement('div');
+    bar.className = 'bar';
+    var inner = document.createElement('i');
+    bar.appendChild(inner);
+    el.appendChild(bar);
+    var xhr = new XMLHttpRequest();
+    xhr.open('POST', '/web/upload?name=' + encodeURIComponent(file.name));
+    xhr.upload.onprogress = function(e) {
+      if (e.lengthComputable) {
+        var pct = Math.round(e.loaded / e.total * 100);
+        inner.style.width = pct + '%';
+        el.firstChild.textContent = '正在发送 ' + file.name + '（' + pct + '%）';
+      }
+    };
+    xhr.onload = function() {
+      if (xhr.status === 200) {
+        done(el, '已发送 ' + file.name, true);
+      } else {
+        done(el, '发送失败 ' + file.name + '（' + xhr.status + '）', false);
+      }
+      resolve();
+    };
+    xhr.onerror = function() {
+      done(el, '发送失败 ' + file.name + '（网络错误）', false);
+      resolve();
+    };
+    xhr.send(file);
+  });
+}
+
+function sendText() {
+  var ta = document.getElementById('txt');
+  var text = ta.value;
+  if (!text.trim()) return;
+  var btns = document.querySelectorAll('.btn');
+  var btn = btns[btns.length - 1];
+  btn.disabled = true;
+  var el = li('正在发送文本…');
+  var xhr = new XMLHttpRequest();
+  xhr.open('POST', '/web/text');
+  xhr.onload = function() {
+    btn.disabled = false;
+    if (xhr.status === 200) {
+      done(el, '文本已发送', true);
+      ta.value = '';
+    } else {
+      done(el, '发送失败（' + xhr.status + '）', false);
+    }
+  };
+  xhr.onerror = function() {
+    btn.disabled = false;
+    done(el, '发送失败（网络错误）', false);
+  };
+  xhr.send(new Blob([text], {type:'text/plain'}));
+}
+</script>
+</body>
+</html>''';
+  }
+
+  /// 接收文件保存目录：优先「加密文件存放目录」，否则注入的兜底目录  Future<String> _resolveSaveDir() async {
     final prefs = await SharedPreferences.getInstance();
     final vaultDir = prefs.getString('weimi_vault_dir');
     if (vaultDir != null && vaultDir.isNotEmpty) {

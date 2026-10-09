@@ -23,6 +23,7 @@ class SettingsScreen extends StatefulWidget {
 
 class _SettingsScreenState extends State<SettingsScreen> {
   bool _autoStartLan = false;
+  bool _webShare = true;
   bool _closeToTray = true;
   bool _autostart = false;
   List<MapEntry<String, String>> _trusted = [];
@@ -44,6 +45,9 @@ class _SettingsScreenState extends State<SettingsScreen> {
       _closeToTray = prefs.getBool('desk_close_to_tray') ?? true;
       _trusted = TrustedDevices.instance.all;
     });
+    if (mounted) {
+      setState(() => _webShare = LanTransferService.instance.webShareEnabled);
+    }
     if (AutostartService.supported) {
       final enabled = await AutostartService.isEnabled();
       if (mounted) setState(() => _autostart = enabled);
@@ -55,6 +59,11 @@ class _SettingsScreenState extends State<SettingsScreen> {
     await prefs.setBool('lan_autostart', v);
     if (v) await LanTransferService.instance.startReceiving();
     if (mounted) setState(() => _autoStartLan = v);
+  }
+
+  Future<void> _toggleWebShare(bool v) async {
+    await LanTransferService.instance.setWebShareEnabled(v);
+    if (mounted) setState(() => _webShare = v);
   }
 
   Future<void> _toggleCloseToTray(bool v) async {
@@ -177,6 +186,14 @@ class _SettingsScreenState extends State<SettingsScreen> {
             subtitle: const Text('打开软件即允许附近设备发现本机并传输文件'),
             value: _autoStartLan,
             onChanged: _toggleAutoStartLan,
+          ),
+          SwitchListTile(
+            secondary: const Icon(Icons.language),
+            title: const Text('网页快传'),
+            subtitle: const Text(
+                '浏览器打开 http://本机IP:端口 即可发送文件/文本给本机，免确认直接接收'),
+            value: _webShare,
+            onChanged: _toggleWebShare,
           ),
           ListTile(
             leading: const Icon(Icons.badge_outlined),
