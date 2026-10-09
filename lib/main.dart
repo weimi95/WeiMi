@@ -76,12 +76,12 @@ Future<void> _initSystemTray() async {
     );
     final menu = Menu();
     await menu.buildFrom([
-      MenuItemLabel(label: '显示主窗口', onSelected: (_) async {
+      MenuItemLabel(label: '显示主窗口', onClicked: (_) async {
         await windowManager.show();
         await windowManager.focus();
       }),
       MenuSeparator(),
-      MenuItemLabel(label: '退出', onSelected: (_) async {
+      MenuItemLabel(label: '退出', onClicked: (_) async {
         await windowManager.setPreventClose(false);
         await windowManager.destroy();
       }),
