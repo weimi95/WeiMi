@@ -18,10 +18,10 @@ class MainFlutterWindow: NSWindow {
       if call.method == "copyFiles",
          let args = call.arguments as? [String: Any],
          let paths = args["paths"] as? [String] {
-        let urls = paths.compactMap { URL(fileURLWithPath: $0) }
+        let urls: [NSURL] = paths.map { NSURL(fileURLWithPath: $0) }
         let pb = NSPasteboard.general
         pb.clearContents()
-        let ok = pb.writeObjects(urls)
+        let ok = pb.writeObjects(urls as [NSPasteboardWriting])
         result(ok)
       } else {
         result(FlutterMethodNotImplemented)

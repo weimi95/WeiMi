@@ -85,13 +85,13 @@ static void my_application_activate(GApplication* application) {
       fl_method_channel_new(
           fl_engine_get_binary_messenger(fl_view_get_engine(view)),
           "com.weimi95.weimi/clipboard_files",
-          FL_METHOD_CODEC(fl_standard_method_codec_get_instance())),
+          FL_METHOD_CODEC(fl_standard_method_codec_new())),
       [](FlMethodChannel* channel, FlMethodCall* call, gpointer user_data) {
         (void)channel;
         (void)user_data;
         if (strcmp(fl_method_call_get_name(call), "copyFiles") != 0) {
-          g_autoptr(FlMethodResponse) ni =
-              fl_method_not_implemented_response_new();
+          g_autoptr(FlMethodResponse) ni = FL_METHOD_RESPONSE(
+              fl_method_not_implemented_response_new());
           fl_method_call_respond(call, ni, nullptr);
           return;
         }
@@ -99,8 +99,9 @@ static void my_application_activate(GApplication* application) {
         FlValue* paths_val = fl_value_lookup_string(args, "paths");
         if (paths_val == nullptr ||
             fl_value_get_type(paths_val) != FL_VALUE_TYPE_LIST) {
-          g_autoptr(FlMethodResponse) err =
-              fl_method_error_response_new("bad_args", "missing paths", nullptr);
+          g_autoptr(FlMethodResponse) err = FL_METHOD_RESPONSE(
+              fl_method_error_response_new("bad_args", "missing paths",
+                                           nullptr));
           fl_method_call_respond(call, err, nullptr);
           return;
         }
@@ -154,8 +155,8 @@ static void my_application_activate(GApplication* application) {
             [](GtkClipboard*, gpointer) {}, nullptr);
         gtk_clipboard_store(clipboard);
 
-        g_autoptr(FlMethodResponse) resp =
-            fl_method_success_response_new(fl_value_new_bool(TRUE));
+        g_autoptr(FlMethodResponse) resp = FL_METHOD_RESPONSE(
+            fl_method_success_response_new(fl_value_new_bool(TRUE)));
         fl_method_call_respond(call, resp, nullptr);
       },
       nullptr, nullptr);

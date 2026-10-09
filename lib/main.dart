@@ -80,6 +80,24 @@ Future<void> _initSystemTray() async {
         await windowManager.show();
         await windowManager.focus();
       }),
+      MenuItemLabel(label: '设置', onClicked: (_) async {
+        await windowManager.show();
+        await windowManager.focus();
+        final ctx = ShareReceiveService.navigatorKey.currentContext;
+        if (ctx != null) {
+          Navigator.push(ctx,
+              MaterialPageRoute(builder: (_) => const SettingsScreen()));
+        }
+      }),
+      MenuItemLabel(label: '关于', onClicked: (_) async {
+        await windowManager.show();
+        await windowManager.focus();
+        final ctx = ShareReceiveService.navigatorKey.currentContext;
+        if (ctx != null) {
+          Navigator.push(ctx,
+              MaterialPageRoute(builder: (_) => const AboutScreen()));
+        }
+      }),
       MenuSeparator(),
       MenuItemLabel(label: '退出', onClicked: (_) async {
         await windowManager.setPreventClose(false);
