@@ -1026,7 +1026,7 @@ pub extern "C" fn index_search(
         Some(d) => d,
         None => return -1,
     };
-    let mut results: Vec<&String> = Vec::new();
+    let mut results: Vec<&str> = Vec::new();
     for p in data {
         let bytes = p.as_bytes();
         // 文件名起点 = 最后一个路径分隔符之后
@@ -1041,7 +1041,7 @@ pub extern "C" fn index_search(
         }
         let name = &p[start..];
         if name.to_lowercase().contains(&query) {
-            results.push(p);
+            results.push(p.as_str());
             if results.len() >= limit {
                 break;
             }
