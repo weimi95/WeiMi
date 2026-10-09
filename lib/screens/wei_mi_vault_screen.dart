@@ -399,9 +399,15 @@ class WeiMiVaultScreenState extends State<WeiMiVaultScreen> {
     }
   }
 
+  /// AppBar 标题：根视图/我的电脑虚拟路径/普通目录
+  String _titleFor(String path, bool isRoot) {
+    if (isRoot) return '文件';
+    if (path == kMyComputerPath) return '我的电脑';
+    return p.basename(path);
+  }
+
   /// 系统返回键处理：true = 已内部消化（回到上一级/清除选择），false = 在根视图，允许退出应用
-  bool handleSystemBack() {
-    if (_selectedPaths.isNotEmpty) {
+  bool handleSystemBack() {    if (_selectedPaths.isNotEmpty) {
       _clearSelection();
       return true;
     }
@@ -953,7 +959,7 @@ class WeiMiVaultScreenState extends State<WeiMiVaultScreen> {
               ],
             )
           : AppBar(
-              title: Text(isRoot ? '文件' : p.basename(_currentPath)),
+              title: Text(_titleFor(_currentPath, isRoot)),
               leading: _historyIndex > 0
                   ? IconButton(icon: const Icon(Icons.arrow_back), onPressed: _goBack)
                   : null,
@@ -1145,21 +1151,25 @@ class WeiMiVaultScreenState extends State<WeiMiVaultScreen> {
             open: _commonOpen,
             onToggle: (v) => _setSectionOpen(mine: false, open: v),
             children: [
-              // 全部文件入口（像手机文件管理器，浏览设备全部文件）
+              // 全部文件/我的电脑入口（像手机文件管理器，浏览设备全部文件）
               ListTile(
-                leading:
-                    const Icon(Icons.apps, color: Colors.deepPurple),
-                title: const Text('全部文件',
-                    style: TextStyle(fontWeight: FontWeight.w600)),
+                leading: Icon(
+                  Platform.isAndroid ? Icons.apps : Icons.computer,
+                  color: Colors.deepPurple,
+                ),
+                title: Text(Platform.isAndroid ? '全部文件' : '我的电脑',
+                    style: const TextStyle(fontWeight: FontWeight.w600)),
                 subtitle: Text(
-                  Platform.isAndroid ? '/storage/emulated/0' : _homeDir(),
+                  Platform.isAndroid
+                      ? '/storage/emulated/0'
+                      : '所有磁盘与分区',
                   style: TextStyle(fontSize: 11, color: Colors.grey.shade500),
                 ),
                 trailing:
                     const Icon(Icons.chevron_right, color: Colors.grey),
                 onTap: () => _navigateTo(Platform.isAndroid
                     ? '/storage/emulated/0'
-                    : _homeDir()),
+                    : kMyComputerPath),
               ),
               for (final d in builtin) _buildDirTile(d, filterQuery: q),
             ],
@@ -1272,12 +1282,6 @@ class WeiMiVaultScreenState extends State<WeiMiVaultScreen> {
       if (password == null || !mounted) return;
       _decryptFile(path, password);
     }
-  }
-
-  String _homeDir() {
-    return Platform.environment['USERPROFILE'] ??
-        Platform.environment['HOME'] ??
-        '/';
   }
 
   List<_DirEntry> _buildRootEntries() {
@@ -1400,6 +1404,9 @@ class WeiMiVaultScreenState extends State<WeiMiVaultScreen> {
       padding: const EdgeInsets.only(left: 24),
       child: GestureDetector(
         onDoubleTap: _isDesktop ? () => _desktopOpen(item) : null,
+        onSecondaryTapUp: _isDesktop
+            ? (d) => _showContextMenu(item, d.globalPosition, -1, const [])
+            : null,
         child: ListTile(
         dense: true,
         visualDensity: VisualDensity.compact,
@@ -1435,9 +1442,6 @@ class WeiMiVaultScreenState extends State<WeiMiVaultScreen> {
                   _openFile(item);
                 }
               },
-        onSecondaryTapUp: _isDesktop
-            ? (d) => _showContextMenu(item, d.globalPosition, -1, const [])
-            : null,
         onLongPress: selectable && !_isDesktop
             ? () => _toggleSelect(item.fullPath)
             : null,
@@ -1890,6 +1894,7 @@ class _FileListItem extends StatelessWidget {
     }
     return GestureDetector(
       onDoubleTap: onDoubleTap,
+      onSecondaryTapUp: onSecondaryTapUp,
       child: ListTile(
       leading: leading,
       title: Text(
@@ -1902,7 +1907,6 @@ class _FileListItem extends StatelessWidget {
           : null,
       onTap: onTap,
       onLongPress: onLongPress,
-      onSecondaryTapUp: onSecondaryTapUp,
       ),
     );
   }

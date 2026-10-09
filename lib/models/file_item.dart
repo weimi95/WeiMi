@@ -45,8 +45,13 @@ class FileItem {
   String toString() => '$name (${isDirectory ? "📁" : "📄"}) ${humanSize}';
 }
 
+/// 「我的电脑」虚拟路径：listDirectory 对它返回磁盘/挂载点列表（桌面端）
+const String kMyComputerPath = 'weimi://my-computer';
+
 /// 遍历目录，返回扁平文件列表
 Future<List<FileItem>> listDirectory(String dirPath) async {
+  if (dirPath == kMyComputerPath) return _listMyComputer();
+
   final dir = Directory(dirPath);
   if (!await dir.exists()) return [];
 
@@ -72,6 +77,52 @@ Future<List<FileItem>> listDirectory(String dirPath) async {
     }
     return a.name.compareTo(b.name);
   });
+  return items;
+}
+
+/// 列出电脑上的所有磁盘/挂载点（Windows 盘符、macOS /Volumes、Linux /media /mnt /）
+Future<List<FileItem>> _listMyComputer() async {
+  final items = <FileItem>[];
+  if (Platform.isWindows) {
+    for (var c = 65; c <= 90; c++) {
+      final root = '${String.fromCharCode(c)}:\\';
+      try {
+        if (Directory(root).existsSync()) {
+          items.add(FileItem(
+            name: root,
+            fullPath: root,
+            isDirectory: true,
+            size: 0,
+          ));
+        }
+      } catch (_) {}
+    }
+  } else if (Platform.isMacOS) {
+    final dir = Directory('/Volumes');
+    if (dir.existsSync()) {
+      try {
+        await for (final e in dir.list()) {
+          final name = path.basename(e.path);
+          if (name.startsWith('.')) continue;
+          items.add(FileItem(
+              name: name, fullPath: e.path, isDirectory: true, size: 0));
+        }
+      } catch (_) {}
+    }
+  } else if (Platform.isLinux) {
+    items.add(FileItem(
+        name: '/', fullPath: '/', isDirectory: true, size: 0));
+    for (final base in ['/media', '/mnt']) {
+      final d = Directory(base);
+      if (!d.existsSync()) continue;
+      try {
+        await for (final e in d.list()) {
+          items.add(FileItem(
+              name: e.path, fullPath: e.path, isDirectory: true, size: 0));
+        }
+      } catch (_) {}
+    }
+  }
   return items;
 }
 
