@@ -17,6 +17,8 @@ import 'screens/language_screen.dart';
 import 'screens/wei_mi_vault_screen.dart';
 import 'screens/recent_files_screen.dart';
 import 'services/lan_transfer_service.dart';
+import 'services/view_prefs_service.dart';
+import 'widgets/file_thumbnail.dart';
 import 'package:path_provider/path_provider.dart';
 
 // 密码长度限制常量
@@ -31,6 +33,9 @@ void main() async {
 
   // Initialize localization service before running the app
   await LocalizationService.getInstance();
+
+  // 加载全局视图偏好（列表/宫格/瀑布流）
+  await ViewPrefsService.instance.load();
 
   // 局域网接收文件的兜底目录（用户未设置加密目录时用）
   try {
@@ -119,6 +124,8 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   int _currentTab = 0;
   bool _isProcessing = false;
   bool _isDragging = false;
+  final GlobalKey<RecentFilesScreenState> _recentKey =
+      GlobalKey<RecentFilesScreenState>();
 
   // Helper to get translations
   String t(String key) => widget.localizationService.translate(key);
@@ -941,29 +948,78 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
         title: Text(t('appTitle')),
         backgroundColor: Theme.of(context).colorScheme.inversePrimary,
         actions: [
+          // 搜索（最近页文件名过滤）
           IconButton(
-            icon: const Icon(Icons.language),
-            tooltip: t('language'),
-            onPressed: () {
-              Navigator.push(
-                context,
-                MaterialPageRoute(
-                    builder: (context) => LanguageScreen(
-                          onLanguageChanged: widget.onLanguageChanged,
-                        )),
+            icon: const Icon(Icons.search),
+            tooltip: '搜索',
+            onPressed: _recentKey.currentState?.toggleSearch,
+          ),
+          // 类型筛选
+          IconButton(
+            icon: const Icon(Icons.filter_list),
+            tooltip: '筛选',
+            onPressed: _showFilterSheet,
+          ),
+          // 视图切换（列表 → 宫格 → 瀑布流）
+          AnimatedBuilder(
+            animation: ViewPrefsService.instance,
+            builder: (context, _) {
+              final m = ViewPrefsService.instance.mode;
+              final (icon, tip) = switch (m) {
+                ViewMode.list => (Icons.grid_view, '宫格视图'),
+                ViewMode.grid => (Icons.dashboard_outlined, '瀑布流视图'),
+                ViewMode.waterfall => (Icons.view_list, '列表视图'),
+              };
+              return IconButton(
+                icon: Icon(icon),
+                tooltip: tip,
+                onPressed: () => ViewPrefsService.instance.cycle(),
               );
             },
           ),
-          IconButton(
-            icon: const Icon(Icons.info_outline),
-            tooltip: t('about'),
-            onPressed: () {
-              Navigator.push(
-                context,
-                MaterialPageRoute(
-                    builder: (context) => const AboutScreen()),
-              );
+          // 竖三点：语言 / 关于
+          PopupMenuButton<String>(
+            icon: const Icon(Icons.more_vert),
+            tooltip: '更多',
+            onSelected: (value) {
+              if (value == 'language') {
+                Navigator.push(
+                  context,
+                  MaterialPageRoute(
+                      builder: (context) => LanguageScreen(
+                            onLanguageChanged: widget.onLanguageChanged,
+                          )),
+                );
+              } else if (value == 'about') {
+                Navigator.push(
+                  context,
+                  MaterialPageRoute(
+                      builder: (context) => const AboutScreen()),
+                );
+              }
             },
+            itemBuilder: (ctx) => [
+              PopupMenuItem(
+                value: 'language',
+                child: Row(
+                  children: [
+                    const Icon(Icons.language, size: 20),
+                    const SizedBox(width: 10),
+                    Text(t('language')),
+                  ],
+                ),
+              ),
+              PopupMenuItem(
+                value: 'about',
+                child: Row(
+                  children: [
+                    const Icon(Icons.info_outline, size: 20),
+                    const SizedBox(width: 10),
+                    Text(t('about')),
+                  ],
+                ),
+              ),
+            ],
           ),
         ],
       ),
@@ -1074,6 +1130,89 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     );
   }
 
+  /// 类型筛选弹窗（作用于「最近」页）
+  void _showFilterSheet() {
+    final current = _recentKey.currentState?.filter ?? FileCategory.all;
+    showModalBottomSheet<FileCategory>(
+      context: context,
+      builder: (ctx) => SafeArea(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const Padding(
+              padding: EdgeInsets.all(12),
+              child: Text('按类型筛选',
+                  style: TextStyle(fontWeight: FontWeight.w600)),
+            ),
+            ListTile(
+              leading: const Icon(Icons.apps),
+              title: const Text('全部'),
+              trailing: current == FileCategory.all
+                  ? const Icon(Icons.check, color: Colors.blue)
+                  : null,
+              onTap: () => Navigator.pop(ctx, FileCategory.all),
+            ),
+            ListTile(
+              leading: const Icon(Icons.image_outlined, color: Colors.teal),
+              title: const Text('图片'),
+              trailing: current == FileCategory.image
+                  ? const Icon(Icons.check, color: Colors.blue)
+                  : null,
+              onTap: () => Navigator.pop(ctx, FileCategory.image),
+            ),
+            ListTile(
+              leading: const Icon(Icons.movie_outlined, color: Colors.purple),
+              title: const Text('视频'),
+              trailing: current == FileCategory.video
+                  ? const Icon(Icons.check, color: Colors.blue)
+                  : null,
+              onTap: () => Navigator.pop(ctx, FileCategory.video),
+            ),
+            ListTile(
+              leading: const Icon(Icons.music_note_outlined, color: Colors.pink),
+              title: const Text('音频'),
+              trailing: current == FileCategory.audio
+                  ? const Icon(Icons.check, color: Colors.blue)
+                  : null,
+              onTap: () => Navigator.pop(ctx, FileCategory.audio),
+            ),
+            ListTile(
+              leading: const Icon(Icons.description_outlined, color: Colors.blue),
+              title: const Text('文档'),
+              trailing: current == FileCategory.doc
+                  ? const Icon(Icons.check, color: Colors.blue)
+                  : null,
+              onTap: () => Navigator.pop(ctx, FileCategory.doc),
+            ),
+            ListTile(
+              leading: const Icon(Icons.folder_zip_outlined,
+                  color: Color(0xFFB8860B)),
+              title: const Text('压缩包'),
+              trailing: current == FileCategory.archive
+                  ? const Icon(Icons.check, color: Colors.blue)
+                  : null,
+              onTap: () => Navigator.pop(ctx, FileCategory.archive),
+            ),
+            ListTile(
+              leading: const Icon(Icons.insert_drive_file_outlined,
+                  color: Colors.grey),
+              title: const Text('其他'),
+              trailing: current == FileCategory.other
+                  ? const Icon(Icons.check, color: Colors.blue)
+                  : null,
+              onTap: () => Navigator.pop(ctx, FileCategory.other),
+            ),
+          ],
+        ),
+      ),
+    ).then((c) {
+      if (c != null && mounted) {
+        _recentKey.currentState?.setFilter(c);
+        setState(() => _currentTab = 0); // 筛选后切回最近页展示效果
+      }
+    });
+  }
+
   Widget _buildRecentTab() {
     return Column(
       children: [
@@ -1114,6 +1253,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
         // 全部文件列表（最近修改在前）
         Expanded(
           child: RecentFilesScreen(
+            key: _recentKey,
             translate: t,
             onOpenFile: _openFile,
           ),

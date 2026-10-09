@@ -9,7 +9,9 @@ import '../services/encryption_service.dart';
 import '../services/file_batch_ops.dart';
 import '../services/file_operations_service.dart';
 import '../services/file_viewer_service.dart';
+import '../services/view_prefs_service.dart';
 import '../widgets/file_selection_bar.dart';
+import '../widgets/file_thumbnail.dart';
 import 'lan_transfer_screen.dart';
 
 /// WeiMi Vault 屏幕
@@ -525,6 +527,7 @@ class _WeiMiVaultScreenState extends State<WeiMiVaultScreen> {
   // ============ 多选模式 ============
 
   final Set<String> _selectedPaths = {}; // 当前选中的文件路径
+  bool _aspectRefreshing = false; // 瀑布流图片比例异步加载标记
   bool get _selecting => _selectedPaths.isNotEmpty;
 
   void _toggleSelect(String path) {
@@ -1019,28 +1022,212 @@ class _WeiMiVaultScreenState extends State<WeiMiVaultScreen> {
     return Scrollbar(
       thumbVisibility: true, // 文件多时滚动条常显
       interactive: true,
-      child: ListView.builder(
-        padding: const EdgeInsets.symmetric(vertical: 8),
-        itemCount: _items.length,
-        itemBuilder: (context, index) {
-          final item = _items[index];
-          final selectable = !item.isDirectory;
-          final selected = selectable && _selectedPaths.contains(item.fullPath);
-          return _FileListItem(
-            item: item,
-            selected: selected,
-            selecting: _selecting,
-            onTap: () {
-              if (_selecting) {
-                if (selectable) _toggleSelect(item.fullPath);
-              } else {
-                _openFile(item);
-              }
-            },
-            onLongPress:
-                selectable ? () => _toggleSelect(item.fullPath) : null,
-          );
+      child: AnimatedBuilder(
+        animation: ViewPrefsService.instance,
+        builder: (context, _) {
+          switch (ViewPrefsService.instance.mode) {
+            case ViewMode.grid:
+              return _buildGridBody();
+            case ViewMode.waterfall:
+              return _buildWaterfallBody();
+            case ViewMode.list:
+            default:
+              return ListView.builder(
+                padding: const EdgeInsets.symmetric(vertical: 8),
+                itemCount: _items.length,
+                itemBuilder: (context, index) {
+                  final item = _items[index];
+                  final selectable = !item.isDirectory;
+                  final selected =
+                      selectable && _selectedPaths.contains(item.fullPath);
+                  return _FileListItem(
+                    item: item,
+                    selected: selected,
+                    selecting: _selecting,
+                    onTap: () {
+                      if (_selecting) {
+                        if (selectable) _toggleSelect(item.fullPath);
+                      } else {
+                        _openFile(item);
+                      }
+                    },
+                    onLongPress:
+                        selectable ? () => _toggleSelect(item.fullPath) : null,
+                  );
+                },
+              );
+          }
         },
+      ),
+    );
+  }
+
+  /// 宫格视图（文件夹 + 文件卡片）
+  Widget _buildGridBody() {
+    return GridView.builder(
+      physics: const AlwaysScrollableScrollPhysics(),
+      padding: const EdgeInsets.all(10),
+      gridDelegate: const SliverGridDelegateWithMaxCrossAxisExtent(
+        maxCrossAxisExtent: 130,
+        mainAxisSpacing: 10,
+        crossAxisSpacing: 10,
+        childAspectRatio: 0.78,
+      ),
+      itemCount: _items.length,
+      itemBuilder: (context, i) => _buildCard(_items[i], null),
+    );
+  }
+
+  /// 瀑布流视图（两列，图片按宽高比）
+  Widget _buildWaterfallBody() {
+    // 图片比例未缓存的先异步解码，完成后刷新
+    final missing = _items
+        .where((it) =>
+            !it.isDirectory &&
+            FileThumbs.isImage(it.name) &&
+            !FileThumbs.aspectCache.containsKey(it.fullPath))
+        .toList();
+    if (missing.isNotEmpty && !_aspectRefreshing) {
+      _aspectRefreshing = true;
+      Future.wait(missing.take(60).map((it) =>
+              FileThumbs.aspectRatio(it.fullPath)))
+          .then((_) {
+        _aspectRefreshing = false;
+        if (mounted) setState(() {});
+      });
+    }
+
+    final colA = <FileItem>[];
+    final colB = <FileItem>[];
+    final hA = <FileItem, double>{};
+    final hB = <FileItem, double>{};
+    double sumA = 0, sumB = 0;
+    for (final it in _items) {
+      final ratio =
+          it.isDirectory ? null : FileThumbs.aspectCache[it.fullPath];
+      final thumbH = it.isDirectory
+          ? 120.0
+          : ratio == null || ratio <= 0
+              ? 160.0
+              : (260.0 / ratio).clamp(120.0, 320.0);
+      final itemH = thumbH + 52;
+      if (sumA <= sumB) {
+        colA.add(it);
+        hA[it] = thumbH;
+        sumA += itemH;
+      } else {
+        colB.add(it);
+        hB[it] = thumbH;
+        sumB += itemH;
+      }
+    }
+
+    Widget col(List<FileItem> items, Map<FileItem, double> hs) {
+      return Expanded(
+        child: Column(
+          children: [
+            for (final it in items)
+              Padding(
+                padding: const EdgeInsets.only(bottom: 10),
+                child: _buildCard(it, hs[it] ?? 160),
+              ),
+          ],
+        ),
+      );
+    }
+
+    return SingleChildScrollView(
+      physics: const AlwaysScrollableScrollPhysics(),
+      padding: const EdgeInsets.all(10),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [col(colA, hA), const SizedBox(width: 10), col(colB, hB)],
+      ),
+    );
+  }
+
+  /// 文件/文件夹卡片（宫格与瀑布流共用）
+  Widget _buildCard(FileItem item, double? thumbHeight) {
+    final selectable = !item.isDirectory;
+    final selected = selectable && _selectedPaths.contains(item.fullPath);
+
+    Widget thumbArea;
+    if (item.isDirectory) {
+      thumbArea = Icon(
+        Icons.folder,
+        size: 56,
+        color: Colors.amber.shade600,
+      );
+    } else if (thumbHeight != null) {
+      // 瀑布流：固定高度容器内放缩略图
+      thumbArea = SizedBox(
+        width: double.infinity,
+        height: thumbHeight,
+        child: FileThumbnail(path: item.fullPath, name: item.name, size: 64),
+      );
+    } else {
+      thumbArea = FileThumbnail(path: item.fullPath, name: item.name, size: 72);
+    }
+
+    final Widget imageSection = thumbHeight != null
+        ? ClipRRect(
+            borderRadius:
+                const BorderRadius.vertical(top: Radius.circular(9)),
+            child: thumbArea,
+          )
+        : Expanded(
+            child: Center(child: thumbArea),
+          );
+
+    return InkWell(
+      onTap: () {
+        if (_selecting) {
+          if (selectable) _toggleSelect(item.fullPath);
+        } else {
+          _openFile(item);
+        }
+      },
+      onLongPress: selectable ? () => _toggleSelect(item.fullPath) : null,
+      borderRadius: BorderRadius.circular(10),
+      child: Container(
+        decoration: BoxDecoration(
+          color: Theme.of(context).cardColor,
+          borderRadius: BorderRadius.circular(10),
+          border: Border.all(
+            color: selected ? Colors.blue : Colors.grey.shade200,
+            width: selected ? 2 : 1,
+          ),
+        ),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            imageSection,
+            Padding(
+              padding: const EdgeInsets.fromLTRB(8, 4, 8, 8),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    item.name,
+                    style: TextStyle(
+                      fontSize: 12,
+                      fontWeight:
+                          item.isDirectory ? FontWeight.w500 : null,
+                    ),
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                  ),
+                  const SizedBox(height: 2),
+                  Text(
+                    item.isDirectory ? '文件夹' : item.humanSize,
+                    style:
+                        TextStyle(fontSize: 10, color: Colors.grey.shade500),
+                  ),
+                ],
+              ),
+            ),
+          ],
+        ),
       ),
     );
   }
@@ -1209,16 +1396,19 @@ class _FileListItem extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final showCheck = selecting && !item.isDirectory;
+    final Widget leading;
+    if (showCheck) {
+      leading = Icon(
+        selected ? Icons.check_box : Icons.check_box_outline_blank,
+        color: selected ? Colors.blue : Colors.grey,
+      );
+    } else if (item.isDirectory) {
+      leading = const Icon(Icons.folder, color: Colors.amber);
+    } else {
+      leading = FileThumbnail(path: item.fullPath, name: item.name, size: 42);
+    }
     return ListTile(
-      leading: showCheck
-          ? Icon(
-              selected ? Icons.check_box : Icons.check_box_outline_blank,
-              color: selected ? Colors.blue : Colors.grey,
-            )
-          : Icon(
-              item.isDirectory ? Icons.folder : _fileIcon(item),
-              color: item.isDirectory ? Colors.amber : (item.isEncryptedFile ? Colors.blue : Colors.grey),
-            ),
+      leading: leading,
       title: Text(
         item.name,
         style: TextStyle(fontWeight: item.isDirectory ? FontWeight.w500 : null),

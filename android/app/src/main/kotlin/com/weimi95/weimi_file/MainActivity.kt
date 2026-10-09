@@ -14,13 +14,14 @@ import java.io.FileOutputStream
 
 class MainActivity : FlutterActivity() {
     private val CHANNEL = "com.weimi95.weimi/file_association"
+    private val VIDEO_THUMB_CHANNEL = "com.weimi95.weimi/video_thumb"
     private var initialFilePath: String? = null
 
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
-        
+
         handleIntent(intent)
-        
+
         MethodChannel(flutterEngine.dartExecutor.binaryMessenger, CHANNEL).setMethodCallHandler {
             call, result ->
             when (call.method) {
@@ -38,6 +39,52 @@ class MainActivity : FlutterActivity() {
                 else -> {
                     result.notImplemented()
                 }
+            }
+        }
+
+        // 视频缩略图抽帧（MediaMetadataRetriever），返回 JPEG 字节
+        MethodChannel(flutterEngine.dartExecutor.binaryMessenger, VIDEO_THUMB_CHANNEL)
+            .setMethodCallHandler { call, result ->
+                when (call.method) {
+                    "getVideoThumbnail" -> {
+                        val path = call.argument<String>("path")
+                        val width = (call.argument<Int>("width") ?: 256).coerceIn(64, 512)
+                        Thread {
+                            result.success(videoThumbnail(path, width))
+                        }.start()
+                    }
+                    else -> result.notImplemented()
+                }
+            }
+    }
+
+    /// 抽视频第一关键帧，压缩为 JPEG。失败返回 null（UI 退化为类型图标）。
+    private fun videoThumbnail(path: String?, width: Int): ByteArray? {
+        if (path == null || !File(path).exists()) return null
+        val retriever = android.media.MediaMetadataRetriever()
+        return try {
+            retriever.setDataSource(path)
+            val frame = retriever.getFrameAtTime(
+                0,
+                android.media.MediaMetadataRetriever.OPTION_CLOSEST_SYNC
+            ) ?: return null
+            val scaled = if (frame.width > width) {
+                val h = frame.height * width / frame.width
+                android.graphics.Bitmap.createScaledBitmap(frame, width, h, true)
+            } else {
+                frame
+            }
+            val bos = java.io.ByteArrayOutputStream()
+            scaled.compress(android.graphics.Bitmap.CompressFormat.JPEG, 60, bos)
+            if (scaled !== frame) frame.recycle()
+            scaled.recycle()
+            bos.toByteArray()
+        } catch (e: Exception) {
+            null
+        } finally {
+            try {
+                retriever.release()
+            } catch (e: Exception) {
             }
         }
     }
