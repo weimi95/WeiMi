@@ -146,7 +146,7 @@ class RecentFilesScreenState extends State<RecentFilesScreen> {
     });
   }
 
-  Widget _ctxMenuItem(String value, IconData icon, String label,
+  PopupMenuItem<String> _ctxMenuItem(String value, IconData icon, String label,
       {Color? color}) {
     return PopupMenuItem<String>(
       value: value,

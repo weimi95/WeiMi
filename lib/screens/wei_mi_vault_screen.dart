@@ -766,13 +766,13 @@ class WeiMiVaultScreenState extends State<WeiMiVaultScreen> {
         if (FileSystemEntity.isDirectorySync(path)) {
           _navigateTo(path);
         } else {
-          final stat = FileSystemEntity.statSync(path);
+          final f = File(path);
           _openFile(FileItem(
             name: p.basename(path),
             fullPath: path,
             isDirectory: false,
-            size: stat.size,
-            modified: stat.modified,
+            size: f.lengthSync(),
+            modified: f.lastModifiedSync(),
           ));
         }
       } catch (_) {}
@@ -1398,7 +1398,9 @@ class WeiMiVaultScreenState extends State<WeiMiVaultScreen> {
     final selected = selectable && _selectedPaths.contains(item.fullPath);
     return Padding(
       padding: const EdgeInsets.only(left: 24),
-      child: ListTile(
+      child: GestureDetector(
+        onDoubleTap: _isDesktop ? () => _desktopOpen(item) : null,
+        child: ListTile(
         dense: true,
         visualDensity: VisualDensity.compact,
         leading: _selecting && selectable
@@ -1433,13 +1435,13 @@ class WeiMiVaultScreenState extends State<WeiMiVaultScreen> {
                   _openFile(item);
                 }
               },
-        onDoubleTap: _isDesktop ? () => _desktopOpen(item) : null,
         onSecondaryTapUp: _isDesktop
             ? (d) => _showContextMenu(item, d.globalPosition, -1, const [])
             : null,
         onLongPress: selectable && !_isDesktop
             ? () => _toggleSelect(item.fullPath)
             : null,
+      ),
       ),
     );
   }
@@ -1886,7 +1888,9 @@ class _FileListItem extends StatelessWidget {
     } else {
       leading = FileThumbnail(path: item.fullPath, name: item.name, size: 42);
     }
-    return ListTile(
+    return GestureDetector(
+      onDoubleTap: onDoubleTap,
+      child: ListTile(
       leading: leading,
       title: Text(
         item.name,
@@ -1898,8 +1902,8 @@ class _FileListItem extends StatelessWidget {
           : null,
       onTap: onTap,
       onLongPress: onLongPress,
-      onDoubleTap: onDoubleTap,
       onSecondaryTapUp: onSecondaryTapUp,
+      ),
     );
   }
 }
