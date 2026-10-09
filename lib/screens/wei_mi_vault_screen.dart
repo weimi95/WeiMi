@@ -26,11 +26,15 @@ import 'lan_transfer_screen.dart';
 class WeiMiVaultScreen extends StatefulWidget {
   final bool showSystemDirs; // true = 桌面端，显示常用系统目录
   final String? initialPath; // 桌面端可指定初始路径
+  final Future<void> Function()? onEncryptFiles; // 加密文件（主界面流程）
+  final Future<void> Function()? onDecryptFiles; // 解密文件（主界面流程）
 
   const WeiMiVaultScreen({
     super.key,
     this.showSystemDirs = false,
     this.initialPath,
+    this.onEncryptFiles,
+    this.onDecryptFiles,
   });
 
   @override
@@ -57,6 +61,9 @@ class _DirEntry {
 class _WeiMiVaultScreenState extends State<WeiMiVaultScreen> {
   static const String _kCustomDirsKey = 'weimi_custom_dirs';
   static const String _kVaultDirKey = 'weimi_vault_dir';
+  static const String _kExpandedDirsKey = 'weimi_expanded_dirs';
+  static const String _kCommonOpenKey = 'weimi_sec_common_open';
+  static const String _kMineOpenKey = 'weimi_sec_mine_open';
 
   // ============ 浏览视图（进入某目录后）状态 ============
   List<FileItem> _items = [];
@@ -69,11 +76,17 @@ class _WeiMiVaultScreenState extends State<WeiMiVaultScreen> {
   String? _vaultDir; // 加密文件存放目录（用户设置，null = 未设置）
   bool _storageGranted = true; // Android 存储权限（桌面端恒 true）
   final Set<String> _expandedDirs = {}; // 展开中的目录
+  bool _commonOpen = true; // 「常用目录」分组展开
+  bool _mineOpen = true; // 「我的目录」分组展开
   final Map<String, List<FileItem>> _dirChildren = {}; // 展开后的子项缓存
   final Map<String, bool> _dirLoading = {};
   List<String> _customDirs = []; // 用户添加的目录
   List<_DirEntry> _desktopDirs = []; // 桌面端常用目录
   final ScrollController _rootScroll = ScrollController();
+
+  // ============ 固定搜索框（根视图与浏览视图共用） ============
+  String _fileQuery = '';
+  final TextEditingController _fileSearchCtrl = TextEditingController();
 
   @override
   void initState() {
@@ -85,14 +98,20 @@ class _WeiMiVaultScreenState extends State<WeiMiVaultScreen> {
   @override
   void dispose() {
     _rootScroll.dispose();
+    _fileSearchCtrl.dispose();
     super.dispose();
   }
 
   Future<void> _initRoot() async {
     // 加密文件存放目录（用户设置的；未设置时由用户首次进入时选择）
+    // + 折叠状态记忆
     try {
       final prefs = await SharedPreferences.getInstance();
       _vaultDir = prefs.getString(_kVaultDirKey);
+      _commonOpen = prefs.getBool(_kCommonOpenKey) ?? true;
+      _mineOpen = prefs.getBool(_kMineOpenKey) ?? true;
+      final expanded = prefs.getStringList(_kExpandedDirsKey) ?? [];
+      _expandedDirs.addAll(expanded);
     } catch (_) {}
 
     // 桌面端常用目录
@@ -229,6 +248,7 @@ class _WeiMiVaultScreenState extends State<WeiMiVaultScreen> {
       _dirChildren.remove(dirPath);
       _dirLoading.remove(dirPath);
     });
+    _persistExpandedDirs();
     try {
       final prefs = await SharedPreferences.getInstance();
       await prefs.setStringList(_kCustomDirsKey, _customDirs);
@@ -270,6 +290,7 @@ class _WeiMiVaultScreenState extends State<WeiMiVaultScreen> {
   Future<void> _toggleDir(String dirPath) async {
     if (_expandedDirs.contains(dirPath)) {
       setState(() => _expandedDirs.remove(dirPath));
+      _persistExpandedDirs();
       return;
     }
 
@@ -278,6 +299,7 @@ class _WeiMiVaultScreenState extends State<WeiMiVaultScreen> {
       _expandedDirs.add(dirPath);
       _dirLoading[dirPath] = true;
     });
+    _persistExpandedDirs();
     try {
       final items = await listDirectory(dirPath);
       if (!mounted) return;
@@ -295,6 +317,27 @@ class _WeiMiVaultScreenState extends State<WeiMiVaultScreen> {
         SnackBar(content: Text('无法读取目录: $e')),
       );
     }
+  }
+
+  Future<void> _persistExpandedDirs() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setStringList(_kExpandedDirsKey, _expandedDirs.toList());
+    } catch (_) {}
+  }
+
+  Future<void> _setSectionOpen({required bool mine, required bool open}) async {
+    setState(() {
+      if (mine) {
+        _mineOpen = open;
+      } else {
+        _commonOpen = open;
+      }
+    });
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setBool(mine ? _kMineOpenKey : _kCommonOpenKey, open);
+    } catch (_) {}
   }
 
   // ============ 导航（浏览视图） ============
@@ -727,7 +770,17 @@ class _WeiMiVaultScreenState extends State<WeiMiVaultScreen> {
             ),
       body: _loading
           ? const Center(child: CircularProgressIndicator())
-          : (isRoot ? _buildRootView() : (_items.isEmpty ? _emptyState : _buildFileList())),
+          : Column(
+              children: [
+                // 固定顶部搜索框（根视图与浏览视图都显示）
+                if (!_selecting) _buildFileSearchField(),
+                Expanded(
+                  child: isRoot
+                      ? _buildRootView()
+                      : (_items.isEmpty ? _emptyState : _buildFileList()),
+                ),
+              ],
+            ),
       bottomSheet: _selecting && !_loading
           ? FileSelectionBar(
               count: _selectedPaths.length,
@@ -738,25 +791,92 @@ class _WeiMiVaultScreenState extends State<WeiMiVaultScreen> {
               onMore: _moreSelected,
             )
           : null,
-      floatingActionButton: isRoot
+      floatingActionButton: !isRoot && isDesktop
           ? FloatingActionButton.extended(
-              onPressed: _addCustomDir,
-              icon: const Icon(Icons.create_new_folder_outlined),
-              label: const Text('添加目录'),
+              onPressed: () => _showAddDialog(),
+              icon: const Icon(Icons.add),
+              label: const Text('新建'),
             )
-          : (isDesktop
-              ? FloatingActionButton.extended(
-                  onPressed: () => _showAddDialog(),
-                  icon: const Icon(Icons.add),
-                  label: const Text('新建'),
-                )
-              : null),
+          : null,
     );
   }
 
-  /// 根视图：全部文件入口 + 常用目录（含加密文件存放目录）+ 我的目录 + 局域网传输
+  /// 文件页固定搜索框：根视图过滤展开目录的子项，浏览视图过滤当前目录
+  Widget _buildFileSearchField() {
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(12, 8, 12, 4),
+      child: TextField(
+        controller: _fileSearchCtrl,
+        decoration: InputDecoration(
+          isDense: true,
+          prefixIcon: const Icon(Icons.search, size: 20),
+          suffixIcon: _fileQuery.isEmpty
+              ? null
+              : IconButton(
+                  icon: const Icon(Icons.clear, size: 18),
+                  onPressed: () {
+                    _fileSearchCtrl.clear();
+                    setState(() => _fileQuery = '');
+                  },
+                ),
+          hintText: '搜索文件',
+          border: OutlineInputBorder(
+            borderRadius: BorderRadius.circular(10),
+          ),
+          contentPadding: const EdgeInsets.symmetric(vertical: 8),
+        ),
+        onChanged: (v) => setState(() => _fileQuery = v.trim()),
+      ),
+    );
+  }
+
+  /// 根视图：搜索框 + 快捷操作卡 + 常用目录（含全部文件）+ 我的目录（加密目录 + 添加目录）
   Widget _buildRootView() {
     final entries = _buildRootEntries();
+    final builtin = entries.where((e) => !e.isCustom && !e.isVault).toList();
+    final customs = entries.where((e) => e.isCustom).toList();
+
+    // 搜索过滤：有查询词时，只显示匹配的展开子项
+    final q = _fileQuery.toLowerCase();
+    bool matchChild(FileItem it) =>
+        q.isEmpty || it.name.toLowerCase().contains(q);
+
+    Widget section({
+      required String title,
+      required bool open,
+      required ValueChanged<bool> onToggle,
+      required List<Widget> children,
+    }) {
+      return Column(
+        children: [
+          InkWell(
+            onTap: () => onToggle(!open),
+            child: Padding(
+              padding: const EdgeInsets.fromLTRB(16, 14, 16, 4),
+              child: Row(
+                children: [
+                  Text(
+                    title,
+                    style: TextStyle(
+                      fontSize: 13,
+                      fontWeight: FontWeight.bold,
+                      color: Colors.grey.shade600,
+                    ),
+                  ),
+                  const Spacer(),
+                  Icon(
+                    open ? Icons.expand_less : Icons.expand_more,
+                    size: 20,
+                    color: Colors.grey,
+                  ),
+                ],
+              ),
+            ),
+          ),
+          if (open) ...children,
+        ],
+      );
+    }
 
     return Scrollbar(
       controller: _rootScroll,
@@ -764,71 +884,177 @@ class _WeiMiVaultScreenState extends State<WeiMiVaultScreen> {
       interactive: true,
       child: ListView(
         controller: _rootScroll,
-        padding: const EdgeInsets.only(bottom: 96),
+        padding: const EdgeInsets.only(bottom: 24),
         children: [
           if (Platform.isAndroid && !_storageGranted) _permissionBanner,
-          // 全部文件入口（像手机文件管理器，浏览设备全部文件）
-          ListTile(
-            leading: const Icon(Icons.apps, color: Colors.deepPurple),
-            title: const Text('全部文件',
-                style: TextStyle(fontWeight: FontWeight.w600)),
-            subtitle: Text(
-              Platform.isAndroid ? '/storage/emulated/0' : _homeDir(),
-              style: TextStyle(fontSize: 11, color: Colors.grey.shade500),
+          // 快捷操作：加密 / 解密 / 微密飞传
+          Padding(
+            padding: const EdgeInsets.fromLTRB(12, 8, 12, 4),
+            child: Row(
+              children: [
+                Expanded(
+                  child: _actionCard(
+                    icon: Icons.lock,
+                    label: '加密文件',
+                    color: Colors.orange,
+                    onTap: () =>
+                        widget.onEncryptFiles?.call() ?? _pickAndEncrypt(),
+                  ),
+                ),
+                const SizedBox(width: 10),
+                Expanded(
+                  child: _actionCard(
+                    icon: Icons.lock_open,
+                    label: '解密文件',
+                    color: Colors.green,
+                    onTap: () =>
+                        widget.onDecryptFiles?.call() ?? _pickAndDecrypt(),
+                  ),
+                ),
+                const SizedBox(width: 10),
+                Expanded(
+                  child: _actionCard(
+                    icon: Icons.lan_outlined,
+                    label: '微密飞传',
+                    color: Colors.teal,
+                    onTap: _openLanTransfer,
+                  ),
+                ),
+              ],
             ),
-            trailing:
-                const Icon(Icons.chevron_right, color: Colors.grey),
-            onTap: () => _navigateTo(Platform.isAndroid
-                ? '/storage/emulated/0'
-                : _homeDir()),
           ),
-          const Divider(height: 1, indent: 16),
-          // 加密文件存放目录（未设置时引导设置）
-          if (_vaultDir == null)
-            ListTile(
-              leading: Icon(Icons.shield_outlined, color: Colors.blue.shade700),
-              title: const Text('加密文件存放目录',
-                  style: TextStyle(fontWeight: FontWeight.w600)),
-              subtitle: const Text('尚未设置，点击选择一个文件夹\n之后加密/接收的文件默认存入',
-                  style: TextStyle(fontSize: 11)),
-              trailing: TextButton(
-                onPressed: _setupVaultDir,
-                child: const Text('设置'),
+          section(
+            title: '常用目录',
+            open: _commonOpen,
+            onToggle: (v) => _setSectionOpen(mine: false, open: v),
+            children: [
+              // 全部文件入口（像手机文件管理器，浏览设备全部文件）
+              ListTile(
+                leading:
+                    const Icon(Icons.apps, color: Colors.deepPurple),
+                title: const Text('全部文件',
+                    style: TextStyle(fontWeight: FontWeight.w600)),
+                subtitle: Text(
+                  Platform.isAndroid ? '/storage/emulated/0' : _homeDir(),
+                  style: TextStyle(fontSize: 11, color: Colors.grey.shade500),
+                ),
+                trailing:
+                    const Icon(Icons.chevron_right, color: Colors.grey),
+                onTap: () => _navigateTo(Platform.isAndroid
+                    ? '/storage/emulated/0'
+                    : _homeDir()),
               ),
-              onTap: _setupVaultDir,
-            ),
-          _sectionHeader('常用目录'),
-          for (final d in entries.where((e) => !e.isCustom))
-            _buildDirTile(d),
-          _sectionHeader('我的目录'),
-          for (final d in entries.where((e) => e.isCustom)) _buildDirTile(d),
-          ListTile(
-            leading: Icon(Icons.add_circle_outline, color: Colors.blue.shade700),
-            title: const Text('添加目录'),
-            subtitle: const Text('选择手机/电脑上的任意文件夹加入列表',
-                style: TextStyle(fontSize: 12, color: Colors.grey)),
-            onTap: _addCustomDir,
+              for (final d in builtin) _buildDirTile(d, filterQuery: q),
+            ],
           ),
-          const Divider(height: 1, indent: 16),
-          // 局域网传输入口
-          ListTile(
-            leading: const Icon(Icons.lan_outlined, color: Colors.teal),
-            title: const Text('局域网传输',
-                style: TextStyle(fontWeight: FontWeight.w600)),
-            subtitle: const Text('同一 WiFi 下发现设备、互传文件（支持加密发送）',
-                style: TextStyle(fontSize: 12, color: Colors.grey)),
-            trailing: const Icon(Icons.chevron_right, color: Colors.grey),
-            onTap: () {
-              Navigator.push(
-                context,
-                MaterialPageRoute(
-                    builder: (context) => const LanTransferScreen()),
-              );
-            },
+          section(
+            title: '我的目录',
+            open: _mineOpen,
+            onToggle: (v) => _setSectionOpen(mine: true, open: v),
+            children: [
+              // 加密文件存放目录（未设置时引导设置，置顶）
+              if (_vaultDir == null)
+                ListTile(
+                  leading:
+                      Icon(Icons.shield_outlined, color: Colors.blue.shade700),
+                  title: const Text('加密文件存放目录',
+                      style: TextStyle(fontWeight: FontWeight.w600)),
+                  subtitle: const Text('尚未设置，点击选择一个文件夹\n之后加密/接收的文件默认存入',
+                      style: TextStyle(fontSize: 11)),
+                  trailing: TextButton(
+                    onPressed: _setupVaultDir,
+                    child: const Text('设置'),
+                  ),
+                  onTap: _setupVaultDir,
+                )
+              else
+                _buildDirTile(
+                  _DirEntry(
+                      '加密文件存放目录', _vaultDir!, Icons.shield_outlined,
+                      isVault: true),
+                  filterQuery: q,
+                ),
+              for (final d in customs) _buildDirTile(d, filterQuery: q),
+              ListTile(
+                leading: Icon(Icons.add_circle_outline,
+                    color: Colors.blue.shade700),
+                title: const Text('添加目录'),
+                subtitle: const Text('选择手机/电脑上的任意文件夹加入列表',
+                    style: TextStyle(fontSize: 12, color: Colors.grey)),
+                onTap: _addCustomDir,
+              ),
+            ],
           ),
         ],
       ),
     );
+  }
+
+  /// 快捷操作卡（与主界面加密/解密同款样式）
+  Widget _actionCard({
+    required IconData icon,
+    required String label,
+    required Color color,
+    required VoidCallback onTap,
+  }) {
+    return InkWell(
+      onTap: onTap,
+      borderRadius: BorderRadius.circular(12),
+      child: Container(
+        padding: const EdgeInsets.symmetric(vertical: 10),
+        decoration: BoxDecoration(
+          color: color.withAlpha(15),
+          borderRadius: BorderRadius.circular(12),
+          border: Border.all(color: color.withAlpha(50)),
+        ),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(icon, size: 24, color: color),
+            const SizedBox(height: 6),
+            Text(
+              label,
+              style: TextStyle(
+                fontSize: 13,
+                fontWeight: FontWeight.w500,
+                color: color,
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  void _openLanTransfer() {
+    Navigator.push(
+      context,
+      MaterialPageRoute(builder: (context) => const LanTransferScreen()),
+    );
+  }
+
+  /// 未接主界面回调时的兜底：直接走文件选择 + 本页加密流程
+  Future<void> _pickAndEncrypt() async {
+    final result = await FilePicker.platform.pickFiles(allowMultiple: true);
+    final files = result?.files.where((f) => f.path != null).toList() ?? [];
+    for (final f in files) {
+      if (!mounted) return;
+      await _encryptFile(f.path!);
+    }
+  }
+
+  Future<void> _pickAndDecrypt() async {
+    final result = await FilePicker.platform.pickFiles(allowMultiple: true);
+    final files = result?.files.where((f) => f.path != null).toList() ?? [];
+    for (final f in files) {
+      if (!mounted) return;
+      final path = f.path!;
+      if (!await EncryptionService.isEncryptedFile(path)) continue;
+      final hint = await EncryptionService.getPasswordHint(path);
+      final password = await _showPasswordDialog(hint: hint);
+      if (password == null || !mounted) return;
+      _decryptFile(path, password);
+    }
   }
 
   String _homeDir() {
@@ -840,14 +1066,7 @@ class _WeiMiVaultScreenState extends State<WeiMiVaultScreen> {
   List<_DirEntry> _buildRootEntries() {
     final entries = <_DirEntry>[];
 
-    // 1. 加密文件存放目录（用户设置过的才出现在折叠列表里）
-    if (_vaultDir != null) {
-      entries.add(_DirEntry(
-          '加密文件存放目录', _vaultDir!, Icons.shield_outlined,
-          isVault: true));
-    }
-
-    // 2. 平台常用目录
+    // 1. 平台常用目录
     if (Platform.isAndroid) {
       const root = '/storage/emulated/0';
       entries.addAll([
@@ -862,7 +1081,7 @@ class _WeiMiVaultScreenState extends State<WeiMiVaultScreen> {
       entries.addAll(_desktopDirs);
     }
 
-    // 3. 用户自定义目录
+    // 2. 用户自定义目录
     for (final dirPath in _customDirs) {
       entries.add(_DirEntry(p.basename(dirPath), dirPath, Icons.folder_outlined,
           isCustom: true));
@@ -870,20 +1089,8 @@ class _WeiMiVaultScreenState extends State<WeiMiVaultScreen> {
     return entries;
   }
 
-  Widget _sectionHeader(String title) => Padding(
-        padding: const EdgeInsets.fromLTRB(16, 16, 16, 4),
-        child: Text(
-          title,
-          style: TextStyle(
-            fontSize: 13,
-            fontWeight: FontWeight.bold,
-            color: Colors.grey.shade600,
-          ),
-        ),
-      );
-
-  /// 单个目录条目：默认折叠，点击展开列出其下的文件夹与文件
-  Widget _buildDirTile(_DirEntry d) {
+  /// 单个目录条目：默认折叠，点击展开列出其下的文件夹与文件（搜索时过滤子项）
+  Widget _buildDirTile(_DirEntry d, {String filterQuery = ''}) {
     final expanded = _expandedDirs.contains(d.dirPath);
     final loading = _dirLoading[d.dirPath] == true;
     final children = _dirChildren[d.dirPath];
@@ -929,13 +1136,21 @@ class _WeiMiVaultScreenState extends State<WeiMiVaultScreen> {
           onTap: () => _toggleDir(d.dirPath),
           onLongPress: d.isVault ? _setupVaultDir : null, // 长按更改加密目录
         ),
-        if (expanded) ..._buildExpandedContent(children),
+        if (expanded) ..._buildExpandedContent(children, filterQuery),
       ],
     );
   }
 
-  List<Widget> _buildExpandedContent(List<FileItem>? children) {
-    if (children == null) {
+  List<Widget> _buildExpandedContent(
+      List<FileItem>? children, String filterQuery) {
+    // 搜索过滤（不区分大小写）
+    List<FileItem>? visible = children;
+    if (filterQuery.isNotEmpty && children != null) {
+      final q = filterQuery.toLowerCase();
+      visible =
+          children.where((it) => it.name.toLowerCase().contains(q)).toList();
+    }
+    if (visible == null) {
       return const [
         Padding(
           padding: EdgeInsets.symmetric(vertical: 12),
@@ -943,7 +1158,7 @@ class _WeiMiVaultScreenState extends State<WeiMiVaultScreen> {
         ),
       ];
     }
-    if (children.isEmpty) {
+    if (visible.isEmpty) {
       return [
         Padding(
           padding: const EdgeInsets.symmetric(vertical: 12),
@@ -955,7 +1170,7 @@ class _WeiMiVaultScreenState extends State<WeiMiVaultScreen> {
       ];
     }
     return [
-      for (final item in children) _buildChildRow(item),
+      for (final item in visible) _buildChildRow(item),
       const Divider(height: 1, indent: 16),
     ];
   }
@@ -1018,7 +1233,21 @@ class _WeiMiVaultScreenState extends State<WeiMiVaultScreen> {
     ),
   );
 
+  /// 浏览视图条目（搜索框过滤，不区分大小写）
+  List<FileItem> get _browseItems {
+    if (_fileQuery.isEmpty) return _items;
+    final q = _fileQuery.toLowerCase();
+    return _items.where((it) => it.name.toLowerCase().contains(q)).toList();
+  }
+
   Widget _buildFileList() {
+    final items = _browseItems;
+    if (items.isEmpty && _fileQuery.isNotEmpty) {
+      return Center(
+        child: Text('没有匹配的文件',
+            style: TextStyle(fontSize: 14, color: Colors.grey.shade500)),
+      );
+    }
     return Scrollbar(
       thumbVisibility: true, // 文件多时滚动条常显
       interactive: true,
@@ -1034,9 +1263,9 @@ class _WeiMiVaultScreenState extends State<WeiMiVaultScreen> {
             default:
               return ListView.builder(
                 padding: const EdgeInsets.symmetric(vertical: 8),
-                itemCount: _items.length,
+                itemCount: items.length,
                 itemBuilder: (context, index) {
-                  final item = _items[index];
+                  final item = items[index];
                   final selectable = !item.isDirectory;
                   final selected =
                       selectable && _selectedPaths.contains(item.fullPath);
@@ -1064,6 +1293,7 @@ class _WeiMiVaultScreenState extends State<WeiMiVaultScreen> {
 
   /// 宫格视图（文件夹 + 文件卡片）
   Widget _buildGridBody() {
+    final items = _browseItems;
     return GridView.builder(
       physics: const AlwaysScrollableScrollPhysics(),
       padding: const EdgeInsets.all(10),
@@ -1073,15 +1303,16 @@ class _WeiMiVaultScreenState extends State<WeiMiVaultScreen> {
         crossAxisSpacing: 10,
         childAspectRatio: 0.78,
       ),
-      itemCount: _items.length,
-      itemBuilder: (context, i) => _buildCard(_items[i], null),
+      itemCount: items.length,
+      itemBuilder: (context, i) => _buildCard(items[i], null),
     );
   }
 
   /// 瀑布流视图（两列，图片按宽高比）
   Widget _buildWaterfallBody() {
+    final items = _browseItems;
     // 图片比例未缓存的先异步解码，完成后刷新
-    final missing = _items
+    final missing = items
         .where((it) =>
             !it.isDirectory &&
             FileThumbs.isImage(it.name) &&
@@ -1102,7 +1333,7 @@ class _WeiMiVaultScreenState extends State<WeiMiVaultScreen> {
     final hA = <FileItem, double>{};
     final hB = <FileItem, double>{};
     double sumA = 0, sumB = 0;
-    for (final it in _items) {
+    for (final it in items) {
       final ratio =
           it.isDirectory ? null : FileThumbs.aspectCache[it.fullPath];
       final thumbH = it.isDirectory

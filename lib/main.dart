@@ -945,141 +945,118 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
 
     return Scaffold(
       appBar: AppBar(
-        title: Text(t('appTitle')),
+        title: Text(t('appTitle'),
+            style: const TextStyle(fontWeight: FontWeight.bold)),
         backgroundColor: Theme.of(context).colorScheme.inversePrimary,
         actions: [
-          // 搜索（最近页文件名过滤）
-          IconButton(
-            icon: const Icon(Icons.search),
-            tooltip: '搜索',
-            onPressed: _recentKey.currentState?.toggleSearch,
-          ),
-          // 类型筛选
-          IconButton(
-            icon: const Icon(Icons.filter_list),
-            tooltip: '筛选',
-            onPressed: _showFilterSheet,
-          ),
-          // 视图切换（列表 → 宫格 → 瀑布流）
-          AnimatedBuilder(
-            animation: ViewPrefsService.instance,
-            builder: (context, _) {
-              final m = ViewPrefsService.instance.mode;
-              final (icon, tip) = switch (m) {
-                ViewMode.list => (Icons.grid_view, '宫格视图'),
-                ViewMode.grid => (Icons.dashboard_outlined, '瀑布流视图'),
-                ViewMode.waterfall => (Icons.view_list, '列表视图'),
-              };
-              return IconButton(
-                icon: Icon(icon),
-                tooltip: tip,
-                onPressed: () => ViewPrefsService.instance.cycle(),
-              );
-            },
-          ),
-          // 竖三点：语言 / 关于
+          // 竖三点：筛选 / 视图 / 日期分区 / 语言 / 关于
           PopupMenuButton<String>(
             icon: const Icon(Icons.more_vert),
             tooltip: '更多',
             onSelected: (value) {
-              if (value == 'language') {
-                Navigator.push(
-                  context,
-                  MaterialPageRoute(
-                      builder: (context) => LanguageScreen(
-                            onLanguageChanged: widget.onLanguageChanged,
-                          )),
-                );
-              } else if (value == 'about') {
-                Navigator.push(
-                  context,
-                  MaterialPageRoute(
-                      builder: (context) => const AboutScreen()),
-                );
+              switch (value) {
+                case 'filter':
+                  _showFilterSheet();
+                  break;
+                case 'view_list':
+                  ViewPrefsService.instance.setMode(ViewMode.list);
+                  break;
+                case 'view_grid':
+                  ViewPrefsService.instance.setMode(ViewMode.grid);
+                  break;
+                case 'view_waterfall':
+                  ViewPrefsService.instance.setMode(ViewMode.waterfall);
+                  break;
+                case 'group_none':
+                  ViewPrefsService.instance.setGroup(GroupMode.none);
+                  break;
+                case 'group_day':
+                  ViewPrefsService.instance.setGroup(GroupMode.day);
+                  break;
+                case 'group_month':
+                  ViewPrefsService.instance.setGroup(GroupMode.month);
+                  break;
+                case 'group_year':
+                  ViewPrefsService.instance.setGroup(GroupMode.year);
+                  break;
+                case 'language':
+                  Navigator.push(
+                    context,
+                    MaterialPageRoute(
+                        builder: (context) => LanguageScreen(
+                              onLanguageChanged: widget.onLanguageChanged,
+                            )),
+                  );
+                  break;
+                case 'about':
+                  Navigator.push(
+                    context,
+                    MaterialPageRoute(
+                        builder: (context) => const AboutScreen()),
+                  );
+                  break;
               }
             },
-            itemBuilder: (ctx) => [
-              PopupMenuItem(
-                value: 'language',
-                child: Row(
-                  children: [
-                    const Icon(Icons.language, size: 20),
-                    const SizedBox(width: 10),
-                    Text(t('language')),
-                  ],
+            itemBuilder: (ctx) {
+              final mode = ViewPrefsService.instance.mode;
+              final group = ViewPrefsService.instance.group;
+              Widget item(String value, IconData icon, String label,
+                  {bool checked = false}) {
+                return PopupMenuItem(
+                  value: value,
+                  child: Row(
+                    children: [
+                      Icon(icon, size: 20, color: Colors.grey.shade700),
+                      const SizedBox(width: 10),
+                      Expanded(child: Text(label)),
+                      if (checked)
+                        const Icon(Icons.check,
+                            size: 18, color: Colors.blue),
+                    ],
+                  ),
+                );
+              }
+
+              return [
+                PopupMenuItem(
+                  value: 'filter',
+                  child: Row(
+                    children: [
+                      const Icon(Icons.filter_list,
+                          size: 20, color: Colors.grey),
+                      const SizedBox(width: 10),
+                      const Expanded(child: Text('按类型筛选')),
+                      if (_recentKey.currentState?.filter !=
+                          FileCategory.all)
+                        const Icon(Icons.circle,
+                            size: 8, color: Colors.blue),
+                    ],
+                  ),
                 ),
-              ),
-              PopupMenuItem(
-                value: 'about',
-                child: Row(
-                  children: [
-                    const Icon(Icons.info_outline, size: 20),
-                    const SizedBox(width: 10),
-                    Text(t('about')),
-                  ],
-                ),
-              ),
-            ],
+                item('view_list', Icons.view_list, '列表视图',
+                    checked: mode == ViewMode.list),
+                item('view_grid', Icons.grid_view, '宫格视图',
+                    checked: mode == ViewMode.grid),
+                item('view_waterfall', Icons.dashboard_outlined, '瀑布流视图',
+                    checked: mode == ViewMode.waterfall),
+                // 最近页日期分区
+                item('group_none', Icons.calendar_today_outlined, '最近页：不分区',
+                    checked: group == GroupMode.none),
+                item('group_day', Icons.today_outlined, '最近页：按天分区',
+                    checked: group == GroupMode.day),
+                item('group_month', Icons.date_range_outlined, '最近页：按月分区',
+                    checked: group == GroupMode.month),
+                item('group_year', Icons.calendar_view_month_outlined,
+                    '最近页：按年分区',
+                    checked: group == GroupMode.year),
+                const PopupMenuDivider(),
+                item('language', Icons.language, t('language')),
+                item('about', Icons.info_outline, t('about')),
+              ];
+            },
           ),
         ],
       ),
-      drawer: isDesktop
-          ? Drawer(
-              child: ListView(
-                padding: EdgeInsets.zero,
-                children: [
-                  DrawerHeader(
-                    decoration: BoxDecoration(
-                      color: Theme.of(context).colorScheme.inversePrimary,
-                    ),
-                    child: Column(
-                      mainAxisAlignment: MainAxisAlignment.center,
-                      children: [
-                        const Icon(
-                          Icons.folder_special,
-                          size: 60,
-                          color: Colors.blueAccent,
-                        ),
-                        const SizedBox(height: 16),
-                        Text(
-                          t('appTitle'),
-                          style: const TextStyle(
-                              fontSize: 24, fontWeight: FontWeight.bold),
-                        ),
-                      ],
-                    ),
-                  ),
-                  ListTile(
-                    leading: const Icon(Icons.language),
-                    title: Text(t('language')),
-                    onTap: () {
-                      Navigator.pop(context);
-                      Navigator.push(
-                        context,
-                        MaterialPageRoute(
-                            builder: (context) => LanguageScreen(
-                                  onLanguageChanged:
-                                      widget.onLanguageChanged,
-                                )),
-                      );
-                    },
-                  ),
-                  ListTile(
-                    leading: const Icon(Icons.info_outline),
-                    title: Text(t('about')),
-                    onTap: () {
-                      Navigator.pop(context);
-                      Navigator.push(
-                        context,
-                        MaterialPageRoute(
-                            builder: (context) => const AboutScreen()),
-                      );
-                    },
-                  ),
-                ],
-              ),
-            )
-          : null,
       body: supportDragDrop
           ? DropTarget(
               onDragDone: (detail) {
@@ -1214,90 +1191,19 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   }
 
   Widget _buildRecentTab() {
-    return Column(
-      children: [
-        // 快速操作区（紧凑一行）
-        Padding(
-          padding: const EdgeInsets.fromLTRB(12, 8, 12, 4),
-          child: Row(
-            children: [
-              Expanded(
-                child: _buildActionCard(
-                  icon: Icons.lock,
-                  label: t('encryptFile'),
-                  color: Colors.orange,
-                  onTap: _handleEncryptFile,
-                ),
-              ),
-              const SizedBox(width: 10),
-              Expanded(
-                child: _buildActionCard(
-                  icon: Icons.lock_open,
-                  label: t('decryptFile'),
-                  color: Colors.green,
-                  onTap: _handleDecryptFile,
-                ),
-              ),
-              const SizedBox(width: 10),
-              Expanded(
-                child: _buildActionCard(
-                  icon: Icons.folder_open,
-                  label: t('openFile'),
-                  color: Colors.blue,
-                  onTap: _handleOpenFile,
-                ),
-              ),
-            ],
-          ),
-        ),
-        // 全部文件列表（最近修改在前）
-        Expanded(
-          child: RecentFilesScreen(
-            key: _recentKey,
-            translate: t,
-            onOpenFile: _openFile,
-          ),
-        ),
-      ],
-    );
-  }
-
-  Widget _buildActionCard({
-    required IconData icon,
-    required String label,
-    required Color color,
-    required VoidCallback onTap,
-  }) {
-    return InkWell(
-      onTap: onTap,
-      borderRadius: BorderRadius.circular(12),
-      child: Container(
-        padding: const EdgeInsets.symmetric(vertical: 10),
-        decoration: BoxDecoration(
-          color: color.withAlpha(15),
-          borderRadius: BorderRadius.circular(12),
-          border: Border.all(color: color.withAlpha(50)),
-        ),
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Icon(icon, size: 24, color: color),
-            const SizedBox(height: 6),
-            Text(
-              label,
-              style: TextStyle(
-                fontSize: 13,
-                fontWeight: FontWeight.w500,
-                color: color,
-              ),
-            ),
-          ],
-        ),
-      ),
+    // 固定搜索框在 RecentFilesScreen 内部，快捷操作卡已移至「文件」页
+    return RecentFilesScreen(
+      key: _recentKey,
+      translate: t,
+      onOpenFile: _openFile,
     );
   }
 
   Widget _buildFilesTab() {
-    return const WeiMiVaultScreen(showSystemDirs: true);
+    return WeiMiVaultScreen(
+      showSystemDirs: true,
+      onEncryptFiles: _handleEncryptFile,
+      onDecryptFiles: _handleDecryptFile,
+    );
   }
 }

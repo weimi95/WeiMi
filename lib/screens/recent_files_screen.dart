@@ -1,6 +1,9 @@
+import 'dart:convert';
 import 'dart:io';
 
 import 'package:flutter/material.dart';
+import 'package:path/path.dart' as p;
+import 'package:path_provider/path_provider.dart';
 
 import '../services/file_batch_ops.dart';
 import '../services/view_prefs_service.dart';
@@ -20,11 +23,76 @@ class RecentFileInfo {
     required this.modified,
     required this.size,
   });
+
+  Map<String, dynamic> toJson() => {
+        'path': path,
+        'name': name,
+        'mtime': modified.millisecondsSinceEpoch,
+        'size': size,
+      };
+
+  factory RecentFileInfo.fromJson(Map<String, dynamic> j) => RecentFileInfo(
+        path: j['path'] as String,
+        name: j['name'] as String,
+        modified: DateTime.fromMillisecondsSinceEpoch(j['mtime'] as int),
+        size: j['size'] as int,
+      );
+}
+
+/// 最近页扫描结果缓存：本地 JSON，启动秒开，后台增量重扫后覆盖
+class RecentScanCache {
+  static const int kVersion = 1;
+
+  static Future<File?> _file() async {
+    try {
+      final dir = await getApplicationSupportDirectory();
+      return File(p.join(dir.path, 'recent_scan_cache.json'));
+    } catch (_) {
+      return null;
+    }
+  }
+
+  static Future<List<RecentFileInfo>?> load() async {
+    try {
+      final f = await _file();
+      if (f == null || !await f.exists()) return null;
+      final d = jsonDecode(await f.readAsString());
+      if (d is! Map || d['v'] != kVersion) return null;
+      final list = d['files'] as List;
+      return list
+          .whereType<Map>()
+          .map((e) => RecentFileInfo.fromJson(Map<String, dynamic>.from(e)))
+          .toList();
+    } catch (_) {
+      return null;
+    }
+  }
+
+  static Future<void> save(List<RecentFileInfo> files) async {
+    try {
+      final f = await _file();
+      if (f == null) return;
+      await f.writeAsString(jsonEncode({
+        'v': kVersion,
+        'savedAt': DateTime.now().millisecondsSinceEpoch,
+        'files': files.map((e) => e.toJson()).toList(),
+      }));
+    } catch (_) {}
+  }
+
+  static Future<void> clear() async {
+    try {
+      final f = await _file();
+      if (f != null && await f.exists()) await f.delete();
+    } catch (_) {}
+  }
 }
 
 /// 「最近」页：像手机文件管理器一样展示全部文件，最近修改的排在前面。
-/// 支持列表 / 宫格 / 瀑布流三种视图、关键字搜索、类型筛选与多选批量操作。
-/// 安卓扫内置存储根目录，桌面端扫用户主目录；限制扫描深度与数量防卡顿。
+/// - 固定顶部搜索框（文件名过滤）
+/// - 列表 / 宫格 / 瀑布流三种视图
+/// - 日期分区（不区分 / 按天 / 按月 / 按年）
+/// - 本地缓存秒开 + 后台重扫增量更新
 class RecentFilesScreen extends StatefulWidget {
   final String Function(String) translate;
   final Future<void> Function(String) onOpenFile;
@@ -41,15 +109,14 @@ class RecentFilesScreen extends StatefulWidget {
 
 class RecentFilesScreenState extends State<RecentFilesScreen> {
   bool _loading = true;
+  bool _rescanning = false; // 缓存已展示，后台重扫中
   String? _error;
   List<RecentFileInfo> _files = [];
 
   // ============ 搜索与筛选 ============
-  bool _showSearch = false;
   String _query = '';
   FileCategory _filter = FileCategory.all;
   final TextEditingController _searchCtrl = TextEditingController();
-  final FocusNode _searchFocus = FocusNode();
 
   // ============ 多选模式 ============
   final Set<String> _selectedPaths = {};
@@ -65,17 +132,6 @@ class RecentFilesScreenState extends State<RecentFilesScreen> {
   Future<void> _afterChange(Iterable<String> touched) async {
     _selectedPaths.removeAll(touched);
     await refresh();
-  }
-
-  /// 主界面 AppBar 按钮调用
-  void toggleSearch() {
-    setState(() => _showSearch = !_showSearch);
-    if (_showSearch) {
-      _searchFocus.requestFocus();
-    } else {
-      _searchCtrl.clear();
-      _query = '';
-    }
   }
 
   void setFilter(FileCategory c) => setState(() => _filter = c);
@@ -103,28 +159,40 @@ class RecentFilesScreenState extends State<RecentFilesScreen> {
   @override
   void dispose() {
     _searchCtrl.dispose();
-    _searchFocus.dispose();
     super.dispose();
   }
 
+  /// 刷新策略：先展示本地缓存（秒开），后台全量重扫后覆盖并回写缓存。
+  /// 下拉刷新走同一路径，感知上只是列表原地更新。
   Future<void> refresh() async {
-    setState(() {
-      _loading = true;
-      _error = null;
-    });
+    if (!_loading) {
+      // 已有内容：后台静默重扫
+      setState(() => _rescanning = true);
+    }
     try {
+      final cached = await RecentScanCache.load();
+      if (mounted && cached != null && cached.isNotEmpty && _loading) {
+        setState(() {
+          _files = cached;
+          _loading = false;
+        });
+      }
       final files = await _scan();
       if (mounted) {
         setState(() {
           _files = files;
           _loading = false;
+          _rescanning = false;
+          _error = null;
         });
       }
+      await RecentScanCache.save(files);
     } catch (e) {
       if (mounted) {
         setState(() {
           _error = e.toString();
           _loading = false;
+          _rescanning = false;
         });
       }
     }
@@ -216,6 +284,59 @@ class RecentFilesScreenState extends State<RecentFilesScreen> {
   String _fmtDate(DateTime dt) {
     String two(int n) => n.toString().padLeft(2, '0');
     return '${dt.year}-${two(dt.month)}-${two(dt.day)} ${two(dt.hour)}:${two(dt.minute)}';
+  }
+
+  // ============ 日期分区 ============
+
+  /// 把文件列表按 GroupMode 分组，返回 (分组标题, 文件列表) 顺序序列
+  List<MapEntry<String, List<RecentFileInfo>>> _grouped(
+      List<RecentFileInfo> files) {
+    final mode = ViewPrefsService.instance.group;
+    if (mode == GroupMode.none) return [MapEntry('', files)];
+
+    String two(int n) => n.toString().padLeft(2, '0');
+    String keyFor(DateTime dt) {
+      switch (mode) {
+        case GroupMode.day:
+          return '${dt.year}-${two(dt.month)}-${two(dt.day)}';
+        case GroupMode.month:
+          return '${dt.year}-${two(dt.month)}';
+        case GroupMode.year:
+          return '${dt.year}';
+        case GroupMode.none:
+          return '';
+      }
+    }
+
+    String labelFor(String key) {
+      if (mode == GroupMode.day) {
+        final now = DateTime.now();
+        final today = '${now.year}-${two(now.month)}-${two(now.day)}';
+        final yst = '${now.year}-${two(now.month)}-${two(now.day - 1)}';
+        if (key == today) return '今天';
+        if (key == yst) return '昨天';
+        final parts = key.split('-');
+        final thisYear = parts[0] == '${DateTime.now().year}';
+        return thisYear ? '${int.parse(parts[1])}月${int.parse(parts[2])}日' : key;
+      }
+      if (mode == GroupMode.month) {
+        final parts = key.split('-');
+        final thisYear = parts[0] == '${DateTime.now().year}';
+        return thisYear ? '${int.parse(parts[1])}月' : '${parts[0]}年${int.parse(parts[1])}月';
+      }
+      return '$key年';
+    }
+
+    final result = <MapEntry<String, List<RecentFileInfo>>>[];
+    for (final f in files) {
+      final key = keyFor(f.modified);
+      if (result.isNotEmpty && result.last.key == key) {
+        result.last.value.add(f);
+      } else {
+        result.add(MapEntry(key, [f]));
+      }
+    }
+    return result.map((e) => MapEntry(labelFor(e.key), e.value)).toList();
   }
 
   // ============ 列表行（列表视图） ============
@@ -417,23 +538,8 @@ class RecentFilesScreenState extends State<RecentFilesScreen> {
     );
   }
 
-  /// 瀑布流：按图片宽高比估算高度，贪心分配到两列
-  Widget _buildWaterfall(List<RecentFileInfo> files) {
-    // 图片宽高比未缓存时先触发异步解码，完成后整体刷新一次
-    final missing = files
-        .where((f) =>
-            FileThumbs.isImage(f.name) &&
-            !FileThumbs.aspectCache.containsKey(f.path))
-        .toList();
-    if (missing.isNotEmpty && !_aspectRefreshing) {
-      _aspectRefreshing = true;
-      Future.wait(missing.take(60).map((f) => FileThumbs.aspectRatio(f.path)))
-          .then((_) {
-        _aspectRefreshing = false;
-        if (mounted) setState(() {});
-      });
-    }
-
+  /// 瀑布流（单个分组内部）：按图片宽高比估算高度，贪心分配到两列
+  Widget _buildWaterfallSection(List<RecentFileInfo> files) {
     final colA = <RecentFileInfo>[];
     final colB = <RecentFileInfo>[];
     final hA = <RecentFileInfo, double>{};
@@ -471,12 +577,26 @@ class RecentFilesScreenState extends State<RecentFilesScreen> {
       );
     }
 
-    return SingleChildScrollView(
-      physics: const AlwaysScrollableScrollPhysics(),
-      padding: const EdgeInsets.all(10),
+    return Row(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [col(colA, hA), const SizedBox(width: 10), col(colB, hB)],
+    );
+  }
+
+  /// 分区标题
+  Widget _groupHeader(String label) {
+    if (label.isEmpty) return const SizedBox.shrink();
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(14, 14, 14, 6),
       child: Row(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [col(colA, hA), const SizedBox(width: 10), col(colB, hB)],
+        children: [
+          Text(
+            label,
+            style: const TextStyle(fontSize: 14, fontWeight: FontWeight.w600),
+          ),
+          const SizedBox(width: 8),
+          Expanded(child: Divider(height: 1, color: Colors.grey.shade300)),
+        ],
       ),
     );
   }
@@ -546,39 +666,82 @@ class RecentFilesScreenState extends State<RecentFilesScreen> {
       content = AnimatedBuilder(
         animation: ViewPrefsService.instance,
         builder: (context, _) {
+          final grouped = _grouped(files);
+          final hasGroups =
+              grouped.length > 1 || grouped.first.key.isNotEmpty;
+
           switch (ViewPrefsService.instance.mode) {
             case ViewMode.grid:
+              if (!hasGroups) {
+                return RefreshIndicator(
+                  onRefresh: refresh,
+                  child: _gridView(files),
+                );
+              }
+              // 分区宫格：每组一个小标题 + shrinkWrap 宫格
               return RefreshIndicator(
                 onRefresh: refresh,
-                child: GridView.builder(
+                child: SingleChildScrollView(
                   physics: const AlwaysScrollableScrollPhysics(),
-                  padding: const EdgeInsets.all(10),
-                  gridDelegate: SliverGridDelegateWithMaxCrossAxisExtent(
-                    maxCrossAxisExtent: 130,
-                    mainAxisSpacing: 10,
-                    crossAxisSpacing: 10,
-                    childAspectRatio: 0.78,
+                  padding: const EdgeInsets.only(bottom: 20),
+                  child: Column(
+                    children: [
+                      for (final g in grouped) ...[
+                        _groupHeader(g.key),
+                        Padding(
+                          padding: const EdgeInsets.symmetric(horizontal: 10),
+                          child: _gridView(g.value, shrink: true),
+                        ),
+                      ],
+                    ],
                   ),
-                  itemCount: files.length,
-                  itemBuilder: (context, i) => _buildGridCard(files[i]),
                 ),
               );
             case ViewMode.waterfall:
+              // 瀑布流比例异步解码（只对未缓存的图片）
+              final missing = files
+                  .where((f) =>
+                      FileThumbs.isImage(f.name) &&
+                      !FileThumbs.aspectCache.containsKey(f.path))
+                  .toList();
+              if (missing.isNotEmpty && !_aspectRefreshing) {
+                _aspectRefreshing = true;
+                Future.wait(missing
+                        .take(60)
+                        .map((f) => FileThumbs.aspectRatio(f.path)))
+                    .then((_) {
+                  _aspectRefreshing = false;
+                  if (mounted) setState(() {});
+                });
+              }
               return RefreshIndicator(
                 onRefresh: refresh,
-                child: _buildWaterfall(files),
+                child: SingleChildScrollView(
+                  physics: const AlwaysScrollableScrollPhysics(),
+                  padding: const EdgeInsets.all(10),
+                  child: Column(
+                    children: [
+                      for (final g in grouped) ...[
+                        _groupHeader(g.key),
+                        _buildWaterfallSection(g.value),
+                      ],
+                    ],
+                  ),
+                ),
               );
             case ViewMode.list:
             default:
+              // 分区列表：扁平化 (标题行 / 文件行)
               return RefreshIndicator(
                 onRefresh: refresh,
-                child: ListView.separated(
+                child: ListView(
                   physics: const AlwaysScrollableScrollPhysics(),
-                  itemCount: files.length,
-                  separatorBuilder: (_, __) =>
-                      Divider(height: 1, color: Colors.grey.shade200),
-                  itemBuilder: (context, index) =>
-                      _buildListTile(files[index]),
+                  children: [
+                    for (final g in grouped) ...[
+                      _groupHeader(g.key),
+                      for (final f in g.value) _buildListTile(f),
+                    ],
+                  ],
                 ),
               );
           }
@@ -586,40 +749,39 @@ class RecentFilesScreenState extends State<RecentFilesScreen> {
       );
     }
 
-    // 搜索栏（顶部）
-    if (_showSearch) {
-      content = Column(
-        children: [
-          Padding(
-            padding: const EdgeInsets.fromLTRB(12, 8, 12, 4),
-            child: TextField(
-              controller: _searchCtrl,
-              focusNode: _searchFocus,
-              decoration: InputDecoration(
-                isDense: true,
-                prefixIcon: const Icon(Icons.search, size: 20),
-                suffixIcon: _query.isEmpty
-                    ? null
-                    : IconButton(
-                        icon: const Icon(Icons.clear, size: 18),
-                        onPressed: () {
-                          _searchCtrl.clear();
-                          setState(() => _query = '');
-                        },
-                      ),
-                hintText: '搜索文件名',
-                border: OutlineInputBorder(
-                  borderRadius: BorderRadius.circular(10),
-                ),
-                contentPadding: const EdgeInsets.symmetric(vertical: 8),
+    // 固定顶部搜索框
+    content = Column(
+      children: [
+        Padding(
+          padding: const EdgeInsets.fromLTRB(12, 8, 12, 4),
+          child: TextField(
+            controller: _searchCtrl,
+            decoration: InputDecoration(
+              isDense: true,
+              prefixIcon: const Icon(Icons.search, size: 20),
+              suffixIcon: _query.isEmpty
+                  ? null
+                  : IconButton(
+                      icon: const Icon(Icons.clear, size: 18),
+                      onPressed: () {
+                        _searchCtrl.clear();
+                        setState(() => _query = '');
+                      },
+                    ),
+              hintText: '搜索文件名',
+              border: OutlineInputBorder(
+                borderRadius: BorderRadius.circular(10),
               ),
-              onChanged: (v) => setState(() => _query = v.trim()),
+              contentPadding: const EdgeInsets.symmetric(vertical: 8),
             ),
+            onChanged: (v) => setState(() => _query = v.trim()),
           ),
-          Expanded(child: content),
-        ],
-      );
-    }
+        ),
+        if (_rescanning)
+          const LinearProgressIndicator(minHeight: 2),
+        Expanded(child: content),
+      ],
+    );
 
     // 多选模式：顶部「已选择 N 项」横幅 + 底部操作栏
     if (_selecting) {
@@ -647,6 +809,27 @@ class RecentFilesScreenState extends State<RecentFilesScreen> {
       );
     }
     return content;
+  }
+
+  Widget _gridView(List<RecentFileInfo> files, {bool shrink = false}) {
+    final grid = GridView.builder(
+      physics: shrink ? const NeverScrollableScrollPhysics() : const AlwaysScrollableScrollPhysics(),
+      shrinkWrap: shrink,
+      padding: EdgeInsets.zero,
+      gridDelegate: const SliverGridDelegateWithMaxCrossAxisExtent(
+        maxCrossAxisExtent: 130,
+        mainAxisSpacing: 10,
+        crossAxisSpacing: 10,
+        childAspectRatio: 0.78,
+      ),
+      itemCount: files.length,
+      itemBuilder: (context, i) => _buildGridCard(files[i]),
+    );
+    if (shrink) return grid;
+    return Padding(
+      padding: const EdgeInsets.all(10),
+      child: grid,
+    );
   }
 
   Future<void> _moreSelected() async {

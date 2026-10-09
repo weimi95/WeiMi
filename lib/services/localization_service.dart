@@ -135,7 +135,7 @@ class AppLocalizations {
   static final Map<String, Map<String, String>> _translations = {
     'zh': {
       // Main screen
-      'appTitle': '微密',
+      'appTitle': '微密文件',
       'tabRecent': '最近',
       'tabFiles': '文件',
       'tabHistory': '历史',
