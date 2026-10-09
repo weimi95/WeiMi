@@ -953,7 +953,6 @@ class LanTransferService {
         sent += chunk.length;
         if (onProgress != null) onProgress(sent, total);
       }
-      await peer.socket.flush();
       _safeAdd(peer.socket, json.encode({'t': 'file-done', 'fid': fid}));
       await TransferHistoryService.instance.add(TransferRecord(
         id: '${DateTime.now().microsecondsSinceEpoch}_wsout',
@@ -980,7 +979,6 @@ class LanTransferService {
       _safeAdd(peer.socket, json.encode({
         't': 'text', 'from': kAppPeerId, 'name': _selfName, 'text': text,
       }));
-      await peer.socket.flush();
       await TransferHistoryService.instance.add(TransferRecord(
         id: '${DateTime.now().microsecondsSinceEpoch}_wsot',
         kind: 'text',
