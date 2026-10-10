@@ -57,7 +57,13 @@ class TrayLauncher {
         return false;
       }
     }
-    return Process.killPid(pid, ProcessSignal.signal0);
+    // POSIX：kill -0 <pid> 不发送真实信号，仅检测进程是否存在
+    try {
+      final r = await Process.run('kill', ['-0', '$pid']);
+      return r.exitCode == 0;
+    } catch (_) {
+      return false;
+    }
   }
 
   static Future<void> writePid(String pidFileName) async {
