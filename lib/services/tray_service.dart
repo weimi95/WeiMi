@@ -4,8 +4,8 @@ import 'package:flutter/material.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:system_tray/system_tray.dart';
 import 'package:window_manager/window_manager.dart';
-import 'services/lan_transfer_service.dart';
-import 'services/share_receive_service.dart';
+import 'lan_transfer_service.dart';
+import 'share_receive_service.dart';
 
 /// 单进程托盘：主程序自身常驻托盘。
 ///
