@@ -4,13 +4,15 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:file_picker/file_picker.dart';
 import 'package:path/path.dart' as p;
-import '../services/tray_ipc_client.dart';
+import '../services/lan_transfer_service.dart';
+import '../services/trusted_devices_service.dart';
+import '../services/tray_service.dart';
 import '../widgets/progress_dialog.dart';
 import 'settings_screen.dart';
 import 'transfer_history_screen.dart';
 
-/// 微密飞传页（主程序侧）：自身不跑飞传，经 TrayIpcClient 轮询托盘进程，
-/// 查询在线设备 / 发送文件文本 / 弹接收确认。托盘进程常驻跑飞传 + 网页快传。
+/// 微密飞传页（单进程方案）：直接调用本进程 LanTransferService 单例，
+/// 不再经 IPC 转发。接收确认通过 service 的 confirmHandler 回调弹窗。
 class LanTransferScreen extends StatefulWidget {
   final String? initialText;
   final List<String> initialFiles;
@@ -23,14 +25,14 @@ class LanTransferScreen extends StatefulWidget {
 }
 
 class _LanTransferScreenState extends State<LanTransferScreen> {
-  final TrayIpcClient _ipc = TrayIpcClient.instance;
-  List<LanPeerInfo> _peers = [];
+  final LanTransferService _svc = LanTransferService.instance;
+  List<LanPeer> _peers = [];
+  List<WebPeer> _webPeers = [];
   String _selfName = '本机';
   String _selfIp = '…';
   int _selfHttpPort = 0;
   bool _selfWebShare = true;
   Timer? _pollTimer;
-  final Set<String> _handledConfirmIds = {};
   String? _pendingText;
   List<String> _pendingFiles = [];
 
@@ -42,6 +44,8 @@ class _LanTransferScreenState extends State<LanTransferScreen> {
     } else if (widget.initialFiles.isNotEmpty) {
       _pendingFiles = widget.initialFiles;
     }
+    // 注册接收确认回调（本方为前台 UI 时可弹窗）
+    _svc.confirmHandler = _onConfirmRequest;
     _startPolling();
   }
 
@@ -53,36 +57,32 @@ class _LanTransferScreenState extends State<LanTransferScreen> {
   }
 
   Future<void> _poll() async {
-    final peers = await _ipc.getPeers();
-    final self = await _ipc.getSelf();
+    if (!mounted) return;
+    final ip = await _svc.localIPv4() ?? '';
     if (!mounted) return;
     setState(() {
-      _peers = peers;
-      if (self != null) {
-        _selfName = self.name.isEmpty ? '本机' : self.name;
-        _selfIp = self.ip;
-        _selfHttpPort = self.httpPort;
-        _selfWebShare = self.webShare;
-      }
+      _peers = _svc.peers;
+      _webPeers = _svc.webPeers;
+      _selfName = _svc.selfName.isEmpty ? '本机' : _svc.selfName;
+      _selfIp = ip;
+      _selfHttpPort = _svc.httpPortActual;
+      _selfWebShare = _svc.webShareEnabled;
     });
-    final pendings = await _ipc.pollPendingConfirms();
-    for (final pc in pendings) {
-      if (_handledConfirmIds.contains(pc.id)) continue;
-      _handledConfirmIds.add(pc.id);
-      if (mounted) _showIncomingConfirm(pc);
-    }
   }
 
   @override
   void dispose() {
     _pollTimer?.cancel();
+    if (_svc.confirmHandler == _onConfirmRequest) _svc.confirmHandler = null;
     super.dispose();
   }
 
-  // ============ 接收确认弹窗 ============
+  // ============ 接收确认弹窗（confirmHandler 回调） ============
 
-  Future<void> _showIncomingConfirm(PendingConfirmInfo pc) async {
-    if (!mounted) return;
+  Future<bool> _onConfirmRequest(IncomingRequest req) async {
+    // 收托盘时窗口可能隐藏，弹框前先恢复窗口
+    await TrayService.instance.openMainWindow();
+    if (!mounted) return false;
     final accepted = await showDialog<bool>(
       context: context,
       barrierDismissible: false,
@@ -92,12 +92,12 @@ class _LanTransferScreenState extends State<LanTransferScreen> {
           mainAxisSize: MainAxisSize.min,
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            Text('设备：${pc.senderName}',
+            Text('设备：${req.senderName}',
                 style: const TextStyle(fontWeight: FontWeight.w500)),
             const SizedBox(height: 6),
-            Text('内容：${pc.fileName}'),
+            Text('内容：${req.fileName}'),
             const SizedBox(height: 2),
-            Text('大小：${_fmtSize(pc.fileSize)}'),
+            Text('大小：${_fmtSize(req.fileSize)}'),
           ],
         ),
         actions: [
@@ -112,7 +112,7 @@ class _LanTransferScreenState extends State<LanTransferScreen> {
         ],
       ),
     );
-    await _ipc.confirm(pc.id, accepted == true);
+    return accepted == true;
   }
 
   Future<void> _showReceivedText(String text, String from) async {
@@ -174,7 +174,7 @@ class _LanTransferScreenState extends State<LanTransferScreen> {
     }
   }
 
-  Future<LanPeerInfo?> _pickPeer() async {
+  Future<LanPeer?> _pickPeer() async {
     if (_peers.isEmpty) {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
@@ -186,7 +186,7 @@ class _LanTransferScreenState extends State<LanTransferScreen> {
     }
     if (_peers.length == 1) return _peers.first;
     if (!mounted) return null;
-    return showDialog<LanPeerInfo>(
+    return showDialog<LanPeer>(
       context: context,
       builder: (ctx) => SimpleDialog(
         title: const Text('发送到哪台设备？'),
@@ -223,7 +223,7 @@ class _LanTransferScreenState extends State<LanTransferScreen> {
     await _sendFilesTo(peer, files);
   }
 
-  Future<void> _sendFilesTo(LanPeerInfo peer, List<String> files) async {
+  Future<void> _sendFilesTo(LanPeer peer, List<String> files) async {
     int okCount = 0;
     int failCount = 0;
     for (int i = 0; i < files.length; i++) {
@@ -248,7 +248,7 @@ class _LanTransferScreenState extends State<LanTransferScreen> {
         }
       }
 
-      final ok = await _ipc.sendFile(peer.id, files[i]);
+      final ok = await _svc.sendFile(peer: peer, filePath: files[i]);
       if (ok) {
         okCount++;
       } else {
@@ -258,8 +258,8 @@ class _LanTransferScreenState extends State<LanTransferScreen> {
 
     if (mounted) {
       ProgressDialog.hide(context);
-      final detail = failCount > 0 && _ipc.lastSendError.isNotEmpty
-          ? '\n失败原因：${_ipc.lastSendError}'
+      final detail = failCount > 0 && _svc.lastSendError.isNotEmpty
+          ? '\n失败原因：${_svc.lastSendError}'
           : '';
       ScaffoldMessenger.of(context).showSnackBar(SnackBar(
         content: Text(
@@ -298,7 +298,7 @@ class _LanTransferScreenState extends State<LanTransferScreen> {
     await _sendTextTo(peer, text);
   }
 
-  Future<void> _sendTextTo(LanPeerInfo peer, String text) async {
+  Future<void> _sendTextTo(LanPeer peer, String text) async {
     if (mounted) {
       ProgressDialog.show(
         context,
@@ -307,20 +307,20 @@ class _LanTransferScreenState extends State<LanTransferScreen> {
         totalProgress: 1,
       );
     }
-    final ok = await _ipc.sendText(peer.id, text);
+    final ok = await _svc.sendText(peer: peer, text: text);
     if (mounted) {
       ProgressDialog.hide(context);
       ScaffoldMessenger.of(context).showSnackBar(SnackBar(
         content: Text(ok
             ? '文本已发送给 ${peer.name}'
-            : '发送失败：${_ipc.lastSendError}'),
+            : '发送失败：${_svc.lastSendError}'),
         backgroundColor: ok ? Colors.green : Colors.red,
       ));
     }
   }
 
   /// 分享直达：把挂起的待发送内容发给选定设备，完成后清空
-  Future<void> _sendPendingTo(LanPeerInfo peer) async {
+  Future<void> _sendPendingTo(LanPeer peer) async {
     if (_pendingText != null && _pendingText!.isNotEmpty) {
       final text = _pendingText!;
       await _sendTextTo(peer, text);
@@ -333,7 +333,7 @@ class _LanTransferScreenState extends State<LanTransferScreen> {
   }
 
   /// 设备点击：有待发内容直接发，否则走选文件流程
-  Future<void> _onDeviceTap(LanPeerInfo d) async {
+  Future<void> _onDeviceTap(LanPeer d) async {
     if (_pendingText != null || _pendingFiles.isNotEmpty) {
       await _sendPendingTo(d);
     } else {
@@ -343,14 +343,14 @@ class _LanTransferScreenState extends State<LanTransferScreen> {
 
   // ============ 网页客户端（WS 房间） ============
 
-  /// 点网页客户端：有待发内容直接发，否则选文件发
-  Future<void> _onWebPeerTap(WebPeerInfo w) async {
+  Future<void> _onWebPeerTap(WebPeer w) async {
     if (_pendingText != null && _pendingText!.isNotEmpty) {
       final text = _pendingText!;
       await _sendWebTextTo(w, text);
       if (mounted) setState(() => _pendingText = null);
     } else if (_pendingFiles.isNotEmpty) {
-      await _sendWebFiles(w, List<String>.from(_pendingFiles));
+      final files = List<String>.from(_pendingFiles);
+      await _sendWebFiles(w, files);
       if (mounted) setState(() => _pendingFiles = []);
     } else {
       final result = await FilePicker.platform.pickFiles(
@@ -367,7 +367,7 @@ class _LanTransferScreenState extends State<LanTransferScreen> {
     }
   }
 
-  Future<void> _sendWebFiles(WebPeerInfo w, List<String> files) async {
+  Future<void> _sendWebFiles(WebPeer w, List<String> files) async {
     int ok = 0, fail = 0;
     for (int i = 0; i < files.length; i++) {
       if (mounted) {
@@ -385,7 +385,7 @@ class _LanTransferScreenState extends State<LanTransferScreen> {
               currentFileName: p.basename(files[i]));
         }
       }
-      final r = await _ipc.sendWebFile(w.id, files[i]);
+      final r = await _svc.sendWebFile(w, files[i]);
       r ? ok++ : fail++;
     }
     if (mounted) {
@@ -393,30 +393,30 @@ class _LanTransferScreenState extends State<LanTransferScreen> {
       ScaffoldMessenger.of(context).showSnackBar(SnackBar(
         content: Text(
             '发送完成：成功 $ok，失败 $fail（发给网页客户端「${w.name}」）'
-            '${fail > 0 && _ipc.lastSendError.isNotEmpty ? '\n${_ipc.lastSendError}' : ''}'),
+            '${fail > 0 && _svc.lastSendError.isNotEmpty ? '\n${_svc.lastSendError}' : ''}'),
         backgroundColor: fail == 0 ? Colors.green : Colors.orange,
       ));
     }
   }
 
-  Future<void> _sendWebTextTo(WebPeerInfo w, String text) async {
+  Future<void> _sendWebTextTo(WebPeer w, String text) async {
     if (mounted) {
       ProgressDialog.show(context,
           title: '正在发送文本', currentProgress: 1, totalProgress: 1);
     }
-    final ok = await _ipc.sendWebText(w.id, text);
+    final ok = await _svc.sendWebText(w, text);
     if (mounted) {
       ProgressDialog.hide(context);
       ScaffoldMessenger.of(context).showSnackBar(SnackBar(
         content: Text(ok
             ? '文本已发送给网页客户端「${w.name}」'
-            : '发送失败：${_ipc.lastSendError}'),
+            : '发送失败：${_svc.lastSendError}'),
         backgroundColor: ok ? Colors.green : Colors.red,
       ));
     }
   }
 
-  Future<void> _startSendTextToWeb(WebPeerInfo w) async {
+  Future<void> _startSendTextToWeb(WebPeer w) async {
     final controller = TextEditingController();
     if (!mounted) return;
     final text = await showDialog<String>(
@@ -445,12 +445,16 @@ class _LanTransferScreenState extends State<LanTransferScreen> {
 
   // ============ 信任设备 ============
 
-  Future<void> _toggleTrust(LanPeerInfo d) async {
-    await _ipc.trust(d.id, d.name, !d.trusted);
+  Future<void> _toggleTrust(LanPeer d) async {
+    if (d.trusted) {
+      await TrustedDevices.instance.remove(d.id);
+    } else {
+      await TrustedDevices.instance.add(d.id, d.name);
+    }
     if (mounted) {
       ScaffoldMessenger.of(context).showSnackBar(SnackBar(
         content: Text(d.trusted
-            ? '已取消信任「${d.name}」，之后接收其文件需再次确认'
+            ? '已取消信任「${d.name}」，之后接收其文件/文本需再次确认'
             : '已信任「${d.name}」，之后其发来的文件/文本免确认直接接收'),
       ));
     }
@@ -478,9 +482,9 @@ class _LanTransferScreenState extends State<LanTransferScreen> {
         ],
       ),
     );
-    if (r != null && mounted) {
-      await _ipc.setSelfName(r);
-      setState(() {});
+    if (r != null && r.trim().isNotEmpty && mounted) {
+      await _svc.setSelfName(r.trim());
+      setState(() => _selfName = r.trim());
     }
   }
 
@@ -764,13 +768,13 @@ class _LanTransferScreenState extends State<LanTransferScreen> {
             }),
           const SizedBox(height: 12),
           // 网页客户端（Snapdrop 式 WS 房间成员，可与本机互发）
-          if (_ipc.webPeers.isNotEmpty) ...[
+          if (_webPeers.isNotEmpty) ...[
             Row(
               children: [
                 Icon(Icons.language, size: 18, color: Colors.grey.shade600),
                 const SizedBox(width: 6),
                 Text(
-                  '网页客户端（${_ipc.webPeers.length}）· 浏览器打开上面的快传地址即可加入',
+                  '网页客户端（${_webPeers.length}）· 浏览器打开上面的快传地址即可加入',
                   style: TextStyle(
                     fontSize: 13,
                     fontWeight: FontWeight.bold,
@@ -780,7 +784,7 @@ class _LanTransferScreenState extends State<LanTransferScreen> {
               ],
             ),
             const SizedBox(height: 8),
-            ..._ipc.webPeers.map((w) {
+            ..._webPeers.map((w) {
               return Container(
                 margin: const EdgeInsets.only(bottom: 8),
                 decoration: BoxDecoration(
@@ -818,7 +822,7 @@ class _LanTransferScreenState extends State<LanTransferScreen> {
     );
   }
 
-  Future<void> _startSendFilesTo(LanPeerInfo peer) async {
+  Future<void> _startSendFilesTo(LanPeer peer) async {
     if (!mounted) return;
     final result = await FilePicker.platform.pickFiles(
       type: FileType.any,
@@ -831,7 +835,7 @@ class _LanTransferScreenState extends State<LanTransferScreen> {
     await _sendFilesTo(peer, files);
   }
 
-  Future<void> _startSendTextTo(LanPeerInfo peer) async {
+  Future<void> _startSendTextTo(LanPeer peer) async {
     final controller = TextEditingController();
     if (!mounted) return;
     final text = await showDialog<String>(

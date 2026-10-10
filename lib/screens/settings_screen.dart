@@ -4,14 +4,13 @@ import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:path_provider/path_provider.dart';
 import '../services/autostart_service.dart';
-import '../services/tray_ipc_client.dart';
-import '../services/tray_launcher.dart';
+import '../services/lan_transfer_service.dart';
 import '../services/trusted_devices_service.dart';
 
-/// 设置页（B 方案：飞传由独立托盘进程常驻，本页不直连飞传服务）
-/// - 微密飞传：网页快传开关、本机名称、信任设备（均经 TrayIpcClient 走托盘进程）
+/// 设置页（单进程方案：直接调本进程 LanTransferService 单例）
+/// - 微密飞传：网页快传开关、本机名称、信任设备
 /// - 通用：清理缓存
-/// - 桌面端：开机自动启动飞传（托盘）进程
+/// - 桌面端：开机自动启动微密文件（常驻托盘）
 class SettingsScreen extends StatefulWidget {
   const SettingsScreen({super.key});
 
@@ -26,8 +25,6 @@ class _SettingsScreenState extends State<SettingsScreen> {
   List<MapEntry<String, String>> _trusted = [];
   bool _isDesktop = false;
 
-  final TrayIpcClient _ipc = TrayIpcClient.instance;
-
   @override
   void initState() {
     super.initState();
@@ -37,36 +34,36 @@ class _SettingsScreenState extends State<SettingsScreen> {
 
   Future<void> _load() async {
     if (!mounted) return;
-    final self = await _ipc.getSelf();
+    final svc = LanTransferService.instance;
     if (mounted) {
       setState(() {
-        _webShare = self?.webShare ?? true;
-        _selfName = (self?.name ?? '').isEmpty ? '本机' : self!.name;
+        _webShare = svc.webShareEnabled;
+        _selfName = svc.selfName.isEmpty ? '本机' : svc.selfName;
       });
     }
-    // 信任设备列表来自托盘共享文件，强制重读最新内容
+    // 信任设备列表来自本进程持久化文件，强制重读最新内容
     await TrustedDevices.instance.reload();
     if (mounted) setState(() => _trusted = TrustedDevices.instance.all);
     if (_isDesktop && AutostartService.supported) {
       final enabled =
-          await AutostartService.isEnabled(valueName: 'WeiMiTray');
+          await AutostartService.isEnabled(valueName: 'WeiMiFile');
       if (mounted) setState(() => _autostartTray = enabled);
     }
   }
 
   Future<void> _toggleWebShare(bool v) async {
-    final ok = await _ipc.setWebShare(v);
-    if (mounted) setState(() => _webShare = ok ? v : _webShare);
+    await LanTransferService.instance.setWebShareEnabled(v);
+    if (mounted) setState(() => _webShare = v);
   }
 
   Future<void> _toggleAutostartTray(bool v) async {
     final ok = await AutostartService.setEnabled(v,
-        exePath: await TrayLauncher.trayExePath(), valueName: 'WeiMiTray');
+        exePath: Platform.resolvedExecutable, valueName: 'WeiMiFile');
     if (mounted) {
       setState(() => _autostartTray = ok ? v : _autostartTray);
       ScaffoldMessenger.of(context).showSnackBar(SnackBar(
         content: Text(ok
-            ? (v ? '已开启开机自动启动飞传' : '已关闭开机自动启动飞传')
+            ? (v ? '已开启开机自动启动微密文件' : '已关闭开机自动启动微密文件')
             : '设置失败，请检查系统权限'),
         backgroundColor: ok ? Colors.green : Colors.red,
       ));
@@ -95,19 +92,15 @@ class _SettingsScreenState extends State<SettingsScreen> {
       ),
     );
     if (r != null && r.trim().isNotEmpty && mounted) {
-      final ok = await _ipc.setSelfName(r.trim());
-      if (ok) setState(() => _selfName = r.trim());
+      await LanTransferService.instance.setSelfName(r.trim());
+      setState(() => _selfName = r.trim());
     }
   }
 
   Future<void> _removeTrusted(String id) async {
-    final name =
-        _trusted.where((e) => e.key == id).firstOrNull?.value ?? '';
-    final ok = await _ipc.trust(id, name, false);
-    if (ok) {
-      await TrustedDevices.instance.reload();
-      if (mounted) setState(() => _trusted = TrustedDevices.instance.all);
-    }
+    await TrustedDevices.instance.remove(id);
+    await TrustedDevices.instance.reload();
+    if (mounted) setState(() => _trusted = TrustedDevices.instance.all);
   }
 
   Future<void> _clearCache() async {
@@ -221,9 +214,9 @@ class _SettingsScreenState extends State<SettingsScreen> {
             if (AutostartService.supported)
               SwitchListTile(
                 secondary: const Icon(Icons.power_settings_new),
-                title: const Text('开机自动启动飞传（托盘）'),
+                title: const Text('开机自动启动微密文件'),
                 subtitle: const Text(
-                    '登录系统后自动运行微密飞传，内存占用极小，可随时从托盘退出'),
+                    '登录系统后自动运行微密文件并常驻托盘，可随时从托盘退出'),
                 value: _autostartTray,
                 onChanged: _toggleAutostartTray,
               ),

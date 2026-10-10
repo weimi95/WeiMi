@@ -6,8 +6,7 @@ import 'package:file_picker/file_picker.dart';
 import 'package:desktop_drop/desktop_drop.dart';
 import 'package:cross_file/cross_file.dart';
 import 'package:shared_preferences/shared_preferences.dart';
-import 'package:window_manager/window_manager.dart';
-import 'services/tray_launcher.dart';
+import 'services/tray_service.dart';
 import 'services/file_operations_service.dart';
 import 'services/encryption_service.dart';
 import 'services/file_viewer_service.dart';
@@ -33,20 +32,7 @@ const int kPasswordMaxLength = 32;
 // 上次加密/解密输出目录的 SharedPreferences key
 const String kLastOutputDirKey = 'last_output_dir';
 
-/// 桌面端窗口关闭：主程序退出，托盘飞传进程独立常驻（B 方案核心）。
-class _WindowCloseHandler extends WindowListener {
-  @override
-  void onWindowClose() async {
-    await TrayLauncher.removePid('main.pid');
-    // 托盘进程独立运行，主程序退出后飞传继续；若托盘未运行则拉起
-    await TrayLauncher.ensureTrayRunning();
-    exit(0);
-  }
-}
-
-final _windowCloseHandler = _WindowCloseHandler();
-
-// 托盘初始化已移至 tray_main.dart（独立托盘进程），本文件不再建托盘。
+// 桌面端单进程常驻托盘：窗口关闭 = 收托盘（见 tray_service.dart），由 TrayService 管理。
 
 
 void main() async {
@@ -81,26 +67,12 @@ void main() async {
     await FileAssociationService.registerFileAssociation();
   }
 
-  // 桌面端：窗口管理；飞传由独立托盘进程常驻（见 tray_main.dart）
+  // 桌面端：单进程常驻托盘，主程序自身跑飞传 + 托盘（见 tray_service.dart）
   if (!Platform.isAndroid && !Platform.isIOS) {
     try {
-      await windowManager.ensureInitialized();
-      const opts = WindowOptions(
-        size: Size(1100, 800),
-        minimumSize: Size(700, 500),
-        title: '微密文件',
-      );
-      await windowManager.waitUntilReadyToShow(opts, () async {
-        await windowManager.show();
-        await windowManager.setPreventClose(false); // 关闭即退出主程序
-      });
-      windowManager.addListener(_windowCloseHandler);
-      // 主程序 pid 登记；托盘飞传进程常驻，主程序运行期间始终确保其在
-      // （独立进程，关闭主窗口即退出主程序，不影响飞传）
-      await TrayLauncher.writePid('main.pid');
-      await TrayLauncher.ensureTrayRunning();
+      await TrayService.instance.initDesktop();
     } catch (e) {
-      debugPrint('window init failed: $e');
+      debugPrint('desktop init failed: $e');
     }
   }
 
