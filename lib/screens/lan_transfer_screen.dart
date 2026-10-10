@@ -6,7 +6,6 @@ import 'package:file_picker/file_picker.dart';
 import 'package:path/path.dart' as p;
 import '../services/lan_transfer_service.dart';
 import '../services/trusted_devices_service.dart';
-import '../services/tray_service.dart';
 import '../widgets/progress_dialog.dart';
 import 'settings_screen.dart';
 import 'transfer_history_screen.dart';
@@ -44,8 +43,6 @@ class _LanTransferScreenState extends State<LanTransferScreen> {
     } else if (widget.initialFiles.isNotEmpty) {
       _pendingFiles = widget.initialFiles;
     }
-    // 注册接收确认回调（本方为前台 UI 时可弹窗）
-    _svc.confirmHandler = _onConfirmRequest;
     _startPolling();
   }
 
@@ -73,46 +70,7 @@ class _LanTransferScreenState extends State<LanTransferScreen> {
   @override
   void dispose() {
     _pollTimer?.cancel();
-    if (_svc.confirmHandler == _onConfirmRequest) _svc.confirmHandler = null;
     super.dispose();
-  }
-
-  // ============ 接收确认弹窗（confirmHandler 回调） ============
-
-  Future<bool> _onConfirmRequest(IncomingRequest req) async {
-    // 收托盘时窗口可能隐藏，弹框前先恢复窗口
-    await TrayService.instance.openMainWindow();
-    if (!mounted) return false;
-    final accepted = await showDialog<bool>(
-      context: context,
-      barrierDismissible: false,
-      builder: (ctx) => AlertDialog(
-        title: const Text('收到传输请求'),
-        content: Column(
-          mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Text('设备：${req.senderName}',
-                style: const TextStyle(fontWeight: FontWeight.w500)),
-            const SizedBox(height: 6),
-            Text('内容：${req.fileName}'),
-            const SizedBox(height: 2),
-            Text('大小：${_fmtSize(req.fileSize)}'),
-          ],
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(ctx, false),
-            child: const Text('拒收'),
-          ),
-          TextButton(
-            onPressed: () => Navigator.pop(ctx, true),
-            child: const Text('接收'),
-          ),
-        ],
-      ),
-    );
-    return accepted == true;
   }
 
   Future<void> _showReceivedText(String text, String from) async {

@@ -5,6 +5,7 @@ import 'package:path_provider/path_provider.dart';
 import 'package:system_tray/system_tray.dart';
 import 'package:window_manager/window_manager.dart';
 import 'services/lan_transfer_service.dart';
+import 'services/share_receive_service.dart';
 
 /// 单进程托盘：主程序自身常驻托盘。
 ///
@@ -42,6 +43,8 @@ class TrayService {
     await LanTransferService.instance.startDiscovery();
 
     await _initSystemTray();
+    // 全局接收确认：无论飞传页是否打开，非信任设备发来均弹窗提示（收托盘时也弹）
+    LanTransferService.instance.confirmHandler = _globalConfirmRequest;
   }
 
   Future<void> _initSystemTray() async {
@@ -125,4 +128,47 @@ class _WindowListener extends WindowListener {
   void onWindowFocus() async {
     await TrayService.instance.exitLeanMode();
   }
+}
+
+String _fmtSize(int bytes) {
+  if (bytes < 1024) return '$bytes B';
+  if (bytes < 1024 * 1024) return '${(bytes / 1024).toStringAsFixed(1)} KB';
+  if (bytes < 1024 * 1024 * 1024) {
+    return '${(bytes / 1024 / 1024).toStringAsFixed(1)} MB';
+  }
+  return '${(bytes / 1024 / 1024 / 1024).toStringAsFixed(2)} GB';
+}
+
+/// 全局接收确认弹窗：非信任设备发来文件/文本时由 LanTransferService 调用。
+/// 弹窗前先恢复主窗口（收托盘隐藏时也能看到），信任设备已在 _decideAccept 直收、不会到这里。
+Future<bool> _globalConfirmRequest(IncomingRequest req) async {
+  await TrayService.instance.openMainWindow();
+  final ctx = ShareReceiveService.navigatorKey.currentContext;
+  if (ctx == null) return false;
+  final accepted = await showDialog<bool>(
+    context: ctx,
+    barrierDismissible: false,
+    builder: (c) => AlertDialog(
+      title: const Text('收到传输请求'),
+      content: Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text('设备：${req.senderName}',
+              style: const TextStyle(fontWeight: FontWeight.w500)),
+          const SizedBox(height: 6),
+          Text('内容：${req.fileName}'),
+          const SizedBox(height: 2),
+          Text('大小：${_fmtSize(req.fileSize)}'),
+        ],
+      ),
+      actions: [
+        TextButton(
+            onPressed: () => Navigator.pop(c, false), child: const Text('拒收')),
+        TextButton(
+            onPressed: () => Navigator.pop(c, true), child: const Text('接收')),
+      ],
+    ),
+  );
+  return accepted == true;
 }

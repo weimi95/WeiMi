@@ -409,7 +409,6 @@ class LanTransferService {
       {required String senderId,
       required Future<bool> Function() ask}) async {
     if (TrustedDevices.instance.isTrustedSync(senderId)) return true;
-    if (_backgroundMode) return false;
     return ask();
   }
 
