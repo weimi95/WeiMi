@@ -873,8 +873,136 @@ mod tests {
 // - index_free：释放进程级索引内存，下次 index_build 重建。
 // - index_search：文件名不区分大小写子串匹配，返回 \n 连接的路径串（两次调用模式：
 //   先 out_ptr=null 拿长度，再传缓冲区取数据）。阻塞调用，建议放后台线程/isolate。
+// - index_save / index_load：索引落盘（路径 + 各目录 mtime + 根列表），跨启动复用，
+//   避免每次启动全量重建。
+// - index_refresh：增量刷新。比对各根目录 mtime，未变则跳过重扫，仅重扫变化的盘/目录。
+
+use std::collections::HashMap;
 
 static INDEX_PATHS: std::sync::Mutex<Option<Vec<String>>> = std::sync::Mutex::new(None);
+/// 各目录（含根）的 mtime（纳秒），用于增量刷新时判断是否需要重扫
+static INDEX_DIR_MTIMES: std::sync::Mutex<Option<HashMap<String, i64>>> =
+    std::sync::Mutex::new(None);
+/// 索引根目录列表（与 build 入参一致）
+static INDEX_ROOTS: std::sync::Mutex<Option<Vec<String>>> = std::sync::Mutex::new(None);
+
+/// 取目录 mtime（纳秒），失败返回 None
+fn dir_mtime_ns(path: &std::path::Path) -> Option<i64> {
+    if let Ok(meta) = std::fs::metadata(path) {
+        if let Ok(t) = meta.modified() {
+            if let Ok(d) = t.duration_since(std::time::UNIX_EPOCH) {
+                return Some(d.as_nanos() as i64);
+            }
+        }
+    }
+    None
+}
+
+/// 多线程遍历 roots，收集文件路径 + 各目录 mtime，返回容器（不替换外部状态）
+fn scan_roots(roots: &[std::path::PathBuf]) -> (Vec<String>, HashMap<String, i64>) {
+    let max_entries: usize = 1_000_000;
+    let queue: Arc<std::sync::Mutex<Vec<std::path::PathBuf>>> =
+        Arc::new(std::sync::Mutex::new(roots.to_vec()));
+    let paths: Arc<std::sync::Mutex<Vec<String>>> = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let dir_mtimes: Arc<std::sync::Mutex<HashMap<String, i64>>> =
+        Arc::new(std::sync::Mutex::new(HashMap::new()));
+    let busy = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let total = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+
+    let workers = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(4);
+    let mut handles = Vec::new();
+    for _ in 0..workers {
+        let queue = queue.clone();
+        let paths = paths.clone();
+        let dir_mtimes = dir_mtimes.clone();
+        let busy = busy.clone();
+        let total = total.clone();
+        let stop = stop.clone();
+        handles.push(std::thread::spawn(move || {
+            let mut local: Vec<String> = Vec::new();
+            let mut local_dirs: HashMap<String, i64> = HashMap::new();
+            loop {
+                if stop.load(std::sync::atomic::Ordering::Relaxed) {
+                    break;
+                }
+                let dir = {
+                    let mut q = queue.lock().unwrap();
+                    match q.pop() {
+                        Some(d) => {
+                            busy.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                            d
+                        }
+                        None => {
+                            if busy.load(std::sync::atomic::Ordering::Relaxed) == 0 {
+                                stop.store(true, std::sync::atomic::Ordering::Relaxed);
+                                break;
+                            }
+                            drop(q);
+                            std::thread::sleep(std::time::Duration::from_millis(2));
+                            continue;
+                        }
+                    }
+                };
+                if let Some(mt) = dir_mtime_ns(&dir) {
+                    local_dirs.insert(dir.to_string_lossy().to_string(), mt);
+                }
+                if let Ok(rd) = std::fs::read_dir(&dir) {
+                    for e in rd.flatten() {
+                        if stop.load(std::sync::atomic::Ordering::Relaxed) {
+                            break;
+                        }
+                        let name_os = e.file_name();
+                        let name = name_os.to_string_lossy().to_string();
+                        let Ok(ft) = e.file_type() else { continue };
+                        if ft.is_symlink() {
+                            continue;
+                        }
+                        let is_dir = ft.is_dir();
+                        if is_dir {
+                            if index_skip_dir(&name) {
+                                continue;
+                            }
+                            let mut q = queue.lock().unwrap();
+                            q.push(e.path());
+                        } else {
+                            if total.load(std::sync::atomic::Ordering::Relaxed) >= max_entries {
+                                stop.store(true, std::sync::atomic::Ordering::Relaxed);
+                            } else {
+                                local.push(e.path().to_string_lossy().to_string());
+                                if local.len() >= 4096 {
+                                    let n = local.len();
+                                    paths.lock().unwrap().extend(local.drain(..));
+                                    total.fetch_add(n, std::sync::atomic::Ordering::Relaxed);
+                                }
+                            }
+                        }
+                    }
+                }
+                busy.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+            }
+            if !local.is_empty()
+                && total.load(std::sync::atomic::Ordering::Relaxed) < max_entries
+            {
+                paths.lock().unwrap().extend(local);
+            }
+            {
+                let mut dm = dir_mtimes.lock().unwrap();
+                for (k, v) in local_dirs {
+                    dm.insert(k, v);
+                }
+            }
+        }));
+    }
+    for h in handles {
+        let _ = h.join();
+    }
+    let final_paths = paths.lock().unwrap().clone();
+    let final_dirs = dir_mtimes.lock().unwrap().clone();
+    (final_paths, final_dirs)
+}
 
 const INDEX_SKIP_DIRS: &[&str] = &[
     "$recycle.bin",
@@ -909,100 +1037,12 @@ pub extern "C" fn index_build(roots_ptr: *const *const c_char, num_roots: usize)
         return -2;
     }
 
-    let max_entries: usize = 1_000_000;
-    let queue: Arc<std::sync::Mutex<Vec<std::path::PathBuf>>> =
-        Arc::new(std::sync::Mutex::new(roots));
-    let paths: Arc<std::sync::Mutex<Vec<String>>> = Arc::new(std::sync::Mutex::new(Vec::new()));
-    // 正在处理目录的工作线程数（防止「队列空但还有目录要产生」的提前退出）
-    let busy = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-    let total = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-    let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
-
-    let workers = std::thread::available_parallelism()
-        .map(|n| n.get())
-        .unwrap_or(4);
-    let mut handles = Vec::new();
-    for _ in 0..workers {
-        let queue = queue.clone();
-        let paths = paths.clone();
-        let busy = busy.clone();
-        let total = total.clone();
-        let stop = stop.clone();
-        handles.push(std::thread::spawn(move || {
-            let mut local: Vec<String> = Vec::new();
-            loop {
-                if stop.load(std::sync::atomic::Ordering::Relaxed) {
-                    break;
-                }
-                let dir = {
-                    let mut q = queue.lock().unwrap();
-                    match q.pop() {
-                        Some(d) => {
-                            busy.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                            d
-                        }
-                        None => {
-                            if busy.load(std::sync::atomic::Ordering::Relaxed) == 0 {
-                                stop.store(true, std::sync::atomic::Ordering::Relaxed);
-                                break;
-                            }
-                            drop(q);
-                            std::thread::sleep(std::time::Duration::from_millis(2));
-                            continue;
-                        }
-                    }
-                };
-                if let Ok(rd) = std::fs::read_dir(&dir) {
-                    for e in rd.flatten() {
-                        if stop.load(std::sync::atomic::Ordering::Relaxed) {
-                            break;
-                        }
-                        let name_os = e.file_name();
-                        let name = name_os.to_string_lossy().to_string();
-                        let Ok(ft) = e.file_type() else { continue };
-                        if ft.is_symlink() {
-                            continue;
-                        }
-                        let is_dir = ft.is_dir();
-                        if is_dir {
-                            if index_skip_dir(&name) {
-                                continue;
-                            }
-                            let mut q = queue.lock().unwrap();
-                            q.push(e.path());
-                        } else {
-                            if total.load(std::sync::atomic::Ordering::Relaxed)
-                                >= max_entries
-                            {
-                                // 已达上限：停止接收新条目并终止遍历
-                                stop.store(true, std::sync::atomic::Ordering::Relaxed);
-                            } else {
-                                local.push(e.path().to_string_lossy().to_string());
-                                if local.len() >= 4096 {
-                                    let n = local.len();
-                                    paths.lock().unwrap().extend(local.drain(..));
-                                    total.fetch_add(n, std::sync::atomic::Ordering::Relaxed);
-                                }
-                            }
-                        }
-                    }
-                }
-                busy.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
-            }
-            if !local.is_empty()
-                && total.load(std::sync::atomic::Ordering::Relaxed) < max_entries
-            {
-                paths.lock().unwrap().extend(local);
-            }
-        }));
-    }
-    for h in handles {
-        let _ = h.join();
-    }
-
-    let final_paths = paths.lock().unwrap().clone();
+    let (final_paths, final_dirs) = scan_roots(&roots);
     let n = final_paths.len() as i64;
     *INDEX_PATHS.lock().unwrap() = Some(final_paths);
+    let root_strs: Vec<String> = roots.iter().map(|p| p.to_string_lossy().to_string()).collect();
+    *INDEX_DIR_MTIMES.lock().unwrap() = Some(final_dirs);
+    *INDEX_ROOTS.lock().unwrap() = Some(root_strs);
     n
 }
 
@@ -1076,4 +1116,251 @@ pub extern "C" fn index_search(
         }
     }
     0
+}
+
+/// 索引落盘：路径列表 + 各目录 mtime + 根列表，二进制（magic WMIX + version）
+#[no_mangle]
+pub extern "C" fn index_save(file_ptr: *const c_char) -> i32 {
+    let cpath = unsafe { CStr::from_ptr(file_ptr) };
+    let path = cpath.to_string_lossy().to_string();
+    let f = match std::fs::File::create(&path) {
+        Ok(f) => f,
+        Err(_) => return -2,
+    };
+    let mut w = BufWriter::new(f);
+    {
+        let pg = INDEX_PATHS.lock().unwrap();
+        let rg = INDEX_DIR_MTIMES.lock().unwrap();
+        let og = INDEX_ROOTS.lock().unwrap();
+        let paths = match pg.as_ref() {
+            Some(p) => p,
+            None => return -1,
+        };
+        let rmt = match rg.as_ref() {
+            Some(m) => m,
+            None => return -1,
+        };
+        let roots = match og.as_ref() {
+            Some(r) => r,
+            None => return -1,
+        };
+        if w.write_all(&[0x57u8, 0x4d, 0x49, 0x58]).is_err() {
+            return -3;
+        }
+        if w.write_all(&1u32.to_le_bytes()).is_err() {
+            return -3;
+        }
+        // 文件路径
+        if w.write_all(&(paths.len() as u64).to_le_bytes()).is_err() {
+            return -3;
+        }
+        for p in paths {
+            let b = p.as_bytes();
+            if w.write_all(&(b.len() as u32).to_le_bytes()).is_err() {
+                return -3;
+            }
+            if w.write_all(b).is_err() {
+                return -3;
+            }
+        }
+        // 目录 mtime
+        if w.write_all(&(rmt.len() as u64).to_le_bytes()).is_err() {
+            return -3;
+        }
+        for (k, v) in rmt {
+            let b = k.as_bytes();
+            if w.write_all(&(b.len() as u32).to_le_bytes()).is_err() {
+                return -3;
+            }
+            if w.write_all(b).is_err() {
+                return -3;
+            }
+            if w.write_all(&v.to_le_bytes()).is_err() {
+                return -3;
+            }
+        }
+        // 根列表
+        if w.write_all(&(roots.len() as u64).to_le_bytes()).is_err() {
+            return -3;
+        }
+        for r in roots {
+            let b = r.as_bytes();
+            if w.write_all(&(b.len() as u32).to_le_bytes()).is_err() {
+                return -3;
+            }
+            if w.write_all(b).is_err() {
+                return -3;
+            }
+        }
+    }
+    match w.flush() {
+        Ok(_) => 0,
+        Err(_) => -3,
+    }
+}
+
+/// 从落盘文件恢复索引（成功返回 0）
+#[no_mangle]
+pub extern "C" fn index_load(file_ptr: *const c_char) -> i32 {
+    let cpath = unsafe { CStr::from_ptr(file_ptr) };
+    let path = cpath.to_string_lossy().to_string();
+    let f = match std::fs::File::open(&path) {
+        Ok(f) => f,
+        Err(_) => return -2,
+    };
+    let mut r = BufReader::new(f);
+    let mut magic = [0u8; 4];
+    if r.read_exact(&mut magic).is_err() || magic != [0x57, 0x4d, 0x49, 0x58] {
+        return -4;
+    }
+    let mut ver = [0u8; 4];
+    if r.read_exact(&mut ver).is_err() {
+        return -4;
+    }
+    let _ver = u32::from_le_bytes(ver);
+    let mut nbuf = [0u8; 8];
+    // 文件路径
+    if r.read_exact(&mut nbuf).is_err() {
+        return -4;
+    }
+    let fc = u64::from_le_bytes(nbuf);
+    let mut paths = Vec::with_capacity(fc as usize);
+    for _ in 0..fc {
+        let mut lb = [0u8; 4];
+        if r.read_exact(&mut lb).is_err() {
+            return -4;
+        }
+        let l = u32::from_le_bytes(lb) as usize;
+        let mut buf = vec![0u8; l];
+        if r.read_exact(&mut buf).is_err() {
+            return -4;
+        }
+        paths.push(String::from_utf8_lossy(&buf).into_owned());
+    }
+    // 目录 mtime
+    if r.read_exact(&mut nbuf).is_err() {
+        return -4;
+    }
+    let mc = u64::from_le_bytes(nbuf);
+    let mut rmt = HashMap::with_capacity(mc as usize);
+    for _ in 0..mc {
+        let mut lb = [0u8; 4];
+        if r.read_exact(&mut lb).is_err() {
+            return -4;
+        }
+        let l = u32::from_le_bytes(lb) as usize;
+        let mut buf = vec![0u8; l];
+        if r.read_exact(&mut buf).is_err() {
+            return -4;
+        }
+        let key = String::from_utf8_lossy(&buf).into_owned();
+        let mut mb = [0u8; 8];
+        if r.read_exact(&mut mb).is_err() {
+            return -4;
+        }
+        let mt = i64::from_le_bytes(mb);
+        rmt.insert(key, mt);
+    }
+    // 根列表
+    if r.read_exact(&mut nbuf).is_err() {
+        return -4;
+    }
+    let rc = u64::from_le_bytes(nbuf);
+    let mut roots = Vec::with_capacity(rc as usize);
+    for _ in 0..rc {
+        let mut lb = [0u8; 4];
+        if r.read_exact(&mut lb).is_err() {
+            return -4;
+        }
+        let l = u32::from_le_bytes(lb) as usize;
+        let mut buf = vec![0u8; l];
+        if r.read_exact(&mut buf).is_err() {
+            return -4;
+        }
+        roots.push(String::from_utf8_lossy(&buf).into_owned());
+    }
+    *INDEX_PATHS.lock().unwrap() = Some(paths);
+    *INDEX_DIR_MTIMES.lock().unwrap() = Some(rmt);
+    *INDEX_ROOTS.lock().unwrap() = Some(roots);
+    0
+}
+
+/// 增量刷新：比对各根目录 mtime，未变跳过重扫，仅重扫变化的盘/目录。
+/// 索引未建立（未 load 也未 build）时返回 -3，调用方应先 buildIndex。
+#[no_mangle]
+pub extern "C" fn index_refresh(
+    roots_ptr: *const *const c_char,
+    num_roots: usize,
+) -> i64 {
+    let mut roots: Vec<std::path::PathBuf> = Vec::new();
+    unsafe {
+        if roots_ptr.is_null() {
+            return -1;
+        }
+        let ptrs = slice::from_raw_parts(roots_ptr, num_roots);
+        for &rp in ptrs {
+            let cs = CStr::from_ptr(rp);
+            let s = cs.to_string_lossy().to_string();
+            if !s.is_empty() && std::path::Path::new(&s).exists() {
+                roots.push(std::path::PathBuf::from(s));
+            }
+        }
+    }
+    if roots.is_empty() {
+        return -2;
+    }
+    {
+        let g = INDEX_PATHS.lock().unwrap();
+        if g.is_none() {
+            return -3;
+        }
+    }
+    let sep = std::path::MAIN_SEPARATOR;
+    for root in &roots {
+        let rkey = root.to_string_lossy().to_string();
+        let cur = dir_mtime_ns(root);
+        let prev = {
+            let rmt = INDEX_DIR_MTIMES.lock().unwrap();
+            rmt.as_ref().and_then(|m| m.get(&rkey).copied())
+        };
+        let unchanged = root.exists() && prev.is_some() && cur == prev;
+        if unchanged {
+            continue;
+        }
+        // 移除该根旧条目
+        {
+            let mut pg = INDEX_PATHS.lock().unwrap();
+            if let Some(v) = pg.as_mut() {
+                let prefix = format!("{}{}", rkey, sep);
+                v.retain(|p| p.as_str() != rkey.as_str() && !p.starts_with(prefix.as_str()));
+            }
+            let mut rmt = INDEX_DIR_MTIMES.lock().unwrap();
+            if let Some(m) = rmt.as_mut() {
+                let prefix = format!("{}{}", rkey, sep);
+                m.retain(|k, _| k.as_str() != rkey.as_str() && !k.starts_with(prefix.as_str()));
+            }
+        }
+        // 重扫该根并并入
+        let (local_paths, local_dirs) = scan_roots(&[root.clone()]);
+        if !local_paths.is_empty() {
+            let mut pg = INDEX_PATHS.lock().unwrap();
+            if let Some(v) = pg.as_mut() {
+                v.extend(local_paths);
+            }
+        }
+        {
+            let mut rmt = INDEX_DIR_MTIMES.lock().unwrap();
+            if let Some(m) = rmt.as_mut() {
+                m.insert(rkey.clone(), cur.unwrap_or(0));
+                for (k, v) in local_dirs {
+                    m.insert(k, v);
+                }
+            }
+        }
+    }
+    let g = INDEX_PATHS.lock().unwrap();
+    match g.as_ref() {
+        Some(v) => v.len() as i64,
+        None => -3,
+    }
 }

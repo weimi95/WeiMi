@@ -43,21 +43,25 @@ class _GlobalSearchDialogState extends State<GlobalSearchDialog> {
   Future<void> _doSearch() async {
     final q = _ctrl.text.trim();
     if (q.isEmpty || _busy) return;
+    final hasSaved = await DiskIndexService.hasSavedIndex();
     setState(() {
       _busy = true;
       _results = [];
       _busyText = DiskIndexService.isBuilt
           ? '搜索中...'
-          : '首次使用，正在建立全盘索引（约 1~2 分钟）...';
+          : (hasSaved
+              ? '正在加载索引…'
+              : '首次使用，正在建立全盘索引（约 1~2 分钟）...');
     });
     try {
       if (!DiskIndexService.isBuilt) {
-        final n =
-            await DiskIndexService.buildIndex(DiskIndexService.defaultRoots());
+        final n = await DiskIndexService.prepareIndex();
         if (!mounted) return;
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('索引完成：$n 个文件')),
-        );
+        if (n >= 0) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(content: Text('索引就绪：$n 个文件')),
+          );
+        }
       }
       final r = await DiskIndexService.search(q);
       if (!mounted) return;
