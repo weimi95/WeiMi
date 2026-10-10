@@ -16,7 +16,7 @@ class TrayLauncher {
   /// 主程序可执行文件绝对路径（跨平台）。
   static Future<String> mainExePath() async {
     final dir = p.dirname(Platform.resolvedExecutable);
-    if (Platform.isWindows) return p.join(dir, 'weimi_file.exe');
+    if (Platform.isWindows) return p.join(dir, 'weimi.exe'); // Windows BINARY_NAME=weimi
     if (Platform.isLinux) return p.join(dir, 'weimi_file');
     if (Platform.isMacOS) {
       final appParent = p.dirname(p.dirname(p.dirname(dir)));

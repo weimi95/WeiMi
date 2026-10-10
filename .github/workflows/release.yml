@@ -194,13 +194,22 @@ jobs:
         run: |
           flutter build windows --release -t lib/tray_main.dart
           cd build/windows/x64/runner/Release
-          if (Test-Path weimi_file.exe) { Move-Item weimi_file.exe weimi_tray.exe -Force }
+          # Windows 产物名是 weimi.exe（见 windows/CMakeLists.txt BINARY_NAME=weimi）
+          if (Test-Path weimi.exe) {
+            Move-Item weimi.exe "$env:GITHUB_WORKSPACE/weimi_tray.exe" -Force
+          }
 
       - name: Build Windows
         run: |
           flutter pub get
           flutter build windows --release
-      
+
+      - name: Stage Tray into bundle
+        run: |
+          if (Test-Path "$env:GITHUB_WORKSPACE/weimi_tray.exe") {
+            Copy-Item "$env:GITHUB_WORKSPACE/weimi_tray.exe" "build/windows/x64/runner/Release/weimi_tray.exe" -Force
+          }
+
       - name: Create Windows ZIP
         run: |
           cd build/windows/x64/runner/Release
@@ -253,13 +262,13 @@ jobs:
         run: |
           flutter build macos --release -t lib/tray_main.dart
           cd build/macos/Build/Products/Release
-          if [ -d weimi_file.app ]; then mv weimi_file.app weimi_tray.app; fi
-          /usr/libexec/PlistBuddy -c "Set :CFBundleName 微密飞传" weimi_tray.app/Contents/Info.plist || true
-          /usr/libexec/PlistBuddy -c "Set :CFBundleDisplayName 微密飞传" weimi_tray.app/Contents/Info.plist || true
+          if [ -d weimi_file.app ]; then mv weimi_file.app $GITHUB_WORKSPACE/weimi_tray.app; fi
+          /usr/libexec/PlistBuddy -c "Set :CFBundleName 微密飞传" $GITHUB_WORKSPACE/weimi_tray.app/Contents/Info.plist || true
+          /usr/libexec/PlistBuddy -c "Set :CFBundleDisplayName 微密飞传" $GITHUB_WORKSPACE/weimi_tray.app/Contents/Info.plist || true
 
       - name: Copy Rust library to Tray app
         run: |
-          cp rust_crypto/target/aarch64-apple-darwin/release/librust_crypto.dylib build/macos/Build/Products/Release/weimi_tray.app/Contents/Resources/ || true
+          cp rust_crypto/target/aarch64-apple-darwin/release/librust_crypto.dylib $GITHUB_WORKSPACE/weimi_tray.app/Contents/Resources/ || true
 
       - name: Build macOS
         run: |
@@ -269,6 +278,12 @@ jobs:
       - name: Copy Rust library
         run: |
           cp rust_crypto/target/aarch64-apple-darwin/release/librust_crypto.dylib build/macos/Build/Products/Release/weimi_file.app/Contents/Resources/
+
+      - name: Stage Tray into bundle
+        run: |
+          if [ -d "$GITHUB_WORKSPACE/weimi_tray.app" ]; then
+            cp -R "$GITHUB_WORKSPACE/weimi_tray.app" build/macos/Build/Products/Release/weimi_tray.app
+          fi
       
       - name: Create macOS DMG
         run: |
@@ -342,13 +357,19 @@ jobs:
         run: |
           flutter build linux --release -t lib/tray_main.dart
           cd build/linux/x64/release/bundle
-          if [ -f weimi_file ]; then mv weimi_file weimi_tray; fi
+          if [ -f weimi_file ]; then mv weimi_file $GITHUB_WORKSPACE/weimi_tray; fi
 
       - name: Build Linux
         run: |
           flutter pub get
           flutter build linux --release
-      
+
+      - name: Stage Tray into bundle
+        run: |
+          if [ -f "$GITHUB_WORKSPACE/weimi_tray" ]; then
+            cp "$GITHUB_WORKSPACE/weimi_tray" build/linux/x64/release/bundle/weimi_tray
+          fi
+
       - name: Create Linux tarball
         run: |
           VERSION=${GITHUB_REF#refs/tags/}
