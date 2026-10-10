@@ -3,17 +3,15 @@ import 'dart:io';
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:path_provider/path_provider.dart';
-import 'package:shared_preferences/shared_preferences.dart';
-import 'package:window_manager/window_manager.dart';
-
 import '../services/autostart_service.dart';
-import '../services/lan_transfer_service.dart';
+import '../services/tray_ipc_client.dart';
+import '../services/tray_launcher.dart';
 import '../services/trusted_devices_service.dart';
 
-/// 设置页
-/// - 微密飞传：启动时自动开启、本机名称、信任设备管理
+/// 设置页（B 方案：飞传由独立托盘进程常驻，本页不直连飞传服务）
+/// - 微密飞传：网页快传开关、本机名称、信任设备（均经 TrayIpcClient 走托盘进程）
 /// - 通用：清理缓存
-/// - 桌面端：关闭时最小化到托盘、开机自动启动
+/// - 桌面端：开机自动启动飞传（托盘）进程
 class SettingsScreen extends StatefulWidget {
   const SettingsScreen({super.key});
 
@@ -22,12 +20,13 @@ class SettingsScreen extends StatefulWidget {
 }
 
 class _SettingsScreenState extends State<SettingsScreen> {
-  bool _autoStartLan = false;
   bool _webShare = true;
-  bool _closeToTray = true;
-  bool _autostart = false;
+  bool _autostartTray = false;
+  String _selfName = '本机';
   List<MapEntry<String, String>> _trusted = [];
   bool _isDesktop = false;
+
+  final TrayIpcClient _ipc = TrayIpcClient.instance;
 
   @override
   void initState() {
@@ -37,51 +36,37 @@ class _SettingsScreenState extends State<SettingsScreen> {
   }
 
   Future<void> _load() async {
-    final prefs = await SharedPreferences.getInstance();
-    await TrustedDevices.instance.load();
     if (!mounted) return;
-    setState(() {
-      _autoStartLan = prefs.getBool('lan_autostart') ?? false;
-      _closeToTray = prefs.getBool('desk_close_to_tray') ?? true;
-      _trusted = TrustedDevices.instance.all;
-    });
+    final self = await _ipc.getSelf();
     if (mounted) {
-      setState(() => _webShare = LanTransferService.instance.webShareEnabled);
+      setState(() {
+        _webShare = self?.webShare ?? true;
+        _selfName = (self?.name ?? '').isEmpty ? '本机' : self!.name;
+      });
     }
-    if (AutostartService.supported) {
-      final enabled = await AutostartService.isEnabled();
-      if (mounted) setState(() => _autostart = enabled);
+    // 信任设备列表来自托盘共享文件，强制重读最新内容
+    await TrustedDevices.instance.reload();
+    if (mounted) setState(() => _trusted = TrustedDevices.instance.all);
+    if (_isDesktop && AutostartService.supported) {
+      final enabled =
+          await AutostartService.isEnabled(valueName: 'WeiMiTray');
+      if (mounted) setState(() => _autostartTray = enabled);
     }
-  }
-
-  Future<void> _toggleAutoStartLan(bool v) async {
-    final prefs = await SharedPreferences.getInstance();
-    await prefs.setBool('lan_autostart', v);
-    if (v) await LanTransferService.instance.startReceiving();
-    if (mounted) setState(() => _autoStartLan = v);
   }
 
   Future<void> _toggleWebShare(bool v) async {
-    await LanTransferService.instance.setWebShareEnabled(v);
-    if (mounted) setState(() => _webShare = v);
+    final ok = await _ipc.setWebShare(v);
+    if (mounted) setState(() => _webShare = ok ? v : _webShare);
   }
 
-  Future<void> _toggleCloseToTray(bool v) async {
-    final prefs = await SharedPreferences.getInstance();
-    await prefs.setBool('desk_close_to_tray', v);
-    try {
-      await windowManager.setPreventClose(v);
-    } catch (_) {}
-    if (mounted) setState(() => _closeToTray = v);
-  }
-
-  Future<void> _toggleAutostart(bool v) async {
-    final ok = await AutostartService.setEnabled(v);
+  Future<void> _toggleAutostartTray(bool v) async {
+    final ok = await AutostartService.setEnabled(v,
+        exePath: await TrayLauncher.trayExePath(), valueName: 'WeiMiTray');
     if (mounted) {
-      setState(() => _autostart = ok ? v : _autostart);
+      setState(() => _autostartTray = ok ? v : _autostartTray);
       ScaffoldMessenger.of(context).showSnackBar(SnackBar(
         content: Text(ok
-            ? (v ? '已开启开机自动启动' : '已关闭开机自动启动')
+            ? (v ? '已开启开机自动启动飞传' : '已关闭开机自动启动飞传')
             : '设置失败，请检查系统权限'),
         backgroundColor: ok ? Colors.green : Colors.red,
       ));
@@ -90,7 +75,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
 
   Future<void> _editName() async {
     final controller =
-        TextEditingController(text: LanTransferService.instance.selfName);
+        TextEditingController(text: _selfName == '本机' ? '' : _selfName);
     final r = await showDialog<String>(
       context: context,
       builder: (ctx) => AlertDialog(
@@ -109,16 +94,19 @@ class _SettingsScreenState extends State<SettingsScreen> {
         ],
       ),
     );
-    if (r != null && mounted) {
-      await LanTransferService.instance.setSelfName(r);
-      setState(() {});
+    if (r != null && r.trim().isNotEmpty && mounted) {
+      final ok = await _ipc.setSelfName(r.trim());
+      if (ok) setState(() => _selfName = r.trim());
     }
   }
 
   Future<void> _removeTrusted(String id) async {
-    await TrustedDevices.instance.remove(id);
-    if (mounted) {
-      setState(() => _trusted = TrustedDevices.instance.all);
+    final name =
+        _trusted.where((e) => e.key == id).firstOrNull?.value ?? '';
+    final ok = await _ipc.trust(id, name, false);
+    if (ok) {
+      await TrustedDevices.instance.reload();
+      if (mounted) setState(() => _trusted = TrustedDevices.instance.all);
     }
   }
 
@@ -181,13 +169,6 @@ class _SettingsScreenState extends State<SettingsScreen> {
         children: [
           _sectionHeader('微密飞传'),
           SwitchListTile(
-            secondary: const Icon(Icons.sensors),
-            title: const Text('启动时自动开启飞传'),
-            subtitle: const Text('打开软件即允许附近设备发现本机并传输文件'),
-            value: _autoStartLan,
-            onChanged: _toggleAutoStartLan,
-          ),
-          SwitchListTile(
             secondary: const Icon(Icons.language),
             title: const Text('网页快传'),
             subtitle: const Text(
@@ -198,7 +179,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
           ListTile(
             leading: const Icon(Icons.badge_outlined),
             title: const Text('本机名称'),
-            subtitle: Text(LanTransferService.instance.selfName),
+            subtitle: Text(_selfName),
             trailing: const Icon(Icons.chevron_right),
             onTap: _editName,
           ),
@@ -237,20 +218,14 @@ class _SettingsScreenState extends State<SettingsScreen> {
           if (_isDesktop) ...[
             const Divider(),
             _sectionHeader('桌面端'),
-            SwitchListTile(
-              secondary: const Icon(Icons.picture_in_picture_alt),
-              title: const Text('关闭时最小化到托盘'),
-              subtitle: const Text('点关闭按钮不退出，从系统托盘恢复或退出'),
-              value: _closeToTray,
-              onChanged: _toggleCloseToTray,
-            ),
             if (AutostartService.supported)
               SwitchListTile(
                 secondary: const Icon(Icons.power_settings_new),
-                title: const Text('开机自动启动'),
-                subtitle: const Text('登录系统后自动运行微密文件'),
-                value: _autostart,
-                onChanged: _toggleAutostart,
+                title: const Text('开机自动启动飞传（托盘）'),
+                subtitle: const Text(
+                    '登录系统后自动运行微密飞传，内存占用极小，可随时从托盘退出'),
+                value: _autostartTray,
+                onChanged: _toggleAutostartTray,
               ),
           ],
           const SizedBox(height: 24),

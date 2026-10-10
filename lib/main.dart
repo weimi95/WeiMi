@@ -6,8 +6,8 @@ import 'package:file_picker/file_picker.dart';
 import 'package:desktop_drop/desktop_drop.dart';
 import 'package:cross_file/cross_file.dart';
 import 'package:shared_preferences/shared_preferences.dart';
-import 'package:system_tray/system_tray.dart';
 import 'package:window_manager/window_manager.dart';
+import 'services/tray_launcher.dart';
 import 'services/file_operations_service.dart';
 import 'services/encryption_service.dart';
 import 'services/file_viewer_service.dart';
@@ -33,88 +33,21 @@ const int kPasswordMaxLength = 32;
 // 上次加密/解密输出目录的 SharedPreferences key
 const String kLastOutputDirKey = 'last_output_dir';
 
-/// 桌面端窗口关闭拦截：enabled（关闭时最小化到托盘）时点关闭只隐藏窗口
+/// 桌面端窗口关闭：主程序退出，托盘飞传进程独立常驻（B 方案核心）。
 class _WindowCloseHandler extends WindowListener {
   @override
   void onWindowClose() async {
-    final prefs = await SharedPreferences.getInstance();
-    if (prefs.getBool('desk_close_to_tray') ?? true) {
-      await windowManager.hide();
-    } else {
-      await windowManager.destroy();
-    }
+    await TrayLauncher.removePid('main.pid');
+    // 托盘进程独立运行，主程序退出后飞传继续；若托盘未运行则拉起
+    await TrayLauncher.ensureTrayRunning();
+    exit(0);
   }
 }
 
 final _windowCloseHandler = _WindowCloseHandler();
 
-/// 从 assets 解出托盘图标到临时目录（system_tray 需要文件路径）
-Future<String?> _extractTrayIcon() async {
-  try {
-    final dir = await getTemporaryDirectory();
-    final name = Platform.isWindows ? 'tray_icon.ico' : 'tray_icon.png';
-    final data = await rootBundle.load('assets/images/$name');
-    final f = File('${dir.path}${Platform.pathSeparator}$name');
-    await f.writeAsBytes(data.buffer.asUint8List());
-    return f.path;
-  } catch (e) {
-    debugPrint('extract tray icon failed: $e');
-    return null;
-  }
-}
+// 托盘初始化已移至 tray_main.dart（独立托盘进程），本文件不再建托盘。
 
-/// 初始化系统托盘（桌面端）：左键显示主窗口，右键菜单 显示/退出
-Future<void> _initSystemTray() async {
-  try {
-    final iconPath = await _extractTrayIcon();
-    if (iconPath == null) return;
-    final tray = SystemTray();
-    await tray.initSystemTray(
-      title: '微密文件',
-      iconPath: iconPath,
-      toolTip: '微密文件',
-    );
-    final menu = Menu();
-    await menu.buildFrom([
-      MenuItemLabel(label: '显示主窗口', onClicked: (_) async {
-        await windowManager.show();
-        await windowManager.focus();
-      }),
-      MenuItemLabel(label: '设置', onClicked: (_) async {
-        await windowManager.show();
-        await windowManager.focus();
-        final ctx = ShareReceiveService.navigatorKey.currentContext;
-        if (ctx != null) {
-          Navigator.push(ctx,
-              MaterialPageRoute(builder: (_) => const SettingsScreen()));
-        }
-      }),
-      MenuItemLabel(label: '关于', onClicked: (_) async {
-        await windowManager.show();
-        await windowManager.focus();
-        final ctx = ShareReceiveService.navigatorKey.currentContext;
-        if (ctx != null) {
-          Navigator.push(ctx,
-              MaterialPageRoute(builder: (_) => const AboutScreen()));
-        }
-      }),
-      MenuSeparator(),
-      MenuItemLabel(label: '退出', onClicked: (_) async {
-        await windowManager.setPreventClose(false);
-        await windowManager.destroy();
-      }),
-    ]);
-    await tray.setContextMenu(menu);
-    tray.registerSystemTrayEventHandler((eventName) {
-      if (eventName == kSystemTrayEventClick) {
-        windowManager.show();
-        windowManager.focus();
-      }
-    });
-  } catch (e) {
-    debugPrint('init system tray failed: $e');
-  }
-}
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -131,13 +64,15 @@ void main() async {
     LanTransferService.instance.fallbackDir = docs.path;
   } catch (_) {}
 
-  // 启动时自动开启微密飞传接收（设置项）
-  try {
-    final prefs = await SharedPreferences.getInstance();
-    if (prefs.getBool('lan_autostart') == true) {
-      LanTransferService.instance.startReceiving();
-    }
-  } catch (_) {}
+  // 启动时自动开启微密飞传接收（仅 Android；桌面端飞传由独立托盘进程负责）
+  if (Platform.isAndroid) {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      if (prefs.getBool('lan_autostart') == true) {
+        LanTransferService.instance.startReceiving();
+      }
+    } catch (_) {}
+  }
 
   // 系统分享接收（Android SEND/SEND_MULTIPLE → 飞传页）
   await ShareReceiveService.instance.init();
@@ -146,7 +81,7 @@ void main() async {
     await FileAssociationService.registerFileAssociation();
   }
 
-  // 桌面端：窗口管理（关闭最小化到托盘）+ 系统托盘
+  // 桌面端：窗口管理；飞传由独立托盘进程常驻（见 tray_main.dart）
   if (!Platform.isAndroid && !Platform.isIOS) {
     try {
       await windowManager.ensureInitialized();
@@ -155,16 +90,17 @@ void main() async {
         minimumSize: Size(700, 500),
         title: '微密文件',
       );
-      final prefs = await SharedPreferences.getInstance();
-      final closeToTray = prefs.getBool('desk_close_to_tray') ?? true;
       await windowManager.waitUntilReadyToShow(opts, () async {
         await windowManager.show();
-        await windowManager.setPreventClose(closeToTray);
+        await windowManager.setPreventClose(false); // 关闭即退出主程序
       });
       windowManager.addListener(_windowCloseHandler);
-      _initSystemTray();
+      // 主程序 pid 登记；托盘飞传进程常驻，主程序运行期间始终确保其在
+      // （独立进程，关闭主窗口即退出主程序，不影响飞传）
+      await TrayLauncher.writePid('main.pid');
+      await TrayLauncher.ensureTrayRunning();
     } catch (e) {
-      debugPrint('window/tray init failed: $e');
+      debugPrint('window init failed: $e');
     }
   }
 

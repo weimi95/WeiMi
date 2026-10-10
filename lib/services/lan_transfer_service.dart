@@ -85,6 +85,7 @@ class LanTransferService {
   LanTransferService._();
   static final LanTransferService instance = LanTransferService._();
 
+  String get identityId => _identityId;
   String get selfName => _selfName;
   bool get isReceiving => _receiving;
   bool get backgroundMode => _backgroundMode;
