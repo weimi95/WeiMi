@@ -54,6 +54,19 @@ class DiskIndexService {
     return n;
   }
 
+  /// 释放进程级索引内存（下次搜索自动重建）
+  static Future<void> freeIndex() async {
+    await Isolate.run(() => _freeSync());
+    _cachedCount = null;
+  }
+
+  static void _freeSync() {
+    final lib = RustCrypto.ensureLib();
+    final freeFn = lib
+        .lookupFunction<ffi.Void Function(), void Function()>('index_free');
+    freeFn();
+  }
+
   static int _buildSync(List<String> roots) {
     if (roots.isEmpty) return -2;
     final lib = RustCrypto.ensureLib();

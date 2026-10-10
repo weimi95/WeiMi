@@ -55,11 +55,23 @@ Future<List<FileItem>> listDirectory(String dirPath) async {
   final dir = Directory(dirPath);
   if (!await dir.exists()) return [];
 
+  // 先列名，再并行 stat（Android 存储串行 stat 每个几毫秒，大目录会卡数秒）
+  final entities = await dir.list().toList();
+  final stats = await Future.wait(entities.map((e) async {
+    try {
+      return await e.stat();
+    } catch (_) {
+      return null;
+    }
+  }));
+
   final items = <FileItem>[];
-  await for (final entity in dir.list()) {
+  for (var i = 0; i < entities.length; i++) {
+    final entity = entities[i];
+    final stat = stats[i];
+    if (stat == null) continue;
     final name = path.basename(entity.path);
     if (name.startsWith('.')) continue; // 跳过隐藏文件
-    final stat = await entity.stat();
     items.add(FileItem(
       name: name,
       fullPath: entity.path,

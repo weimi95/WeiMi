@@ -301,7 +301,8 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     setState(() => _isProcessing = true);
 
     try {
-      final fileExists = await File(filePath).exists();
+      final fileExists =
+          FileSystemEntity.typeSync(filePath) != FileSystemEntityType.notFound;
       if (!fileExists) {
         _showMessage('${t('fileNotFound')}$filePath', isError: true);
         setState(() => _isProcessing = false);

@@ -869,7 +869,8 @@ mod tests {
 // 设计：
 // - index_build：多线程工作队列遍历目录，把所有「文件」的完整路径存进进程级内存索引。
 //   跳过系统垃圾目录（回收站/卷信息/WindowsApps 等），跳过符号链接防止循环。
-//   上限 300 万条防止内存失控。返回索引条数（负数为错误）。
+//   上限 100 万条防止内存失控（每条约占 100 字节堆内存）。返回索引条数（负数为错误）。
+// - index_free：释放进程级索引内存，下次 index_build 重建。
 // - index_search：文件名不区分大小写子串匹配，返回 \n 连接的路径串（两次调用模式：
 //   先 out_ptr=null 拿长度，再传缓冲区取数据）。阻塞调用，建议放后台线程/isolate。
 
@@ -908,7 +909,7 @@ pub extern "C" fn index_build(roots_ptr: *const *const c_char, num_roots: usize)
         return -2;
     }
 
-    let max_entries: usize = 3_000_000;
+    let max_entries: usize = 1_000_000;
     let queue: Arc<std::sync::Mutex<Vec<std::path::PathBuf>>> =
         Arc::new(std::sync::Mutex::new(roots));
     let paths: Arc<std::sync::Mutex<Vec<String>>> = Arc::new(std::sync::Mutex::new(Vec::new()));
@@ -970,18 +971,27 @@ pub extern "C" fn index_build(roots_ptr: *const *const c_char, num_roots: usize)
                             let mut q = queue.lock().unwrap();
                             q.push(e.path());
                         } else {
-                            local.push(e.path().to_string_lossy().to_string());
-                            if local.len() >= 4096 {
-                                let n = local.len();
-                                paths.lock().unwrap().extend(local.drain(..));
-                                total.fetch_add(n, std::sync::atomic::Ordering::Relaxed);
+                            if total.load(std::sync::atomic::Ordering::Relaxed)
+                                >= max_entries
+                            {
+                                // 已达上限：停止接收新条目并终止遍历
+                                stop.store(true, std::sync::atomic::Ordering::Relaxed);
+                            } else {
+                                local.push(e.path().to_string_lossy().to_string());
+                                if local.len() >= 4096 {
+                                    let n = local.len();
+                                    paths.lock().unwrap().extend(local.drain(..));
+                                    total.fetch_add(n, std::sync::atomic::Ordering::Relaxed);
+                                }
                             }
                         }
                     }
                 }
                 busy.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
             }
-            if !local.is_empty() {
+            if !local.is_empty()
+                && total.load(std::sync::atomic::Ordering::Relaxed) < max_entries
+            {
                 paths.lock().unwrap().extend(local);
             }
         }));
@@ -1002,6 +1012,12 @@ pub extern "C" fn index_count() -> i64 {
         Some(v) => v.len() as i64,
         None => -1,
     }
+}
+
+/// 释放全盘索引内存（置回 None，Vec 随 drop 归还）
+#[no_mangle]
+pub extern "C" fn index_free() {
+    *INDEX_PATHS.lock().unwrap() = None;
 }
 
 #[no_mangle]

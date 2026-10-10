@@ -41,6 +41,10 @@ class MainActivity : FlutterActivity() {
                     val paths = call.argument<List<String>>("paths") ?: emptyList()
                     result.success(shareFiles(paths))
                 }
+                "openWithSystem" -> {
+                    val path = call.argument<String>("path")
+                    result.success(if (path != null) openWithSystem(path) else false)
+                }
                 else -> {
                     result.notImplemented()
                 }
@@ -181,6 +185,33 @@ class MainActivity : FlutterActivity() {
         } catch (e: Exception) {
             false
         }
+    }
+
+    /// 用系统默认 App 打开文件（内置查看器不支持的格式兜底，如 apk / heic）。
+    /// FileProvider content:// URI + ACTION_VIEW，系统按 MIME/扩展名选 App。
+    private fun openWithSystem(path: String): Boolean {
+        return try {
+            val f = File(path)
+            if (!f.exists()) return false
+            val uri = androidx.core.content.FileProvider.getUriForFile(
+                this, "$packageName.fileprovider", f
+            )
+            val intent = Intent(Intent.ACTION_VIEW).apply {
+                setDataAndType(uri, getMimeType(path))
+                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            }
+            startActivity(intent)
+            true
+        } catch (e: Exception) {
+            false
+        }
+    }
+
+    private fun getMimeType(path: String): String {
+        val ext = path.substringAfterLast('.', "").lowercase()
+        return android.webkit.MimeTypeMap.getSingleton()
+            .getMimeTypeFromExtension(ext) ?: "*/*"
     }
 
     /// 通过系统分享菜单把本地文件分享出去（FileProvider content:// URI）

@@ -10,6 +10,7 @@ import '../services/file_batch_ops.dart';
 import '../services/view_prefs_service.dart';
 import '../widgets/file_selection_bar.dart';
 import '../widgets/file_thumbnail.dart';
+import '../widgets/global_search_dialog.dart';
 
 /// 最近文件信息
 class RecentFileInfo {
@@ -133,6 +134,16 @@ class RecentFilesScreenState extends State<RecentFilesScreen> {
   // ============ 桌面端交互 ============
 
   bool get _isDesktop => !Platform.isAndroid && !Platform.isIOS;
+
+  /// 全盘搜索（桌面端搜索框右侧入口），选中后直接打开
+  Future<void> _openGlobalSearch() async {
+    final path = await GlobalSearchDialog.show(
+      context,
+      initialQuery: _query,
+    );
+    if (path == null || !mounted) return;
+    await widget.onOpenFile(path);
+  }
 
   /// 桌面端单击：Ctrl=加减选，普通=单选（双击打开，右键菜单）
   void _desktopTapPath(String path) {
@@ -869,7 +880,13 @@ class RecentFilesScreenState extends State<RecentFilesScreen> {
               isDense: true,
               prefixIcon: const Icon(Icons.search, size: 20),
               suffixIcon: _query.isEmpty
-                  ? null
+                  ? (_isDesktop
+                      ? IconButton(
+                          tooltip: '全盘搜索',
+                          icon: const Icon(Icons.travel_explore, size: 18),
+                          onPressed: _openGlobalSearch,
+                        )
+                      : null)
                   : IconButton(
                       icon: const Icon(Icons.clear, size: 18),
                       onPressed: () {
