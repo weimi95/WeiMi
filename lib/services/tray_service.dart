@@ -61,6 +61,8 @@ class TrayService {
         iconPath: f.path,
         toolTip: '微密文件 · 飞传',
       );
+      debugPrint('tray: initSystemTray ok');
+
       final menu = Menu();
       await menu.buildFrom([
         MenuItemLabel(
@@ -73,14 +75,30 @@ class TrayService {
           onClicked: (_) async => exitApp(),
         ),
       ]);
-      await _tray.setContextMenu(menu);
+      debugPrint('tray: menu built, items=打开微密文件,退出');
+
+      try {
+        await _tray.setContextMenu(menu);
+        debugPrint('tray: setContextMenu ok');
+      } catch (e, st) {
+        debugPrint('tray: setContextMenu FAILED: $e\n$st');
+        // Windows 上若失败，尝试重新设置一次（某些版本需延迟）
+        await Future.delayed(const Duration(milliseconds: 200));
+        try {
+          await _tray.setContextMenu(menu);
+          debugPrint('tray: setContextMenu retry ok');
+        } catch (e2) {
+          debugPrint('tray: setContextMenu retry also failed: $e2');
+        }
+      }
+
       _tray.registerSystemTrayEventHandler((eventName) async {
         if (eventName == kSystemTrayEventClick) {
           await openMainWindow();
         }
       });
-    } catch (e) {
-      debugPrint('tray init failed: $e');
+    } catch (e, st) {
+      debugPrint('tray init failed: $e\n$st');
     }
   }
 
