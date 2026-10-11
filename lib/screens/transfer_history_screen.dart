@@ -271,12 +271,33 @@ class _TransferHistoryScreenState extends State<TransferHistoryScreen> {
                         trailing: isText
                             ? const Icon(Icons.chat_bubble_outline,
                                 size: 18, color: Colors.grey)
-                            : Icon(
-                                r.direction == 'in'
-                                    ? Icons.download_outlined
-                                    : Icons.upload_outlined,
-                                size: 18,
-                                color: Colors.grey,
+                            : Row(
+                                mainAxisSize: MainAxisSize.min,
+                                children: [
+                                  IconButton(
+                                    icon: const Icon(Icons.folder_open,
+                                        size: 18, color: Colors.grey),
+                                    tooltip: '打开目录',
+                                    onPressed: r.path == null
+                                        ? null
+                                        : () => _svc.openParentDirectory(r.path!),
+                                  ),
+                                  IconButton(
+                                    icon: const Icon(Icons.drive_folder_upload_outlined,
+                                        size: 18, color: Colors.grey),
+                                    tooltip: '在管理器中选中',
+                                    onPressed: r.path == null
+                                        ? null
+                                        : () => _svc.revealInFileManager([r.path!]),
+                                  ),
+                                  const Icon(
+                                    r.direction == 'in'
+                                        ? Icons.download_outlined
+                                        : Icons.upload_outlined,
+                                    size: 18,
+                                    color: Colors.grey,
+                                  ),
+                                ],
                               ),
                         onTap: isText
                             ? () => _showTextDetail(r)
@@ -308,6 +329,45 @@ class _TransferHistoryScreenState extends State<TransferHistoryScreen> {
                         icon: const Icon(Icons.copy_all_outlined, size: 18),
                         label: const Text('复制'),
                       ),
+                    if (_hasFileSelection) ...[
+                      TextButton.icon(
+                        onPressed: () async {
+                          final paths = _selectedRecords
+                              .where((r) => r.kind == 'file' && r.path != null)
+                              .map((r) => r.path!)
+                              .where((p0) => File(p0).existsSync())
+                              .toList();
+                          if (paths.isEmpty) {
+                            _snack('选中项里没有可定位的文件', Colors.orange);
+                            return;
+                          }
+                          await _svc.revealInFileManager(paths);
+                          _snack(paths.length == 1
+                              ? '已在文件管理器中选中文件'
+                              : '已在文件管理器中打开目录（Windows 不支持一次多选，已定位到第一个文件所在目录）',
+                              Colors.green);
+                        },
+                        icon: const Icon(Icons.drive_folder_upload_outlined, size: 18),
+                        label: const Text('选中'),
+                      ),
+                      TextButton.icon(
+                        onPressed: () async {
+                          final paths = _selectedRecords
+                              .where((r) => r.kind == 'file' && r.path != null)
+                              .map((r) => r.path!)
+                              .where((p0) => File(p0).existsSync())
+                              .toList();
+                          if (paths.isEmpty) {
+                            _snack('选中项里没有可定位的文件', Colors.orange);
+                            return;
+                          }
+                          await _svc.openParentDirectory(paths.first);
+                          _snack('已打开目录', Colors.green);
+                        },
+                        icon: const Icon(Icons.folder_open, size: 18),
+                        label: const Text('目录'),
+                      ),
+                    ],
                     if (_hasFileSelection)
                       TextButton.icon(
                         onPressed: _moveFiles,

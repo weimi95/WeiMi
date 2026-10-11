@@ -62,33 +62,22 @@ class _SettingsScreenState extends State<SettingsScreen> {
     final cur = TrayService.instance.closeAction;
     final picked = await showDialog<String>(
       context: context,
-      builder: (ctx) => SimpleDialog(
+      builder: (ctx) => AlertDialog(
         title: const Text('点右上角关闭按钮时'),
-        options: [
-          SimpleDialogOption(
-            onPressed: () => Navigator.pop(ctx, 'prompt'),
-            child: ListTile(
-              leading: Icon(cur == 'prompt' ? Icons.radio_button_checked : Icons.radio_button_off, color: cur == 'prompt' ? Colors.blue : Colors.grey),
-              title: const Text('弹窗询问（默认）'),
-              subtitle: const Text('每次弹确认框问「收进托盘 / 退出」'),
-            ),
-          ),
-          SimpleDialogOption(
-            onPressed: () => Navigator.pop(ctx, 'minimize'),
-            child: ListTile(
-              leading: Icon(cur == 'minimize' ? Icons.radio_button_checked : Icons.radio_button_off, color: cur == 'minimize' ? Colors.blue : Colors.grey),
-              title: const Text('直接收进托盘'),
-              subtitle: const Text('静默最小化，微密飞传后台常驻'),
-            ),
-          ),
-          SimpleDialogOption(
-            onPressed: () => Navigator.pop(ctx, 'quit'),
-            child: ListTile(
-              leading: Icon(cur == 'quit' ? Icons.radio_button_checked : Icons.radio_button_off, color: cur == 'quit' ? Colors.blue : Colors.grey),
-              title: const Text('直接退出程序'),
-              subtitle: const Text('静默退出，需从托盘图标重新打开'),
-            ),
-          ),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            _closeActionRadio(ctx, 'prompt', '弹窗询问（默认）',
+                '每次弹确认框问「收进托盘 / 退出」', cur),
+            _closeActionRadio(ctx, 'minimize', '直接收进托盘',
+                '静默最小化，微密飞传后台常驻', cur),
+            _closeActionRadio(ctx, 'quit', '直接退出程序',
+                '静默退出，需从托盘图标重新打开', cur),
+          ],
+        ),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.pop(ctx), child: const Text('取消')),
         ],
       ),
     );
@@ -96,6 +85,22 @@ class _SettingsScreenState extends State<SettingsScreen> {
       await TrayService.instance.setCloseAction(picked);
       setState(() => _closeAction = picked);
     }
+  }
+
+  Widget _closeActionRadio(BuildContext ctx, String value, String title,
+      String subtitle, String cur) {
+    final selected = cur == value;
+    return RadioListTile<String>(
+      value: value,
+      groupValue: cur,
+      onChanged: (v) => Navigator.pop(ctx, v),
+      contentPadding: const EdgeInsets.only(bottom: 4),
+      dense: true,
+      title: Text(title,
+          style: TextStyle(
+              fontWeight: selected ? FontWeight.bold : FontWeight.normal)),
+      subtitle: Text(subtitle, style: const TextStyle(fontSize: 12)),
+    );
   }
 
   Future<void> _toggleWebShare(bool v) async {

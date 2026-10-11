@@ -5,6 +5,8 @@ import 'dart:ui' as ui;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
+import '../services/windows_system_icon.dart';
+
 /// 文件类型信息（图标 + 颜色）
 class FileTypeInfo {
   final IconData icon;
@@ -175,6 +177,10 @@ class FileThumbnail extends StatelessWidget {
         ),
       );
     }
+    // Windows 桌面下优先用系统图标（PSD 显示 PS logo、图片显示对应图标等）
+    if (Platform.isWindows) {
+      return _SystemIconPreview(path: path, name: name, size: size);
+    }
     return _iconBox();
   }
 
@@ -188,6 +194,63 @@ class FileThumbnail extends StatelessWidget {
         borderRadius: BorderRadius.circular(8),
       ),
       child: Icon(info.icon, size: size * 0.52, color: info.color),
+    );
+  }
+}
+
+/// Windows 系统图标加载（异步从 Shell 拉取，失败退回通用 Flutter 图标）。
+class _SystemIconPreview extends StatefulWidget {
+  final String path;
+  final String name;
+  final double size;
+
+  const _SystemIconPreview({
+    required this.path,
+    required this.name,
+    required this.size,
+  });
+
+  @override
+  State<_SystemIconPreview> createState() => _SystemIconPreviewState();
+}
+
+class _SystemIconPreviewState extends State<_SystemIconPreview> {
+  String? _bmpPath;
+
+  @override
+  void initState() {
+    super.initState();
+    _load();
+  }
+
+  Future<void> _load() async {
+    final bmpPath = await WindowsSystemIcon.getIconFile(widget.path);
+    if (bmpPath == null) return;
+    if (mounted) setState(() => _bmpPath = bmpPath);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    if (_bmpPath != null) {
+      final f = File(_bmpPath!);
+      if (f.existsSync()) {
+        return ClipRRect(
+          borderRadius: BorderRadius.circular(8),
+          child: Image.file(f,
+              width: widget.size, height: widget.size, fit: BoxFit.contain),
+        );
+      }
+    }
+    // 加载未完成或失败时展示通用 Flutter 图标
+    final info = FileThumbs.infoFor(widget.name);
+    return Container(
+      width: widget.size,
+      height: widget.size,
+      decoration: BoxDecoration(
+        color: info.color.withAlpha(20),
+        borderRadius: BorderRadius.circular(8),
+      ),
+      child: Icon(info.icon, size: widget.size * 0.52, color: info.color),
     );
   }
 }

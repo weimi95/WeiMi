@@ -150,6 +150,48 @@ class TransferHistoryService {
   }
 
   bool get isDesktop => !Platform.isAndroid && !Platform.isIOS;
+
+  /// 在系统文件管理器中打开指定文件的父目录。
+  /// - Windows: `explorer <dir>`
+  /// - macOS: `open <dir>`
+  /// - Linux: `xdg-open <dir>`
+  Future<void> openParentDirectory(String filePath) async {
+    if (filePath.isEmpty) return;
+    final dir = p.dirname(filePath);
+    if (!Directory(dir).existsSync()) return;
+    try {
+      if (Platform.isWindows) {
+        await Process.run('explorer', [dir]);
+      } else if (Platform.isMacOS) {
+        await Process.run('open', [dir]);
+      } else {
+        await Process.run('xdg-open', [dir]);
+      }
+    } catch (_) {}
+  }
+
+  /// 在系统文件管理器中「选中」指定文件（列表可多选，只选中第一个存在的）。
+  /// 返回实际选中的文件路径，null 表示无可用文件或调用失败。
+  /// - Windows: `explorer /select,<path>`
+  /// - macOS: `open -R <path>`
+  /// - Linux: 无标准 select 命令，退回打开父目录
+  Future<String?> revealInFileManager(List<String> filePaths) async {
+    final existing =
+        filePaths.where((p0) => p0.isNotEmpty && File(p0).existsSync()).toList();
+    if (existing.isEmpty) return null;
+    try {
+      if (Platform.isWindows) {
+        await Process.run('explorer', ['/select,' + existing.first]);
+      } else if (Platform.isMacOS) {
+        await Process.run('open', ['-R', existing.first]);
+      } else {
+        await Process.run('xdg-open', [p.dirname(existing.first)]);
+      }
+      return existing.first;
+    } catch (_) {
+      return null;
+    }
+  }
 }
 
 /// 一条传输记录。kind: file | text；direction: in | out。
