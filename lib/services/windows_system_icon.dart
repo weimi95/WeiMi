@@ -2,7 +2,9 @@ import 'dart:ffi' as ffi;
 import 'dart:io';
 import 'dart:typed_data';
 
+import 'package:crypto/crypto.dart' as crypto;
 import 'package:ffi/ffi.dart';
+import 'package:path_provider/path_provider.dart';
 
 /// Windows 系统图标获取（通过 Shell API 拿「文件关联图标」）。
 ///
@@ -38,26 +40,46 @@ class WindowsSystemIcon {
     return _gdi32 ??= ffi.DynamicLibrary.open('gdi32.dll');
   }
 
-  /// 已导出的图标文件缓存（按源路径缓存）
-  static final Map<String, String> _cache = {};
-
-  /// 获取文件的系统图标，导出为标准 BMP 到系统临时目录。
+  /// 获取文件的系统图标，导出为标准 BMP 到应用缓存目录。
   /// [path] 文件绝对路径；返回图标文件路径，null 表示非 Windows 或失败。
   /// Flutter 端可直接用 `Image.file(File(path))` 加载返回的 BMP。
+  ///
+  /// 缓存键 = sha1(路径|mtime|大小)，与方案B 共用 `wemi_thumbs` 目录
+  /// （文件名带 `.icon.bmp` 后缀区分），文件变更自动失效重生成。
   static Future<String?> getIconFile(String path) async {
     if (!_isWin || path.isEmpty) return null;
-    final cached = _cache[path];
-    if (cached != null && File(cached).existsSync()) return cached;
+    final key = await _cacheKey(path);
+    if (key == null) return null;
+    final cacheDir = await _cacheDirPath();
+    final target = '$cacheDir\\$key.icon.bmp';
+    if (File(target).existsSync()) return target;
     try {
-      final result = _exportIconToBmp(path);
-      if (result != null) _cache[path] = result;
+      final result = _exportIconToBmp(path, target);
       return result;
     } catch (_) {
       return null;
     }
   }
 
-  static String? _exportIconToBmp(String path) {
+  static Future<String> _cacheDirPath() async {
+    final tmp = await getTemporaryDirectory();
+    final dir = '${tmp.path}\\wemi_thumbs';
+    Directory(dir).createSync(recursive: true);
+    return dir;
+  }
+
+  static Future<String?> _cacheKey(String path) async {
+    try {
+      final st = await File(path).stat();
+      if (st.type != FileSystemEntityType.file) return null;
+      final raw = '$path|${st.modified.millisecondsSinceEpoch}|${st.size}';
+      return crypto.sha1.convert(raw.codeUnits).toString();
+    } catch (_) {
+      return null;
+    }
+  }
+
+  static String? _exportIconToBmp(String path, String target) {
     // Windows SDK 常量
     const SHGFI_ICON = 0x100;
     const SHGFI_LARGEICON = 0x1;
@@ -265,11 +287,9 @@ class WindowsSystemIcon {
 
       pix.free();
 
-      // 写入临时文件
-      final dir = Directory.systemTemp.createTempSync('wemi_icon_');
-      final bmpPath = '${dir.path}\\icon.bmp';
-      File(bmpPath).writeAsBytesSync(bmp);
-      return bmpPath;
+      // 写入缓存文件
+      File(target).writeAsBytesSync(bmp);
+      return target;
     } finally {
       deleteObject.invoke(hIcon);
     }
