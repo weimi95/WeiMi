@@ -43,6 +43,9 @@ class _LanTransferScreenState extends State<LanTransferScreen> {
     } else if (widget.initialFiles.isNotEmpty) {
       _pendingFiles = widget.initialFiles;
     }
+    // 打开飞传页即确保发现/接收已启动（幂等）。v1.0.37 重写时曾删掉此调用，
+    // 导致 Android 端（main() 的 lan_autostart 未开时）不监听不广播、两边都搜不到设备。
+    _svc.startDiscovery().catchError((_) {});
     _startPolling();
   }
 

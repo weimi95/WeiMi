@@ -50,11 +50,11 @@ void main() async {
     LanTransferService.instance.fallbackDir = docs.path;
   } catch (_) {}
 
-  // 启动时自动开启微密飞传接收（仅 Android；桌面端飞传由独立托盘进程负责）
+  // 启动时自动开启微密飞传接收（仅 Android，默认开；桌面端由 initDesktop 常驻启动）
   if (Platform.isAndroid) {
     try {
       final prefs = await SharedPreferences.getInstance();
-      if (prefs.getBool('lan_autostart') == true) {
+      if (prefs.getBool('lan_autostart') ?? true) {
         LanTransferService.instance.startReceiving();
       }
     } catch (_) {}
