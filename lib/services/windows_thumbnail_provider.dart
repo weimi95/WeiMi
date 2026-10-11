@@ -9,7 +9,7 @@ import 'package:ffi/ffi.dart';
 import 'package:path_provider/path_provider.dart';
 
 /// GUID（16 字节）
-class _GUID extends ffi.Struct {
+final class _GUID extends ffi.Struct {
   @ffi.Uint32()
   external int data1;
 
@@ -24,7 +24,7 @@ class _GUID extends ffi.Struct {
 }
 
 /// BITMAPINFOHEADER（40 字节）
-class _BITMAPINFOHEADER extends ffi.Struct {
+final class _BITMAPINFOHEADER extends ffi.Struct {
   @ffi.Uint32()
   external int biSize;
   @ffi.Int32()
@@ -50,7 +50,7 @@ class _BITMAPINFOHEADER extends ffi.Struct {
 }
 
 /// BITMAPINFO（header + 1 个调色板占位项）
-class _BITMAPINFO extends ffi.Struct {
+final class _BITMAPINFO extends ffi.Struct {
   external _BITMAPINFOHEADER bmiHeader;
 
   @ffi.Array.multi([1])
@@ -58,7 +58,7 @@ class _BITMAPINFO extends ffi.Struct {
 }
 
 /// GetObjectW 使用的 BITMAP（x64 下 32 字节：4x4 + 2x2 + 填充4 + 指针8）
-class _BITMAP extends ffi.Struct {
+final class _BITMAP extends ffi.Struct {
   @ffi.Int32()
   external int bmType;
   @ffi.Int32()
@@ -114,6 +114,7 @@ class WindowsThumbnailProvider {
   static SendPort? _port;
   static Completer<void>? _starting;
   static ReceivePort? _responses;
+  static bool _listening = false;
   static final Map<int, Completer<bool>> _pending = {};
   static final Set<String> _failedKeys = {};
   static int _seq = 0;
@@ -182,7 +183,10 @@ class WindowsThumbnailProvider {
     _starting = starting;
     try {
       _responses ??= ReceivePort();
-      _responses!.listen(_onResponse);
+      if (!_listening) {
+        _responses!.listen(_onResponse);
+        _listening = true;
+      }
       await Isolate.spawn(
         _isolateMain,
         _ThumbCfg(_cacheDir!, _responses!.sendPort),
@@ -368,7 +372,7 @@ class WindowsThumbnailProvider {
         final got = getObjectW(hbmp, 32, bm);
         final w = got != 0 ? bm.ref.bmWidth : 0;
         final h = got != 0 ? bm.ref.bmHeight : 0;
-        bm.free();
+        calloc.free(bm);
         if (w <= 0 || h <= 0 || w > 2048 || h > 2048) return false;
 
         // 5. GetDIBits 拉 32bpp BGRA（top-down）
@@ -386,7 +390,8 @@ class WindowsThumbnailProvider {
 
           pix = calloc<ffi.Uint8>(w * h * 4);
           final copied =
-              getDIBits(hdc, hbmp, 0, h, pix!, bmi!, 0 /*DIB_RGB_COLORS*/);
+              getDIBits(hdc, hbmp, 0, h, pix!.cast<ffi.Void>(), bmi!,
+                  0 /*DIB_RGB_COLORS*/);
           if (copied == 0) return false;
 
           final bgra = pix!.asTypedList(w * h * 4);
