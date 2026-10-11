@@ -71,70 +71,72 @@ class WindowsSystemIcon {
     final path16 = Uint16List.fromList([...path.codeUnits, 0]);
     final pathPtr = path16.buffer.asPointer<ffi.Void>();
 
-    // lookup 各 Win32 API
+    // lookup 各 Win32 API（第一个类型参数是 NativeType，只能用 ffi.Pointer/ffi.IntPtr；
+    // 第二个是 DartType，用 Dart 类型 int / Int64 / Pointer）
     final shGetFileInfo = _sh32lib().lookupFunction<
-        ffi.IntPtr Function(ffi.Pointer<ffi.Void>, int,
-            ffi.Pointer<ffi.Void>, int, int),
-        ffi.IntPtr Function(ffi.Pointer<ffi.Void>, int,
-            ffi.Pointer<ffi.Void>, int, int)>(
+        ffi.IntPtr Function(ffi.Pointer<ffi.Void>, ffi.IntPtr,
+            ffi.Pointer<ffi.Void>, ffi.IntPtr, ffi.IntPtr),
+        ffi.IntPtr Function(Pointer<ffi.Void>, int,
+            Pointer<ffi.Void>, int, int)>(
         'SHGetFileInfoW');
     final getIconInfo = _user32lib().lookupFunction<
-        int Function(Int64, ffi.Pointer<ffi.Void>),
-        int Function(Int64, ffi.Pointer<ffi.Void>)>(
+        int Function(ffi.IntPtr, ffi.Pointer<ffi.Void>),
+        int Function(Int64, Pointer<ffi.Void>)>(
         'GetIconInfo');
     final deleteObject = _gdi32lib().lookupFunction<
-        int Function(Int64),
+        int Function(ffi.IntPtr),
         int Function(Int64)>(
         'DeleteObject');
     final getObject = _gdi32lib().lookupFunction<
-        int Function(Int64, int, ffi.Pointer<ffi.Void>),
-        int Function(Int64, int, ffi.Pointer<ffi.Void>)>(
+        int Function(ffi.IntPtr, ffi.IntPtr, ffi.Pointer<ffi.Void>),
+        int Function(Int64, int, Pointer<ffi.Void>)>(
         'GetObjectW');
     final getDC = _user32lib().lookupFunction<
-        Int64 Function(Int64),
+        ffi.IntPtr Function(ffi.IntPtr),
         Int64 Function(Int64)>(
         'GetDC');
     final releaseDC = _user32lib().lookupFunction<
-        int Function(Int64, Int64),
+        int Function(ffi.IntPtr, ffi.IntPtr),
         int Function(Int64, Int64)>(
         'ReleaseDC');
     final createCompatibleDC = _gdi32lib().lookupFunction<
-        Int64 Function(Int64),
+        ffi.IntPtr Function(ffi.IntPtr),
         Int64 Function(Int64)>(
         'CreateCompatibleDC');
     final deleteDC = _gdi32lib().lookupFunction<
-        int Function(Int64),
+        int Function(ffi.IntPtr),
         int Function(Int64)>(
         'DeleteDC');
     final createCompatibleBitmap = _gdi32lib().lookupFunction<
-        Int64 Function(Int64, int, int),
+        ffi.IntPtr Function(ffi.IntPtr, ffi.IntPtr, ffi.IntPtr),
         Int64 Function(Int64, int, int)>(
         'CreateCompatibleBitmap');
     final selectObject = _gdi32lib().lookupFunction<
-        Int64 Function(Int64, Int64),
+        ffi.IntPtr Function(ffi.IntPtr, ffi.IntPtr),
         Int64 Function(Int64, Int64)>(
         'SelectObject');
     final selectStockObject = _gdi32lib().lookupFunction<
-        Int64 Function(Int64),
+        ffi.IntPtr Function(ffi.IntPtr),
         Int64 Function(Int64)>(
         'SelectStockObject');
     final drawIconEx = _user32lib().lookupFunction<
-        int Function(Int64, int, int, int, int, Int64, Int64, int, int),
+        int Function(ffi.IntPtr, ffi.IntPtr, ffi.IntPtr, ffi.IntPtr,
+            ffi.IntPtr, ffi.IntPtr, ffi.IntPtr, ffi.IntPtr, ffi.IntPtr),
         int Function(Int64, int, int, int, int, Int64, Int64, int, int)>(
         'DrawIconEx');
     final createSolidBrush = _gdi32lib().lookupFunction<
-        Int64 Function(Int64),
+        ffi.IntPtr Function(ffi.IntPtr),
         Int64 Function(Int64)>(
         'CreateSolidBrush');
     final fillRect = _gdi32lib().lookupFunction<
-        int Function(Int64, ffi.Pointer<ffi.Void>, Int64),
-        int Function(Int64, ffi.Pointer<ffi.Void>, Int64)>(
+        int Function(ffi.IntPtr, ffi.Pointer<ffi.Void>, ffi.IntPtr),
+        int Function(Int64, Pointer<ffi.Void>, Int64)>(
         'FillRect');
     final getDIBits = _gdi32lib().lookupFunction<
-        int Function(Int64, Int64, int, int, ffi.Pointer<ffi.Void>,
-            ffi.Pointer<ffi.Void>, int),
-        int Function(Int64, Int64, int, int, ffi.Pointer<ffi.Void>,
-            ffi.Pointer<ffi.Void>, int)>(
+        int Function(ffi.IntPtr, ffi.IntPtr, ffi.IntPtr, ffi.IntPtr,
+            ffi.Pointer<ffi.Void>, ffi.Pointer<ffi.Void>, ffi.IntPtr),
+        int Function(Int64, Int64, int, int, Pointer<ffi.Void>,
+            Pointer<ffi.Void>, int)>(
         'GetDIBits');
 
     // 分配 SHFILEINFO buffer（48 字节，只读前 8 字节的 hIcon）

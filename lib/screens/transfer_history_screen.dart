@@ -290,7 +290,7 @@ class _TransferHistoryScreenState extends State<TransferHistoryScreen> {
                                         ? null
                                         : () => _svc.revealInFileManager([r.path!]),
                                   ),
-                                  const Icon(
+                                  Icon(
                                     r.direction == 'in'
                                         ? Icons.download_outlined
                                         : Icons.upload_outlined,
