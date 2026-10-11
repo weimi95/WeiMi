@@ -75,25 +75,20 @@ class TrayService {
           onClicked: (_) async => exitApp(),
         ),
       ]);
-      debugPrint('tray: menu built, items=打开微密文件,退出');
 
       try {
         await _tray.setContextMenu(menu);
-        debugPrint('tray: setContextMenu ok');
       } catch (e, st) {
-        debugPrint('tray: setContextMenu FAILED: $e\n$st');
-        // Windows 上若失败，尝试重新设置一次（某些版本需延迟）
-        await Future.delayed(const Duration(milliseconds: 200));
-        try {
-          await _tray.setContextMenu(menu);
-          debugPrint('tray: setContextMenu retry ok');
-        } catch (e2) {
-          debugPrint('tray: setContextMenu retry also failed: $e2');
-        }
+        debugPrint('tray: setContextMenu failed: $e\n$st');
       }
 
+      // Windows 上 setContextMenu 只「设置」菜单，右键不会自动弹出，
+      // 必须在 kSystemTrayEventRightClick 里显式 popUpContextMenu()。
+      // 左键 -> 打开主窗口；右键 -> 弹出菜单（含「退出」）。
       _tray.registerSystemTrayEventHandler((eventName) async {
-        if (eventName == kSystemTrayEventClick) {
+        if (eventName == kSystemTrayEventRightClick) {
+          await _tray.popUpContextMenu();
+        } else if (eventName == kSystemTrayEventClick) {
           await openMainWindow();
         }
       });
