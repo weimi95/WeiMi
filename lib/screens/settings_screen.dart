@@ -5,6 +5,7 @@ import 'package:flutter/material.dart';
 import 'package:path_provider/path_provider.dart';
 import '../services/autostart_service.dart';
 import '../services/lan_transfer_service.dart';
+import '../services/tray_service.dart';
 import '../services/trusted_devices_service.dart';
 
 /// 设置页（单进程方案：直接调本进程 LanTransferService 单例）
@@ -24,6 +25,8 @@ class _SettingsScreenState extends State<SettingsScreen> {
   String _selfName = '本机';
   List<MapEntry<String, String>> _trusted = [];
   bool _isDesktop = false;
+  /// 关闭按钮行为：'prompt' | 'minimize' | 'quit'
+  String _closeAction = 'prompt';
 
   @override
   void initState() {
@@ -44,10 +47,54 @@ class _SettingsScreenState extends State<SettingsScreen> {
     // 信任设备列表来自本进程持久化文件，强制重读最新内容
     await TrustedDevices.instance.reload();
     if (mounted) setState(() => _trusted = TrustedDevices.instance.all);
-    if (_isDesktop && AutostartService.supported) {
-      final enabled =
-          await AutostartService.isEnabled(valueName: 'WeiMiFile');
-      if (mounted) setState(() => _autostartTray = enabled);
+    if (_isDesktop) {
+      if (AutostartService.supported) {
+        final enabled =
+            await AutostartService.isEnabled(valueName: 'WeiMiFile');
+        if (mounted) setState(() => _autostartTray = enabled);
+      }
+      _closeAction = TrayService.instance.closeAction;
+      if (mounted) setState(() {});
+    }
+  }
+
+  Future<void> _pickCloseAction() async {
+    final cur = TrayService.instance.closeAction;
+    final picked = await showDialog<String>(
+      context: context,
+      builder: (ctx) => SimpleDialog(
+        title: const Text('点右上角关闭按钮时'),
+        options: [
+          SimpleDialogOption(
+            onPressed: () => Navigator.pop(ctx, 'prompt'),
+            child: ListTile(
+              leading: Icon(cur == 'prompt' ? Icons.radio_button_checked : Icons.radio_button_off, color: cur == 'prompt' ? Colors.blue : Colors.grey),
+              title: const Text('弹窗询问（默认）'),
+              subtitle: const Text('每次弹确认框问「收进托盘 / 退出」'),
+            ),
+          ),
+          SimpleDialogOption(
+            onPressed: () => Navigator.pop(ctx, 'minimize'),
+            child: ListTile(
+              leading: Icon(cur == 'minimize' ? Icons.radio_button_checked : Icons.radio_button_off, color: cur == 'minimize' ? Colors.blue : Colors.grey),
+              title: const Text('直接收进托盘'),
+              subtitle: const Text('静默最小化，微密飞传后台常驻'),
+            ),
+          ),
+          SimpleDialogOption(
+            onPressed: () => Navigator.pop(ctx, 'quit'),
+            child: ListTile(
+              leading: Icon(cur == 'quit' ? Icons.radio_button_checked : Icons.radio_button_off, color: cur == 'quit' ? Colors.blue : Colors.grey),
+              title: const Text('直接退出程序'),
+              subtitle: const Text('静默退出，需从托盘图标重新打开'),
+            ),
+          ),
+        ],
+      ),
+    );
+    if (picked != null && mounted) {
+      await TrayService.instance.setCloseAction(picked);
+      setState(() => _closeAction = picked);
     }
   }
 
@@ -220,6 +267,15 @@ class _SettingsScreenState extends State<SettingsScreen> {
                 value: _autostartTray,
                 onChanged: _toggleAutostartTray,
               ),
+            ListTile(
+              leading: const Icon(Icons.close_fullscreen_outlined),
+              title: const Text('点右上角关闭按钮时'),
+              subtitle: Text(_closeAction == 'prompt'
+                  ? '弹窗询问（默认）'
+                  : (_closeAction == 'minimize' ? '直接收进托盘' : '直接退出程序')),
+              trailing: const Icon(Icons.chevron_right),
+              onTap: _pickCloseAction,
+            ),
           ],
           const SizedBox(height: 24),
         ],

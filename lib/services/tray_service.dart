@@ -3,6 +3,7 @@ import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:path_provider/path_provider.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 import 'package:system_tray/system_tray.dart';
 import 'package:window_manager/window_manager.dart';
 import 'lan_transfer_service.dart';
@@ -20,6 +21,32 @@ class TrayService {
   bool _initialized = false;
   bool _lean = false;
   final SystemTray _tray = SystemTray();
+
+  /// 关闭按钮行为设置：
+  /// - 'prompt'（默认）：弹确认框问「收托盘 / 退出」
+  /// - 'minimize'：静默收托盘（保持原行为）
+  /// - 'quit'：静默退出
+  String get closeAction => _closeAction;
+  String _closeAction = 'prompt';
+
+  static const String _kCloseAction = 'tray_close_action';
+
+  /// 读取持久化的关闭行为设置（main.dart runApp 前调用）。
+  Future<void> loadPrefs() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      _closeAction = prefs.getString(_kCloseAction) ?? 'prompt';
+    } catch (_) {}
+  }
+
+  /// 设置关闭行为并持久化。
+  Future<void> setCloseAction(String action) async {
+    _closeAction = action;
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setString(_kCloseAction, action);
+    } catch (_) {}
+  }
 
   /// 桌面端初始化：窗口管理 + 托盘 + 启动常驻飞传（仅调用一次）。
   Future<void> initDesktop() async {
@@ -134,13 +161,62 @@ class TrayService {
 class _WindowListener extends WindowListener {
   @override
   void onWindowClose() async {
-    // 关窗 = 收托盘，不退出进程
-    await TrayService.instance.enterLeanMode();
+    final action = TrayService.instance.closeAction;
+    if (action == 'quit') {
+      // 静默退出
+      await TrayService.instance.exitApp();
+    } else if (action == 'minimize') {
+      // 静默收托盘（保持原行为）
+      await TrayService.instance.enterLeanMode();
+    } else {
+      // 'prompt'（默认）：弹确认框问「收托盘 / 退出」
+      await _showCloseConfirm();
+    }
   }
 
   @override
   void onWindowFocus() async {
     await TrayService.instance.exitLeanMode();
+  }
+}
+
+/// 关闭按钮确认弹窗：
+/// - 用户点右上角关闭 → preventClose=true 让事件冒泡到这里 → 弹窗询问。
+/// - 「收进托盘」：调 enterLeanMode() 隐藏窗口 + 清空图片缓存，进程常驻。
+/// - 「退出程序」：先标记 _lean 防弹窗关闭后窗口再闪一下，再真退出。
+Future<void> _showCloseConfirm() async {
+  final ctx = ShareReceiveService.navigatorKey.currentContext;
+  if (ctx == null) {
+    // Navigator 未就绪（极端情况）时降级为静默收托盘
+    await TrayService.instance.enterLeanMode();
+    return;
+  }
+  final choice = await showDialog<bool>(
+    context: ctx,
+    barrierDismissible: false,
+    builder: (c) => AlertDialog(
+      title: const Text('关闭微密文件'),
+      content: const Text(
+          '选择「收进托盘」后，程序会继续在后台运行（微密飞传保持可用）；\n'
+          '选择「退出程序」则完全关闭应用。'),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.pop(c, false),
+          child: const Text('收进托盘'),
+        ),
+        TextButton(
+          onPressed: () => Navigator.pop(c, true),
+          child: const Text('退出程序', style: TextStyle(color: Colors.red)),
+        ),
+      ],
+    ),
+  );
+  if (choice == true) {
+    // 先收托盘（隐藏窗口，避免退出瞬间窗口闪一下），再真退出
+    await TrayService.instance.enterLeanMode();
+    await TrayService.instance.exitApp();
+  } else {
+    await TrayService.instance.enterLeanMode();
   }
 }
 

@@ -44,6 +44,9 @@ void main() async {
   // 加载全局视图偏好（列表/宫格/瀑布流）
   await ViewPrefsService.instance.load();
 
+  // 桌面端：加载关闭按钮行为设置（收托盘/退出/询问）
+  await TrayService.instance.loadPrefs();
+
   // 局域网接收文件的兜底目录（用户未设置加密目录时用）
   try {
     final docs = await getApplicationDocumentsDirectory();
