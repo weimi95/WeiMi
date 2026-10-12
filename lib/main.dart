@@ -1116,19 +1116,6 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
           : _isProcessing
               ? const Center(child: CircularProgressIndicator())
               : bodyContent,
-      bottomNavigationBar: BottomNavigationBar(
-        currentIndex: _currentTab,
-        onTap: (index) {
-          setState(() => _currentTab = index);
-        },
-        type: BottomNavigationBarType.fixed,
-        items: [
-          BottomNavigationBarItem(
-            icon: const Icon(Icons.folder),
-            label: t('tabFiles'),
-          ),
-        ],
-      ),
       ),
     );
   }

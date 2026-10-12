@@ -7,6 +7,7 @@ import '../services/autostart_service.dart';
 import '../services/lan_transfer_service.dart';
 import '../services/tray_service.dart';
 import '../services/trusted_devices_service.dart';
+import 'exclude_settings_screen.dart';
 
 /// 设置页（单进程方案：直接调本进程 LanTransferService 单例）
 /// - 微密飞传：网页快传开关、本机名称、信任设备
@@ -251,6 +252,21 @@ class _SettingsScreenState extends State<SettingsScreen> {
                         style: TextStyle(color: Colors.red)),
                   ),
                 )),
+          const Divider(),
+          _sectionHeader('全盘搜索'),
+          ListTile(
+            leading: const Icon(Icons.folder_off_outlined),
+            title: const Text('排除文件夹'),
+            subtitle: const Text('这些文件夹不扫描不索引，可加快搜索、省内存'),
+            trailing: const Icon(Icons.chevron_right),
+            onTap: () {
+              Navigator.push(
+                context,
+                MaterialPageRoute(
+                    builder: (context) => const ExcludeSettingsScreen()),
+              );
+            },
+          ),
           const Divider(),
           _sectionHeader('通用'),
           ListTile(

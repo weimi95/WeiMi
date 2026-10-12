@@ -889,6 +889,58 @@ static INDEX_DIR_MTIMES: std::sync::Mutex<Option<HashMap<String, i64>>> =
     std::sync::Mutex::new(None);
 /// 索引根目录列表（与 build 入参一致）
 static INDEX_ROOTS: std::sync::Mutex<Option<Vec<String>>> = std::sync::Mutex::new(None);
+/// 用户排除模式（通配符，匹配完整路径小写）。由 index_set_excludes 设置，index_build/refresh 遍历时生效
+static INDEX_EXCLUDES: std::sync::Mutex<Option<Vec<String>>> = std::sync::Mutex::new(None);
+
+/// 无依赖通配符匹配：`*` 匹配任意字符（含路径分隔符），`?` 匹配单个字符
+fn wildcard_match(pat: &[u8], text: &[u8]) -> bool {
+    let (mut pi, mut ti) = (0usize, 0usize);
+    let (mut star, mut mark) = (usize::MAX, 0usize);
+    while ti < text.len() {
+        if pi < pat.len() && (pat[pi] == b'?' || pat[pi] == text[ti]) {
+            pi += 1;
+            ti += 1;
+        } else if pi < pat.len() && pat[pi] == b'*' {
+            star = pi;
+            mark = ti;
+            pi += 1;
+        } else if star != usize::MAX {
+            pi = star + 1;
+            mark += 1;
+            ti = mark;
+        } else {
+            return false;
+        }
+    }
+    while pi < pat.len() && pat[pi] == b'*' {
+        pi += 1;
+    }
+    pi == pat.len()
+}
+
+/// 设置排除模式（构建索引前由 Dart 调用）；传 null/0 清空
+#[no_mangle]
+pub extern "C" fn index_set_excludes(
+    patterns_ptr: *const *const c_char,
+    num_patterns: usize,
+) -> i32 {
+    if patterns_ptr.is_null() || num_patterns == 0 {
+        *INDEX_EXCLUDES.lock().unwrap() = Some(Vec::new());
+        return 0;
+    }
+    let mut out: Vec<String> = Vec::new();
+    unsafe {
+        let ptrs = slice::from_raw_parts(patterns_ptr, num_patterns);
+        for &pp in ptrs {
+            let s = CStr::from_ptr(pp).to_string_lossy().trim().to_lowercase();
+            if !s.is_empty() {
+                out.push(s);
+            }
+        }
+    }
+    *INDEX_EXCLUDES.lock().unwrap() = Some(out);
+    0
+}
 
 /// 取目录 mtime（纳秒），失败返回 None
 fn dir_mtime_ns(path: &std::path::Path) -> Option<i64> {
@@ -917,6 +969,15 @@ pub(crate) fn scan_roots(roots: &[std::path::PathBuf]) -> (Vec<String>, HashMap<
     let workers = std::thread::available_parallelism()
         .map(|n| n.get())
         .unwrap_or(4);
+    // 快照排除模式，各 worker 无锁匹配（每条路径只匹配小写一次）
+    let excludes: Arc<Vec<String>> = Arc::new(
+        INDEX_EXCLUDES
+            .lock()
+            .unwrap()
+            .as_ref()
+            .cloned()
+            .unwrap_or_default(),
+    );
     let mut handles = Vec::new();
     for _ in 0..workers {
         let queue = queue.clone();
@@ -925,6 +986,7 @@ pub(crate) fn scan_roots(roots: &[std::path::PathBuf]) -> (Vec<String>, HashMap<
         let busy = busy.clone();
         let total = total.clone();
         let stop = stop.clone();
+        let excludes = excludes.clone();
         handles.push(std::thread::spawn(move || {
             let mut local: Vec<String> = Vec::new();
             let mut local_dirs: HashMap<String, i64> = HashMap::new();
@@ -965,6 +1027,14 @@ pub(crate) fn scan_roots(roots: &[std::path::PathBuf]) -> (Vec<String>, HashMap<
                             continue;
                         }
                         let is_dir = ft.is_dir();
+                        // 用户排除列表：完整路径通配符匹配（目录不入队、文件不入索引）
+                        let path_lower = e.path().to_string_lossy().to_lowercase();
+                        if excludes
+                            .iter()
+                            .any(|pat| wildcard_match(pat.as_bytes(), path_lower.as_bytes()))
+                        {
+                            continue;
+                        }
                         if is_dir {
                             if index_skip_dir(&name) {
                                 continue;

@@ -763,13 +763,16 @@ class WeiMiVaultScreenState extends State<WeiMiVaultScreen> {
       ];
     } else {
       entries = [
-        _ctxMenuItem('view', Icons.visibility_outlined, '查看'),
+        // 加密/解密置顶（对齐 Everything：搜到即可直接操作）
         if (!item.isEncryptedFile)
           _ctxMenuItem('encrypt', Icons.lock_outline, '加密'),
         if (item.isEncryptedFile)
           _ctxMenuItem('decrypt', Icons.lock_open_outlined, '解密'),
+        _ctxMenuItem('view', Icons.visibility_outlined, '查看'),
+        _ctxMenuItem('openfolder', Icons.folder_open, '打开所在路径'),
         const PopupMenuDivider(),
-        _ctxMenuItem('copypath', Icons.content_copy, '复制路径'),
+        _ctxMenuItem('copypath', Icons.content_copy, '复制完整路径'),
+        const PopupMenuDivider(),
         _ctxMenuItem('delete', Icons.delete_outline, '删除', color: Colors.red),
       ];
     }
@@ -800,6 +803,9 @@ class WeiMiVaultScreenState extends State<WeiMiVaultScreen> {
           );
         }
         break;
+      case 'openfolder':
+        await _revealInFileManager(item.fullPath);
+        break;
       case 'share':
         _shareSelected();
         break;
@@ -812,6 +818,30 @@ class WeiMiVaultScreenState extends State<WeiMiVaultScreen> {
       case 'delete':
         _deleteSelected();
         break;
+    }
+  }
+
+  /// 在系统文件管理器中定位文件（对齐 Everything「打开路径」）
+  /// Windows: explorer /select；macOS: open -R；Linux: xdg-open 目录；Android: 提示路径
+  Future<void> _revealInFileManager(String path) async {
+    try {
+      if (Platform.isWindows) {
+        await Process.run('explorer', ['/select,$path']);
+      } else if (Platform.isMacOS) {
+        await Process.run('open', ['-R', path]);
+      } else if (Platform.isLinux) {
+        await Process.run('xdg-open', [p.dirname(path)]);
+      } else if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('所在目录：${p.dirname(path)}')),
+        );
+      }
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('打开失败: $e'), backgroundColor: Colors.red),
+        );
+      }
     }
   }
 
@@ -986,6 +1016,7 @@ class WeiMiVaultScreenState extends State<WeiMiVaultScreen> {
     final isRoot = _currentPath.isEmpty;
 
     return Scaffold(
+      // 根视图不显示内层标题栏（外层 AppBar 直接接搜索框）；浏览子目录时保留前进/后退
       appBar: _selecting
           ? AppBar(
               leading: IconButton(
@@ -1001,16 +1032,22 @@ class WeiMiVaultScreenState extends State<WeiMiVaultScreen> {
                 ),
               ],
             )
-          : AppBar(
-              title: Text(_titleFor(_currentPath, isRoot)),
-              leading: _historyIndex > 0
-                  ? IconButton(icon: const Icon(Icons.arrow_back), onPressed: _goBack)
-                  : null,
-              actions: [
-                if (_historyIndex < _pathHistory.length - 1)
-                  IconButton(icon: const Icon(Icons.arrow_forward), onPressed: _goForward),
-              ],
-            ),
+          : (isRoot
+              ? null
+              : AppBar(
+                  title: Text(_titleFor(_currentPath, isRoot)),
+                  leading: _historyIndex > 0
+                      ? IconButton(
+                          icon: const Icon(Icons.arrow_back),
+                          onPressed: _goBack)
+                      : null,
+                  actions: [
+                    if (_historyIndex < _pathHistory.length - 1)
+                      IconButton(
+                          icon: const Icon(Icons.arrow_forward),
+                          onPressed: _goForward),
+                  ],
+                )),
       body: _loading
           ? const Center(child: CircularProgressIndicator())
           : Focus(

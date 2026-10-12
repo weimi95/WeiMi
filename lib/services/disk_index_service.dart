@@ -9,6 +9,7 @@ import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
 
 import 'rust_crypto.dart';
+import 'exclude_service.dart';
 
 /// 全盘文件名索引（方案A：Rust 多线程遍历 + 进程内存索引 + 落盘持久化 + 增量刷新）
 ///
@@ -232,10 +233,12 @@ class DiskIndexService {
     }
   }
 
-  /// 建立索引（全量），返回条数并落盘
+  /// 建立索引（全量），返回条数并落盘。构建前先下发用户排除列表（Everything 式排除文件夹）
   static Future<int> buildIndex(List<String> roots,
       {bool persist = true}) async {
-    final n = await Isolate.run(() => _buildSync(List<String>.of(roots)));
+    final excludes = await ExcludeService.load();
+    final n =
+        await Isolate.run(() => _buildSync(List<String>.of(roots), excludes));
     _cachedCount = n;
     _lastBuiltAt = DateTime.now();
     if (persist) await saveIndex();
@@ -304,9 +307,31 @@ class DiskIndexService {
     freeFn();
   }
 
-  static int _buildSync(List<String> roots) {
+  static int _buildSync(List<String> roots, List<String> excludes) {
     if (roots.isEmpty) return -2;
     final lib = RustCrypto.ensureLib();
+
+    // 下发排除列表（空列表=清除），index_build 遍历时生效
+    if (excludes.isNotEmpty) {
+      final setFn = lib.lookupFunction<
+          ffi.Int32 Function(
+              ffi.Pointer<ffi.Pointer<ffi.Char>>, ffi.Size),
+          int Function(ffi.Pointer<ffi.Pointer<ffi.Char>>, int)>(
+          'index_set_excludes');
+      final exPtrs = calloc<ffi.Pointer<ffi.Char>>(excludes.length);
+      for (var i = 0; i < excludes.length; i++) {
+        exPtrs[i] = excludes[i].toNativeUtf8().cast<ffi.Char>();
+      }
+      try {
+        setFn(exPtrs, excludes.length);
+      } finally {
+        for (var i = 0; i < excludes.length; i++) {
+          calloc.free(exPtrs[i]);
+        }
+        calloc.free(exPtrs);
+      }
+    }
+
     final buildFn = lib.lookupFunction<
         ffi.Int64 Function(
             ffi.Pointer<ffi.Pointer<ffi.Char>>, ffi.Size),
@@ -376,11 +401,17 @@ class DiskIndexService {
     return fn();
   }
 
-  /// 全盘搜索（后台 isolate），返回匹配文件路径列表
+  /// 全盘搜索（后台 isolate），返回匹配文件路径列表。
+  /// 结果按用户排除列表兜底过滤（覆盖从旧落盘索引加载、排除规则后改的场景）
   static Future<List<String>> search(String query, {int limit = 300}) async {
     final q = query.trim();
     if (q.isEmpty || !isBuilt) return const [];
-    return Isolate.run(() => _searchSync(q, limit));
+    final excludes = await ExcludeService.load();
+    final res = await Isolate.run(() => _searchSync(q, limit));
+    if (excludes.isEmpty || res.isEmpty) return res;
+    return res
+        .where((path) => !ExcludeService.isExcluded(path, excludes))
+        .toList();
   }
 
   static List<String> _searchSync(String query, int limit) {
