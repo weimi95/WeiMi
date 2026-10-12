@@ -1,9 +1,11 @@
+import 'dart:async';
 import 'dart:io';
 
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:path_provider/path_provider.dart';
 import '../services/autostart_service.dart';
+import '../services/disk_index_service.dart';
 import '../services/lan_transfer_service.dart';
 import '../services/tray_service.dart';
 import '../services/trusted_devices_service.dart';
@@ -32,6 +34,8 @@ class _SettingsScreenState extends State<SettingsScreen> {
   bool _openRecvDir = false;
   bool _discoverEnabled = true;
   bool _isDesktop = false;
+  /// 全盘搜索是否扫描索引移动设备（U盘/移动硬盘，仅 Windows）
+  bool _indexRemovable = false;
   /// 关闭按钮行为：'prompt' | 'minimize' | 'quit'
   String _closeAction = 'prompt';
 
@@ -71,6 +75,12 @@ class _SettingsScreenState extends State<SettingsScreen> {
       }
       _closeAction = TrayService.instance.closeAction;
       if (mounted) setState(() {});
+    }
+    if (Platform.isWindows) {
+      await DiskIndexService.loadRemovablePref();
+      if (mounted) {
+        setState(() => _indexRemovable = DiskIndexService.includeRemovable);
+      }
     }
   }
 
@@ -402,6 +412,15 @@ class _SettingsScreenState extends State<SettingsScreen> {
                 )),
           const Divider(),
           _sectionHeader('全盘搜索'),
+          if (Platform.isWindows)
+            SwitchListTile(
+              secondary: const Icon(Icons.usb),
+              title: const Text('扫描索引移动设备'),
+              subtitle: const Text(
+                  'U盘、移动硬盘等可移动磁盘纳入全盘索引（改动后自动重建索引）'),
+              value: _indexRemovable,
+              onChanged: _toggleIndexRemovable,
+            ),
           ListTile(
             leading: const Icon(Icons.folder_off_outlined),
             title: const Text('排除文件夹'),
@@ -450,6 +469,12 @@ class _SettingsScreenState extends State<SettingsScreen> {
         ],
       ),
     );
+  }
+
+  /// 切换「扫描索引移动设备」：保存设置 + 后台全量重建 + 监视器按新根重拉
+  Future<void> _toggleIndexRemovable(bool v) async {
+    setState(() => _indexRemovable = v);
+    unawaited(DiskIndexService.applyRemovableSetting(v));
   }
 
   Widget _sectionHeader(String title) {

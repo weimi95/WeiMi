@@ -8,6 +8,7 @@ import 'package:ffi/ffi.dart';
 import 'package:flutter/foundation.dart';
 import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
 import 'rust_crypto.dart';
 import 'exclude_service.dart';
@@ -23,6 +24,37 @@ class DiskIndexService {
   static int? _cachedCount;
   static DateTime? _lastBuiltAt;
   static bool _building = false; // 防重入：全量构建进行中时不再叠加
+
+  /// 是否把移动设备（U盘/移动硬盘，DRIVE_REMOVABLE）纳入索引（仅 Windows 有意义）。
+  /// 注意：Isolate.run 出去的 isolate 不继承静态字段，跨 isolate 一律传 roots 值。
+  static bool? _includeRemovable;
+  static const String prefsKeyRemovable = 'index_include_removable';
+
+  static bool get includeRemovable => _includeRemovable ?? false;
+
+  /// 幂等读取「扫描索引移动设备」设置（默认关闭）
+  static Future<void> loadRemovablePref() async {
+    if (_includeRemovable != null) return;
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      _includeRemovable = prefs.getBool(prefsKeyRemovable) ?? false;
+    } catch (_) {
+      _includeRemovable = false;
+    }
+  }
+
+  /// 应用「扫描索引移动设备」设置变更：保存 + 立即全量重建 + 监视器按新根重拉
+  static Future<void> applyRemovableSetting(bool value) async {
+    _includeRemovable = value;
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setBool(prefsKeyRemovable, value);
+    } catch (_) {}
+    try {
+      await buildIndex(defaultRoots(), persist: true);
+      await ensureWatcher(); // 新根（含移动设备）的监视线程由此/由 drain 重拉
+    } catch (_) {}
+  }
 
   /// 索引条数通知器（搜索框提示「xx个文件」用；加载/构建/增量合并后更新）
   static final ValueNotifier<int?> countNotifier = ValueNotifier(null);
@@ -50,14 +82,39 @@ class DiskIndexService {
     }
   }
 
-  /// 默认索引根：Windows 枚举所有存在的盘符，macOS /Users，Linux 常见挂载点，安卓内置存储
+  /// kernel32 GetDriveTypeW（DRIVE_REMOVABLE=2）。static final 惰性初始化，
+  /// 仅在 Platform.isWindows 分支内访问，其他平台不会触碰。
+  static final int Function(ffi.Pointer<ffi.Uint16>) _getDriveType = ffi
+      .DynamicLibrary.open('kernel32.dll')
+      .lookupFunction<ffi.Uint32 Function(ffi.Pointer<ffi.Uint16>),
+          int Function(ffi.Pointer<ffi.Uint16>)>('GetDriveTypeW');
+
+  /// 是否可移动磁盘（U盘/移动硬盘；注意部分 USB 移动硬盘会报 DRIVE_FIXED，视为固定盘始终索引）
+  static bool _isRemovableDrive(String root) {
+    try {
+      final ptr = root.toNativeUtf16();
+      try {
+        return _getDriveType(ptr) == 2; // DRIVE_REMOVABLE
+      } finally {
+        calloc.free(ptr);
+      }
+    } catch (_) {
+      return false;
+    }
+  }
+
+  /// 默认索引根：Windows 枚举所有存在的盘符（可按设置排除移动设备），
+  /// macOS /Users，Linux 常见挂载点，安卓内置存储
   static List<String> defaultRoots() {
     if (Platform.isWindows) {
       final roots = <String>[];
+      final allowRemovable = includeRemovable;
       for (var c = 65; c <= 90; c++) {
         final root = '${String.fromCharCode(c)}:\\';
         try {
-          if (Directory(root).existsSync()) roots.add(root);
+          if (!Directory(root).existsSync()) continue;
+          if (!allowRemovable && _isRemovableDrive(root)) continue;
+          roots.add(root);
         } catch (_) {}
       }
       return roots;
@@ -85,6 +142,7 @@ class DiskIndexService {
   /// 此处强制全量重建——否则升级后全盘搜索仍会「搜不到」。
   static Future<int> prepareIndex() async {
     if (isBuilt) return _cachedCount!;
+    await loadRemovablePref(); // 先读设置再定 roots（移动设备开关）
     final rc = await loadIndex();
     if (rc == 0 && isBuilt) return _cachedCount!;
     return buildIndex(defaultRoots());
@@ -105,6 +163,7 @@ class DiskIndexService {
       {Duration maxAge = const Duration(minutes: 5)}) async {
     if (_building) return _cachedCount ?? 0; // 上一轮还在扫，别叠加
     if (!isBuilt) return prepareIndex();
+    await loadRemovablePref();
     final now = DateTime.now();
     if (_lastBuiltAt != null && now.difference(_lastBuiltAt!) < maxAge) {
       return _cachedCount!;
@@ -488,7 +547,9 @@ class DiskIndexService {
     if (!Platform.isWindows || _watchTimer != null || _watchStarting) return;
     _watchStarting = true;
     try {
-      await Isolate.run(() => _watchStartSync(defaultRoots()));
+      await loadRemovablePref();
+      final roots = defaultRoots(); // 主 isolate 算好（isolate 不继承静态设置）
+      await Isolate.run(() => _watchStartSync(roots));
       _watchTimer = Timer.periodic(const Duration(seconds: 2), (_) {
         unawaited(_drainWatchEvents());
       });
@@ -523,12 +584,15 @@ class DiskIndexService {
   static Future<void> _drainWatchEvents() async {
     try {
       if (_building) return; // 全量构建中：事件留在 Rust 池，等下一轮
-      // 幂等重启监视（溢出/失败的根由此重新拉起）
-      await Isolate.run(() => _watchStartSync(defaultRoots()));
+      await loadRemovablePref();
+      final roots = defaultRoots(); // 主 isolate 算好；幂等重启监视（溢出/失败/新增根由此拉起）
+      await Isolate.run(() => _watchStartSync(roots));
+      final rootPrefixes =
+          roots.map((r) => r.toLowerCase()).toSet();
       final payload = await Isolate.run(() => _watchDrainSync());
       if (payload.isEmpty) return;
       var dirty = 0;
-      final overflowRoots = <String>[];
+      final overflowRoots = <String>{};
       for (final line in payload.split('\n')) {
         if (line.length < 2) continue;
         final tag = line[0];
@@ -536,13 +600,17 @@ class DiskIndexService {
         if (tag == 'O') {
           overflowRoots.add(arg);
         } else if (tag == 'U' && isBuilt) {
+          // 过滤已不在索引范围内的根（如关闭「扫描移动设备」后旧监视线程的残留事件），
+          // 否则 index_update_dir 会把已重建掉的条目再并回去
+          final dl = arg.toLowerCase();
+          if (!rootPrefixes.any((r) => dl.startsWith(r))) continue;
           dirty += await Isolate.run(() => _updateDirsSync([arg]));
         }
       }
       // 溢出 = 监视线程已死，全量重建补齐（_building 防并发叠加），
       // 下一轮 drain 的 index_watch_start 会重新拉起线程
       if (overflowRoots.isNotEmpty && !_building) {
-        unawaited(buildIndex(defaultRoots(), persist: false));
+        unawaited(buildIndex(roots, persist: false));
       }
       if (dirty > 0) {
         _cachedCount = await count();
