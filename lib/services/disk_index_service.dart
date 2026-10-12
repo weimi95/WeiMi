@@ -84,10 +84,10 @@ class DiskIndexService {
 
   /// kernel32 GetDriveTypeW（DRIVE_REMOVABLE=2）。static final 惰性初始化，
   /// 仅在 Platform.isWindows 分支内访问，其他平台不会触碰。
-  static final int Function(ffi.Pointer<ffi.Uint16>) _getDriveType = ffi
+  static final int Function(ffi.Pointer<ffi.Utf16>) _getDriveType = ffi
       .DynamicLibrary.open('kernel32.dll')
-      .lookupFunction<ffi.Uint32 Function(ffi.Pointer<ffi.Uint16>),
-          int Function(ffi.Pointer<ffi.Uint16>)>('GetDriveTypeW');
+      .lookupFunction<ffi.Uint32 Function(ffi.Pointer<ffi.Utf16>),
+          int Function(ffi.Pointer<ffi.Utf16>)>('GetDriveTypeW');
 
   /// 是否可移动磁盘（U盘/移动硬盘；注意部分 USB 移动硬盘会报 DRIVE_FIXED，视为固定盘始终索引）
   static bool _isRemovableDrive(String root) {
