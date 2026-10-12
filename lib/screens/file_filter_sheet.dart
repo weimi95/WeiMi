@@ -1,36 +1,22 @@
 import 'package:flutter/material.dart';
+import '../widgets/file_thumbnail.dart';
 
-/// 文件类型分类（筛选用）
-enum FileCategory { image, video, audio, doc, archive, installer, encrypted, other }
+/// 筛选面板 UI 元数据。分类定义复用 FileThumbs.FileCategory（单一权威源，
+/// 扩展名集合见 file_thumbnail.dart，不在此重复维护）。
+class FilterMeta {
+  FilterMeta._();
 
-/// 分类 → 扩展名映射与判定。扩展名一律小写、不含点。
-class FileCategories {
-  FileCategories._();
-
-  static const Map<FileCategory, List<String>> exts = {
-    FileCategory.image: [
-      'jpg', 'jpeg', 'png', 'gif', 'webp', 'bmp', 'heic', 'heif',
-      'tiff', 'tif', 'svg', 'ico',
-    ],
-    FileCategory.video: [
-      'mp4', 'mkv', 'avi', 'mov', 'wmv', 'flv', 'webm', 'm4v',
-      'ts', 'rmvb', 'rm', '3gp', 'mpg', 'mpeg', 'vob',
-    ],
-    FileCategory.audio: [
-      'mp3', 'flac', 'wav', 'aac', 'ogg', 'm4a', 'wma', 'ape', 'opus',
-    ],
-    FileCategory.doc: [
-      'pdf', 'doc', 'docx', 'xls', 'xlsx', 'ppt', 'pptx', 'txt', 'md',
-      'csv', 'epub', 'mobi', 'rtf', 'wps', 'et', 'dps',
-    ],
-    FileCategory.archive: [
-      'zip', 'rar', '7z', 'tar', 'gz', 'tgz', 'bz2', 'xz', 'cab', 'iso',
-    ],
-    FileCategory.installer: [
-      'exe', 'msi', 'apk', 'dmg', 'pkg', 'deb', 'rpm', 'appimage', 'msix',
-    ],
-    FileCategory.encrypted: ['wemi', 'kyl'],
-  };
+  /// 筛选面板展示的分类顺序（不含 all）
+  static const List<FileCategory> cats = [
+    FileCategory.image,
+    FileCategory.video,
+    FileCategory.audio,
+    FileCategory.doc,
+    FileCategory.archive,
+    FileCategory.installer,
+    FileCategory.encrypted,
+    FileCategory.other,
+  ];
 
   static const Map<FileCategory, String> labels = {
     FileCategory.image: '图片',
@@ -54,22 +40,17 @@ class FileCategories {
     FileCategory.other: Icons.insert_drive_file_outlined,
   };
 
-  /// 取文件扩展名（小写、无点）；无扩展名返回 ''
-  static String extOf(String name) {
-    final i = name.lastIndexOf('.');
-    if (i <= 0 || i == name.length - 1) return '';
-    return name.substring(i + 1).toLowerCase();
-  }
+  /// 可细化到具体格式的分类 → 该分类的扩展名集合（引用 FileThumbs 权威定义）
+  static const Map<FileCategory, Set<String>> refinableExts = {
+    FileCategory.image: FileThumbs.image,
+    FileCategory.video: FileThumbs.video,
+    FileCategory.audio: FileThumbs.audio,
+    FileCategory.doc: FileThumbs.doc,
+    FileCategory.archive: FileThumbs.archive,
+    FileCategory.installer: FileThumbs.installer,
+  };
 
-  /// 按扩展名判定分类；不在任何分类里返回 null（即「其他」）
-  static FileCategory? of(String name) {
-    final e = extOf(name);
-    if (e.isEmpty) return null;
-    for (final entry in exts.entries) {
-      if (entry.value.contains(e)) return entry.key;
-    }
-    return null;
-  }
+  static bool refinable(FileCategory c) => refinableExts.containsKey(c);
 }
 
 /// 筛选面板：单选分类 + 可细化到具体格式（多选）。
@@ -118,11 +99,6 @@ class _FileFilterSheetState extends State<FileFilterSheet> {
     _exts = Set.of(widget.initialExts);
   }
 
-  bool get _refinable =>
-      _cat != null &&
-      _cat != FileCategory.other &&
-      _cat != FileCategory.encrypted;
-
   void _pick(FileCategory? c) {
     setState(() {
       _cat = c;
@@ -142,7 +118,6 @@ class _FileFilterSheetState extends State<FileFilterSheet> {
 
   @override
   Widget build(BuildContext context) {
-    final cats = FileCategory.values;
     return SafeArea(
       child: Padding(
         padding: const EdgeInsets.fromLTRB(0, 12, 0, 8),
@@ -180,17 +155,17 @@ class _FileFilterSheetState extends State<FileFilterSheet> {
                           : null,
                       onTap: () => _pick(null),
                     ),
-                    for (final c in cats)
+                    for (final c in FilterMeta.cats)
                       ListTile(
                         dense: true,
-                        leading: Icon(FileCategories.icons[c]),
-                        title: Text(FileCategories.labels[c]!),
+                        leading: Icon(FilterMeta.icons[c]),
+                        title: Text(FilterMeta.labels[c]!),
                         trailing: _cat == c
                             ? const Icon(Icons.check, color: Colors.blue)
                             : null,
                         onTap: () => _pick(c),
                       ),
-                    if (_refinable) ...[
+                    if (_cat != null && FilterMeta.refinable(_cat!)) ...[
                       const Divider(height: 1),
                       Padding(
                         padding: const EdgeInsets.fromLTRB(16, 10, 16, 4),
@@ -206,7 +181,8 @@ class _FileFilterSheetState extends State<FileFilterSheet> {
                           spacing: 8,
                           runSpacing: 8,
                           children: [
-                            for (final e in FileCategories.exts[_cat!]!)
+                            for (final e
+                                in FilterMeta.refinableExts[_cat!]!)
                               FilterChip(
                                 label: Text('.${e.toUpperCase()}',
                                     style: const TextStyle(fontSize: 12)),

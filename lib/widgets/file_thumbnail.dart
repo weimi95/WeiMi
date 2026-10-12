@@ -16,7 +16,7 @@ class FileTypeInfo {
 }
 
 /// 文件类型分类（用于筛选）
-enum FileCategory { all, image, video, audio, doc, archive, other }
+enum FileCategory { all, image, video, audio, doc, archive, installer, encrypted, other }
 
 class FileThumbs {
   FileThumbs._();
@@ -32,14 +32,29 @@ class FileThumbs {
   /// 只读访问（瀑布流布局查询）
   static Map<String, double> get aspectCache => _aspectCache;
 
-  static const video = {'mp4', 'avi', 'mkv', 'mov', 'wmv', 'flv', 'ts', '3gp'};
-  static const image = {'jpg', 'jpeg', 'png', 'gif', 'bmp', 'webp', 'heic'};
-  static const audio = {'mp3', 'wav', 'flac', 'aac', 'm4a', 'ogg'};
+  static const video = {
+    'mp4', 'avi', 'mkv', 'mov', 'wmv', 'flv', 'ts', '3gp',
+    'webm', 'm4v', 'rmvb', 'rm', 'mpg', 'mpeg', 'vob',
+  };
+  static const image = {
+    'jpg', 'jpeg', 'png', 'gif', 'bmp', 'webp', 'heic', 'heif',
+    'tiff', 'tif', 'svg', 'ico',
+  };
+  static const audio = {
+    'mp3', 'wav', 'flac', 'aac', 'm4a', 'ogg', 'wma', 'ape', 'opus',
+  };
   static const doc = {
     'txt', 'md', 'json', 'xml', 'csv', 'log', 'pdf', 'doc', 'docx',
-    'xls', 'xlsx', 'ppt', 'pptx', 'html', 'htm'
+    'xls', 'xlsx', 'ppt', 'pptx', 'html', 'htm', 'epub', 'mobi',
+    'rtf', 'wps', 'et', 'dps',
   };
-  static const archive = {'zip', 'rar', '7z', 'tar', 'gz'};
+  static const archive = {
+    'zip', 'rar', '7z', 'tar', 'gz', 'tgz', 'bz2', 'xz', 'cab', 'iso',
+  };
+  static const installer = {
+    'exe', 'msi', 'apk', 'dmg', 'pkg', 'deb', 'rpm', 'appimage', 'msix',
+  };
+  static const encrypted = {'wemi', 'kyl'};
 
   static String ext(String name) =>
       name.contains('.') ? name.split('.').last.toLowerCase() : '';
@@ -77,11 +92,14 @@ class FileThumbs {
 
   static FileCategory categoryOf(String name) {
     final e = ext(name);
+    // 加密文件最优先（.wemi/.kyl 不参与常规分类）
+    if (encrypted.contains(e)) return FileCategory.encrypted;
     if (image.contains(e)) return FileCategory.image;
     if (video.contains(e)) return FileCategory.video;
     if (audio.contains(e)) return FileCategory.audio;
     if (doc.contains(e)) return FileCategory.doc;
     if (archive.contains(e)) return FileCategory.archive;
+    if (installer.contains(e)) return FileCategory.installer;
     return FileCategory.other;
   }
 

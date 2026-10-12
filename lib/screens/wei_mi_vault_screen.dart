@@ -105,11 +105,11 @@ class WeiMiVaultScreenState extends State<WeiMiVaultScreen> {
   bool _matchFilter(FileItem it) {
     if (_filterCat == null) return true;
     if (it.isDirectory) return true;
-    final c = FileCategories.of(it.name);
-    if (_filterCat == FileCategory.other) return c == null;
+    final c = FileThumbs.categoryOf(it.name);
+    if (_filterCat == FileCategory.other) return c == FileCategory.other;
     if (c != _filterCat) return false;
     if (_filterExts.isEmpty) return true;
-    return _filterExts.contains(FileCategories.extOf(it.name));
+    return _filterExts.contains(FileThumbs.ext(it.name));
   }
 
   Future<void> _showFilterSheet() async {
@@ -1193,8 +1193,8 @@ class WeiMiVaultScreenState extends State<WeiMiVaultScreen> {
   Widget _buildActiveFilterChip() {
     final cat = _filterCat!;
     final label = _filterExts.isEmpty
-        ? FileCategories.labels[cat]!
-        : '${FileCategories.labels[cat]} · ${_filterExts.length} 种格式';
+        ? FilterMeta.labels[cat]!
+        : '${FilterMeta.labels[cat]} · ${_filterExts.length} 种格式';
     return Padding(
       padding: const EdgeInsets.fromLTRB(12, 0, 12, 4),
       child: Row(
@@ -1212,7 +1212,7 @@ class WeiMiVaultScreenState extends State<WeiMiVaultScreen> {
               child: Row(
                 mainAxisSize: MainAxisSize.min,
                 children: [
-                  Icon(FileCategories.icons[cat],
+                  Icon(FilterMeta.icons[cat],
                       size: 14, color: Colors.blue),
                   const SizedBox(width: 4),
                   Text(label,
