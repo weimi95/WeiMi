@@ -21,8 +21,10 @@ class DiskIndexService {
   static int? _cachedCount;
   static DateTime? _lastBuiltAt;
 
-  /// 索引是否已建立（内存态，含从磁盘加载）
-  static bool get isBuilt => _cachedCount != null && _cachedCount! >= 0;
+  /// 索引是否已建立（内存态，含从磁盘加载）。要求条数 > 0：
+  /// 旧版 USN 路径曾把「0 条空索引」落盘成 disk_index.bin，若仅以非空判就绪会误判、
+  /// 导致全盘搜索永远搜不到——因此空索引视为未就绪，prepareIndex 会强制全量重建。
+  static bool get isBuilt => _cachedCount != null && _cachedCount! > 0;
 
   /// 已索引条数（未建立返回 null）
   static int? get indexedCount => isBuilt ? _cachedCount : null;
@@ -73,6 +75,8 @@ class DiskIndexService {
   /// 说明：全盘搜索统一走**已验证可靠的目录遍历（方案A）**，与旧「全盘搜索」小窗同源。
   /// USN journal 路径已移出搜索关键路径（沙箱无法验证 DeviceIoControl、曾两次真机翻车），
   /// 后续若要在真机验证后重新启用，再切回 usn 分支即可。
+  /// 注意：若磁盘上加载到 0 条空索引（旧版 USN 时代落盘的遗留），isBuilt 会判为未就绪，
+  /// 此处强制全量重建——否则升级后全盘搜索仍会「搜不到」。
   static Future<int> prepareIndex() async {
     if (isBuilt) return _cachedCount!;
     final rc = await loadIndex();

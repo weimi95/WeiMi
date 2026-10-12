@@ -91,7 +91,7 @@ class WeiMiVaultScreenState extends State<WeiMiVaultScreen> {
   String _fileQuery = '';
   final TextEditingController _fileSearchCtrl = TextEditingController();
 
-  // ============ 全盘搜索（桌面端主搜索框直搜，无独立窗口） ============
+  // ============ 全盘搜索（主搜索框直搜全盘，手机/PC 通用，无独立窗口） ============
   List<FileItem>? _globalResults; // 非 null = 浏览视图展示全盘结果
   bool _globalSearching = false;
   bool _indexBuilding = false;
@@ -100,7 +100,6 @@ class WeiMiVaultScreenState extends State<WeiMiVaultScreen> {
   void _onFileSearchChanged(String v) {
     setState(() => _fileQuery = v.trim());
     _fileDebounce?.cancel();
-    if (!_isDesktop) return; // 移动端保持本地过滤
     if (_fileQuery.isEmpty) {
       setState(() {
         _globalResults = null;
@@ -113,7 +112,7 @@ class WeiMiVaultScreenState extends State<WeiMiVaultScreen> {
         Timer(const Duration(milliseconds: 300), _runFileGlobalSearch);
   }
 
-  /// 桌面端全盘搜索：索引未就绪先建（首次约 1~2 分钟，之后毫秒级）
+  /// 全盘搜索（手机/PC 通用）：索引未就绪先建（首次约 1~2 分钟，之后毫秒级）
   Future<void> _runFileGlobalSearch() async {
     final q = _fileQuery;
     if (q.isEmpty || _globalSearching) return;
@@ -1030,9 +1029,13 @@ class WeiMiVaultScreenState extends State<WeiMiVaultScreen> {
                     // 固定顶部搜索框（根视图与浏览视图都显示）
                     if (!_selecting) _buildFileSearchField(),
                     Expanded(
-                      child: isRoot
-                          ? _buildRootView()
-                          : (_items.isEmpty ? _emptyState : _buildFileList()),
+                      child: _globalResults != null
+                          ? _buildFileList()
+                          : (isRoot
+                              ? _buildRootView()
+                              : (_items.isEmpty
+                                  ? _emptyState
+                                  : _buildFileList())),
                     ),
                   ],
                 ),
@@ -1058,8 +1061,7 @@ class WeiMiVaultScreenState extends State<WeiMiVaultScreen> {
     );
   }
 
-  /// 文件页固定搜索框：根视图过滤展开目录的子项，浏览视图本地过滤；
-  /// 桌面端输入即全盘搜索（结果直接替换浏览列表）
+  /// 文件页固定搜索框：有查询词时手机/PC 均直接全盘搜索（结果替换列表），无独立窗口
   Widget _buildFileSearchField() {
     return Padding(
       padding: const EdgeInsets.fromLTRB(12, 8, 12, 4),
@@ -1090,7 +1092,7 @@ class WeiMiVaultScreenState extends State<WeiMiVaultScreen> {
                         });
                       },
                     )),
-          hintText: _isDesktop ? '搜索全盘文件（毫秒级匹配）' : '搜索文件',
+          hintText: '搜索全盘文件（毫秒级匹配）',
           border: OutlineInputBorder(
             borderRadius: BorderRadius.circular(10),
           ),
