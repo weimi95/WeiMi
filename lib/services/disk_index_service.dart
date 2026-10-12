@@ -19,6 +19,7 @@ import 'rust_crypto.dart';
 /// - 搜索 = 文件名不区分大小写子串匹配，毫秒级
 class DiskIndexService {
   static int? _cachedCount;
+  static DateTime? _lastBuiltAt;
 
   /// 索引是否已建立（内存态，含从磁盘加载）
   static bool get isBuilt => _cachedCount != null && _cachedCount! >= 0;
@@ -67,25 +68,30 @@ class DiskIndexService {
     return [];
   }
 
-  /// 准备索引：已建立直接返回；否则：
-  /// - Windows 且存在 NTFS 卷 → 优先 USN 路径（loadIndex + loadUsnTable + 增量 sync，
-  ///   无落盘则空索引 + USN 全量 ENUM）
-  /// - 其他平台/无 NTFS → 遍历建索引（方案A）
+  /// 准备索引：已建立直接返回；否则从磁盘加载（毫秒级），无落盘则全量目录遍历建索引。
+  ///
+  /// 说明：全盘搜索统一走**已验证可靠的目录遍历（方案A）**，与旧「全盘搜索」小窗同源。
+  /// USN journal 路径已移出搜索关键路径（沙箱无法验证 DeviceIoControl、曾两次真机翻车），
+  /// 后续若要在真机验证后重新启用，再切回 usn 分支即可。
   static Future<int> prepareIndex() async {
     if (isBuilt) return _cachedCount!;
-    if (Platform.isWindows && await _usnPreferred()) {
-      final rc = await loadIndex();
-      if (rc == 0 && isBuilt) {
-        await _loadUsnTable();
-        unawaited(syncUsn());
-        return _cachedCount!;
-      }
-      // 无落盘索引：空索引 + USN 全量重建（ENUM 远快于目录遍历）
-      await _initEmptyIndex();
-      final n = await syncUsn(full: true);
-      if (n >= 0) return n;
-    }
+    final rc = await loadIndex();
+    if (rc == 0 && isBuilt) return _cachedCount!;
     return buildIndex(defaultRoots());
+  }
+
+  /// 周期性重建（带节流）：距上次全量构建超过 [maxAge] 才重建，避免频繁全盘扫描。
+  /// 用于托盘/定时刷新，保证新建/改名/删除的文件能被搜到（非 USN 的兜底实时刷新）。
+  static Future<int> rebuildIfStale(
+      {Duration maxAge = const Duration(minutes: 5)}) async {
+    if (!isBuilt) return prepareIndex();
+    final now = DateTime.now();
+    if (_lastBuiltAt != null && now.difference(_lastBuiltAt!) < maxAge) {
+      return _cachedCount!;
+    }
+    // 周期性刷新只更新内存索引，不重复写盘（避免约 100MB 索引文件频繁落盘）。
+    // 落盘由首次 buildIndex（persist 默认 true）完成，作为下次启动的快速加载源。
+    return buildIndex(defaultRoots(), persist: false);
   }
 
   // ==================== USN journal 索引（Windows NTFS，方案B） ====================
@@ -223,10 +229,12 @@ class DiskIndexService {
   }
 
   /// 建立索引（全量），返回条数并落盘
-  static Future<int> buildIndex(List<String> roots) async {
+  static Future<int> buildIndex(List<String> roots,
+      {bool persist = true}) async {
     final n = await Isolate.run(() => _buildSync(List<String>.of(roots)));
     _cachedCount = n;
-    await saveIndex();
+    _lastBuiltAt = DateTime.now();
+    if (persist) await saveIndex();
     return n;
   }
 

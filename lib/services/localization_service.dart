@@ -217,6 +217,11 @@ class AppLocalizations {
       'clearHistory': '清空历史记录',
       'clearHistoryConfirm': '确定要清空所有操作历史记录吗？',
       'historyCleared': '历史记录已清空',
+      'opHistoryTitle': '加解密历史',
+      'opEncrypt': '加密',
+      'opDecrypt': '解密',
+      'openFolder': '打开所在目录',
+      'resultFile': '结果文件',
 
       // Decrypt result
       'filesCount': ' 个',
@@ -324,6 +329,11 @@ class AppLocalizations {
       'clearHistoryConfirm':
           'Are you sure you want to clear all operation history?',
       'historyCleared': 'History cleared',
+      'opHistoryTitle': 'Encrypt/Decrypt History',
+      'opEncrypt': 'Encrypt',
+      'opDecrypt': 'Decrypt',
+      'openFolder': 'Open Containing Folder',
+      'resultFile': 'Result',
 
       // Decrypt result
       'filesCount': ' ',

@@ -17,7 +17,7 @@ import 'widgets/progress_dialog.dart';
 import 'screens/about_screen.dart';
 import 'screens/language_screen.dart';
 import 'screens/wei_mi_vault_screen.dart';
-import 'screens/recent_files_screen.dart';
+import 'screens/operation_history_screen.dart';
 import 'screens/settings_screen.dart';
 import 'services/lan_transfer_service.dart';
 import 'services/view_prefs_service.dart';
@@ -157,8 +157,6 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   int _currentTab = 0;
   bool _isProcessing = false;
   bool _isDragging = false;
-  final GlobalKey<RecentFilesScreenState> _recentKey =
-      GlobalKey<RecentFilesScreenState>();
   final GlobalKey<WeiMiVaultScreenState> _filesKey =
       GlobalKey<WeiMiVaultScreenState>();
 
@@ -979,9 +977,6 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     Widget bodyContent;
     switch (_currentTab) {
       case 0:
-        bodyContent = _buildRecentTab();
-        break;
-      case 1:
       default:
         bodyContent = _buildFilesTab();
     }
@@ -992,8 +987,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       canPop: false,
       onPopInvokedWithResult: (didPop, result) {
         if (didPop) return;
-        final handled =
-            _currentTab == 1 && (_filesKey.currentState?.handleSystemBack() ?? false);
+        final handled = _filesKey.currentState?.handleSystemBack() ?? false;
         if (!handled) {
           SystemNavigator.pop(); // 退出到手机桌面
         }
@@ -1004,15 +998,24 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
             style: const TextStyle(fontWeight: FontWeight.bold)),
         backgroundColor: Theme.of(context).colorScheme.inversePrimary,
         actions: [
-          // 竖三点：筛选 / 视图 / 日期分区 / 语言 / 关于
+          // 加解密历史（与飞传页右上角「传输记录」同款入口）
+          IconButton(
+            icon: const Icon(Icons.history),
+            tooltip: '加解密历史',
+            onPressed: () {
+              Navigator.push(
+                context,
+                MaterialPageRoute(
+                    builder: (context) => const OperationHistoryScreen()),
+              );
+            },
+          ),
+          // 竖三点：视图 / 语言 / 关于
           PopupMenuButton<String>(
             icon: const Icon(Icons.more_vert),
             tooltip: '更多',
             onSelected: (value) {
               switch (value) {
-                case 'filter':
-                  _showFilterSheet();
-                  break;
                 case 'view_list':
                   ViewPrefsService.instance.setMode(ViewMode.list);
                   break;
@@ -1021,18 +1024,6 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                   break;
                 case 'view_waterfall':
                   ViewPrefsService.instance.setMode(ViewMode.waterfall);
-                  break;
-                case 'group_none':
-                  ViewPrefsService.instance.setGroup(GroupMode.none);
-                  break;
-                case 'group_day':
-                  ViewPrefsService.instance.setGroup(GroupMode.day);
-                  break;
-                case 'group_month':
-                  ViewPrefsService.instance.setGroup(GroupMode.month);
-                  break;
-                case 'group_year':
-                  ViewPrefsService.instance.setGroup(GroupMode.year);
                   break;
                 case 'settings':
                   Navigator.push(
@@ -1061,7 +1052,6 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
             },
             itemBuilder: (ctx) {
               final mode = ViewPrefsService.instance.mode;
-              final group = ViewPrefsService.instance.group;
               PopupMenuEntry<String> item(String value, IconData icon,
                   String label,
                   {bool checked = false}) {
@@ -1081,37 +1071,12 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
               }
 
               return [
-                PopupMenuItem(
-                  value: 'filter',
-                  child: Row(
-                    children: [
-                      const Icon(Icons.filter_list,
-                          size: 20, color: Colors.grey),
-                      const SizedBox(width: 10),
-                      const Expanded(child: Text('按类型筛选')),
-                      if (_recentKey.currentState?.filter !=
-                          FileCategory.all)
-                        const Icon(Icons.circle,
-                            size: 8, color: Colors.blue),
-                    ],
-                  ),
-                ),
                 item('view_list', Icons.view_list, '列表视图',
                     checked: mode == ViewMode.list),
                 item('view_grid', Icons.grid_view, '宫格视图',
                     checked: mode == ViewMode.grid),
                 item('view_waterfall', Icons.dashboard_outlined, '瀑布流视图',
                     checked: mode == ViewMode.waterfall),
-                // 最近页日期分区
-                item('group_none', Icons.calendar_today_outlined, '最近页：不分区',
-                    checked: group == GroupMode.none),
-                item('group_day', Icons.today_outlined, '最近页：按天分区',
-                    checked: group == GroupMode.day),
-                item('group_month', Icons.date_range_outlined, '最近页：按月分区',
-                    checked: group == GroupMode.month),
-                item('group_year', Icons.calendar_view_month_outlined,
-                    '最近页：按年分区',
-                    checked: group == GroupMode.year),
                 const PopupMenuDivider(),
                 item('settings', Icons.settings_outlined, '设置'),
                 item('language', Icons.language, t('language')),
@@ -1159,108 +1124,12 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
         type: BottomNavigationBarType.fixed,
         items: [
           BottomNavigationBarItem(
-            icon: const Icon(Icons.access_time),
-            label: t('tabRecent'),
-          ),
-          BottomNavigationBarItem(
             icon: const Icon(Icons.folder),
             label: t('tabFiles'),
           ),
         ],
       ),
       ),
-    );
-  }
-
-  /// 类型筛选弹窗（作用于「最近」页）
-  void _showFilterSheet() {
-    final current = _recentKey.currentState?.filter ?? FileCategory.all;
-    showModalBottomSheet<FileCategory>(
-      context: context,
-      builder: (ctx) => SafeArea(
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            const Padding(
-              padding: EdgeInsets.all(12),
-              child: Text('按类型筛选',
-                  style: TextStyle(fontWeight: FontWeight.w600)),
-            ),
-            ListTile(
-              leading: const Icon(Icons.apps),
-              title: const Text('全部'),
-              trailing: current == FileCategory.all
-                  ? const Icon(Icons.check, color: Colors.blue)
-                  : null,
-              onTap: () => Navigator.pop(ctx, FileCategory.all),
-            ),
-            ListTile(
-              leading: const Icon(Icons.image_outlined, color: Colors.teal),
-              title: const Text('图片'),
-              trailing: current == FileCategory.image
-                  ? const Icon(Icons.check, color: Colors.blue)
-                  : null,
-              onTap: () => Navigator.pop(ctx, FileCategory.image),
-            ),
-            ListTile(
-              leading: const Icon(Icons.movie_outlined, color: Colors.purple),
-              title: const Text('视频'),
-              trailing: current == FileCategory.video
-                  ? const Icon(Icons.check, color: Colors.blue)
-                  : null,
-              onTap: () => Navigator.pop(ctx, FileCategory.video),
-            ),
-            ListTile(
-              leading: const Icon(Icons.music_note_outlined, color: Colors.pink),
-              title: const Text('音频'),
-              trailing: current == FileCategory.audio
-                  ? const Icon(Icons.check, color: Colors.blue)
-                  : null,
-              onTap: () => Navigator.pop(ctx, FileCategory.audio),
-            ),
-            ListTile(
-              leading: const Icon(Icons.description_outlined, color: Colors.blue),
-              title: const Text('文档'),
-              trailing: current == FileCategory.doc
-                  ? const Icon(Icons.check, color: Colors.blue)
-                  : null,
-              onTap: () => Navigator.pop(ctx, FileCategory.doc),
-            ),
-            ListTile(
-              leading: const Icon(Icons.folder_zip_outlined,
-                  color: Color(0xFFB8860B)),
-              title: const Text('压缩包'),
-              trailing: current == FileCategory.archive
-                  ? const Icon(Icons.check, color: Colors.blue)
-                  : null,
-              onTap: () => Navigator.pop(ctx, FileCategory.archive),
-            ),
-            ListTile(
-              leading: const Icon(Icons.insert_drive_file_outlined,
-                  color: Colors.grey),
-              title: const Text('其他'),
-              trailing: current == FileCategory.other
-                  ? const Icon(Icons.check, color: Colors.blue)
-                  : null,
-              onTap: () => Navigator.pop(ctx, FileCategory.other),
-            ),
-          ],
-        ),
-      ),
-    ).then((c) {
-      if (c != null && mounted) {
-        _recentKey.currentState?.setFilter(c);
-        setState(() => _currentTab = 0); // 筛选后切回最近页展示效果
-      }
-    });
-  }
-
-  Widget _buildRecentTab() {
-    // 固定搜索框在 RecentFilesScreen 内部，快捷操作卡已移至「文件」页
-    return RecentFilesScreen(
-      key: _recentKey,
-      translate: t,
-      onOpenFile: _openFile,
     );
   }
 
