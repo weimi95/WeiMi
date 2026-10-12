@@ -64,7 +64,6 @@ class _DirEntry {
 class WeiMiVaultScreenState extends State<WeiMiVaultScreen> {
   static const String _kCustomDirsKey = 'weimi_custom_dirs';
   static const String _kVaultDirKey = 'weimi_vault_dir';
-  static const String _kExpandedDirsKey = 'weimi_expanded_dirs';
   static const String _kCommonOpenKey = 'weimi_sec_common_open';
   static const String _kMineOpenKey = 'weimi_sec_mine_open';
 
@@ -183,8 +182,8 @@ class WeiMiVaultScreenState extends State<WeiMiVaultScreen> {
       _vaultDir = prefs.getString(_kVaultDirKey);
       _commonOpen = prefs.getBool(_kCommonOpenKey) ?? true;
       _mineOpen = prefs.getBool(_kMineOpenKey) ?? true;
-      final expanded = prefs.getStringList(_kExpandedDirsKey) ?? [];
-      _expandedDirs.addAll(expanded);
+      // 目录展开状态不再持久化/恢复：启动一律折叠，
+      // 避免恢复的展开目录没有触发子项加载而无限转圈
     } catch (_) {}
 
     // 桌面端常用目录
@@ -321,7 +320,6 @@ class WeiMiVaultScreenState extends State<WeiMiVaultScreen> {
       _dirChildren.remove(dirPath);
       _dirLoading.remove(dirPath);
     });
-    _persistExpandedDirs();
     try {
       final prefs = await SharedPreferences.getInstance();
       await prefs.setStringList(_kCustomDirsKey, _customDirs);
@@ -363,7 +361,6 @@ class WeiMiVaultScreenState extends State<WeiMiVaultScreen> {
   Future<void> _toggleDir(String dirPath) async {
     if (_expandedDirs.contains(dirPath)) {
       setState(() => _expandedDirs.remove(dirPath));
-      _persistExpandedDirs();
       return;
     }
 
@@ -372,7 +369,6 @@ class WeiMiVaultScreenState extends State<WeiMiVaultScreen> {
       _expandedDirs.add(dirPath);
       _dirLoading[dirPath] = true;
     });
-    _persistExpandedDirs();
     try {
       final items = await listDirectory(dirPath);
       if (!mounted) return;
@@ -392,11 +388,20 @@ class WeiMiVaultScreenState extends State<WeiMiVaultScreen> {
     }
   }
 
-  Future<void> _persistExpandedDirs() async {
+  /// 原位重载某个已展开目录的子项（保持展开状态，不清空缓存外的状态）
+  Future<void> _reloadDir(String dirPath) async {
+    setState(() => _dirLoading[dirPath] = true);
     try {
-      final prefs = await SharedPreferences.getInstance();
-      await prefs.setStringList(_kExpandedDirsKey, _expandedDirs.toList());
-    } catch (_) {}
+      final items = await listDirectory(dirPath);
+      if (!mounted) return;
+      setState(() {
+        _dirChildren[dirPath] = items;
+        _dirLoading[dirPath] = false;
+      });
+    } catch (_) {
+      if (!mounted) return;
+      setState(() => _dirLoading[dirPath] = false);
+    }
   }
 
   Future<void> _setSectionOpen({required bool mine, required bool open}) async {
@@ -626,7 +631,7 @@ class WeiMiVaultScreenState extends State<WeiMiVaultScreen> {
     }
     if (_dirChildren.containsKey(dir)) {
       _dirChildren.remove(dir);
-      if (_expandedDirs.contains(dir)) _toggleDir(dir);
+      if (_expandedDirs.contains(dir)) _reloadDir(dir);
     }
   }
 
@@ -656,7 +661,7 @@ class WeiMiVaultScreenState extends State<WeiMiVaultScreen> {
           // 根视图里删除：刷新对应展开目录
           final dir = p.dirname(item.fullPath);
           _dirChildren.remove(dir);
-          if (_expandedDirs.contains(dir)) _toggleDir(dir);
+          if (_expandedDirs.contains(dir)) _reloadDir(dir);
           setState(() {});
         }
       }
