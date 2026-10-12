@@ -5,6 +5,7 @@ import 'dart:io';
 import 'dart:isolate';
 
 import 'package:ffi/ffi.dart';
+import 'package:flutter/foundation.dart';
 import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
 
@@ -21,6 +22,10 @@ import 'exclude_service.dart';
 class DiskIndexService {
   static int? _cachedCount;
   static DateTime? _lastBuiltAt;
+  static bool _building = false; // 防重入：全量构建进行中时不再叠加
+
+  /// 索引条数通知器（搜索框提示「xx个文件」用；加载/构建/增量合并后更新）
+  static final ValueNotifier<int?> countNotifier = ValueNotifier(null);
 
   /// 索引是否已建立（内存态，含从磁盘加载）。要求条数 > 0：
   /// 旧版 USN 路径曾把「0 条空索引」落盘成 disk_index.bin，若仅以非空判就绪会误判、
@@ -85,10 +90,20 @@ class DiskIndexService {
     return buildIndex(defaultRoots());
   }
 
+  /// 索引是否明显过期（加载自旧落盘文件或距上次构建超过 [maxAge]）。
+  /// 空结果搜索兜底重建用：搜不到时先看索引新不新，旧就重建后重搜。
+  static bool isStale({Duration maxAge = const Duration(minutes: 2)}) {
+    if (!isBuilt) return true;
+    final t = _lastBuiltAt;
+    if (t == null) return true;
+    return DateTime.now().difference(t) > maxAge;
+  }
+
   /// 周期性重建（带节流）：距上次全量构建超过 [maxAge] 才重建，避免频繁全盘扫描。
   /// 用于托盘/定时刷新，保证新建/改名/删除的文件能被搜到（非 USN 的兜底实时刷新）。
   static Future<int> rebuildIfStale(
       {Duration maxAge = const Duration(minutes: 5)}) async {
+    if (_building) return _cachedCount ?? 0; // 上一轮还在扫，别叠加
     if (!isBuilt) return prepareIndex();
     final now = DateTime.now();
     if (_lastBuiltAt != null && now.difference(_lastBuiltAt!) < maxAge) {
@@ -236,21 +251,37 @@ class DiskIndexService {
   /// 建立索引（全量），返回条数并落盘。构建前先下发用户排除列表（Everything 式排除文件夹）
   static Future<int> buildIndex(List<String> roots,
       {bool persist = true}) async {
-    final excludes = await ExcludeService.load();
-    final n =
-        await Isolate.run(() => _buildSync(List<String>.of(roots), excludes));
-    _cachedCount = n;
-    _lastBuiltAt = DateTime.now();
-    if (persist) await saveIndex();
-    return n;
+    if (_building) return _cachedCount ?? 0;
+    _building = true;
+    try {
+      final excludes = await ExcludeService.load();
+      final n =
+          await Isolate.run(() => _buildSync(List<String>.of(roots), excludes));
+      _cachedCount = n;
+      _lastBuiltAt = DateTime.now();
+      countNotifier.value = n;
+      if (persist) await saveIndex();
+      return n;
+    } finally {
+      _building = false;
+    }
   }
 
-  /// 从磁盘加载索引（成功返回 0 且 isBuilt=true）
+  /// 从磁盘加载索引（成功返回 0 且 isBuilt=true）。
+  /// 加载后把 _lastBuiltAt 设为索引文件 mtime——否则托盘定时器/空结果兜底
+  /// 无法判断「这份索引有多旧」，过期判断会失真。
   static Future<int> loadIndex() async {
     final path = await _indexFilePath();
     final rc = await Isolate.run(() => _loadSync(path));
     if (rc == 0) {
       _cachedCount = await count();
+      countNotifier.value = _cachedCount;
+      try {
+        final f = File(path);
+        if (await f.exists()) {
+          _lastBuiltAt = (await f.stat()).modified;
+        }
+      } catch (_) {}
     }
     return rc;
   }
@@ -294,6 +325,7 @@ class DiskIndexService {
       } catch (_) {}
     }
     _cachedCount = null;
+    countNotifier.value = null;
     try {
       final f = File(await _indexFilePath());
       if (await f.exists()) await f.delete();
@@ -443,5 +475,125 @@ class DiskIndexService {
       calloc.free(qPtr);
       calloc.free(lenPtr);
     }
+  }
+
+  // ==================== 目录变更实时监视（ReadDirectoryChangesW，桌面端） ====================
+
+  static Timer? _watchTimer;
+  static bool _watchStarting = false;
+
+  /// 启动目录变更监视 + 2s 轮询增量合并（仅 Windows；内部幂等）。
+  /// 监视线程在 Rust 侧常驻，变更目录路径入事件池，这里周期 drain 合并进索引。
+  static Future<void> ensureWatcher() async {
+    if (!Platform.isWindows || _watchTimer != null || _watchStarting) return;
+    _watchStarting = true;
+    try {
+      await Isolate.run(() => _watchStartSync(defaultRoots()));
+      _watchTimer = Timer.periodic(const Duration(seconds: 2), (_) {
+        unawaited(_drainWatchEvents());
+      });
+    } catch (_) {
+    } finally {
+      _watchStarting = false;
+    }
+  }
+
+  static void _watchStartSync(List<String> roots) {
+    final lib = RustCrypto.ensureLib();
+    final fn = lib.lookupFunction<
+        ffi.Int32 Function(ffi.Pointer<ffi.Pointer<ffi.Char>>, ffi.Size),
+        int Function(ffi.Pointer<ffi.Pointer<ffi.Char>>, int)>(
+        'index_watch_start');
+    final ptrs = calloc<ffi.Pointer<ffi.Char>>(roots.length);
+    for (var i = 0; i < roots.length; i++) {
+      ptrs[i] = roots[i].toNativeUtf8().cast<ffi.Char>();
+    }
+    try {
+      fn(ptrs, roots.length);
+    } finally {
+      for (var i = 0; i < roots.length; i++) {
+        calloc.free(ptrs[i]);
+      }
+      calloc.free(ptrs);
+    }
+  }
+
+  /// 取走监视事件并增量合并。每轮先调 index_watch_start（幂等），
+  /// 让溢出退出的根被重新拉起。增量合并后不落盘（重启后旧索引 + 定时全量兜底）。
+  static Future<void> _drainWatchEvents() async {
+    try {
+      if (_building) return; // 全量构建中：事件留在 Rust 池，等下一轮
+      // 幂等重启监视（溢出/失败的根由此重新拉起）
+      await Isolate.run(() => _watchStartSync(defaultRoots()));
+      final payload = await Isolate.run(() => _watchDrainSync());
+      if (payload.isEmpty) return;
+      var dirty = 0;
+      final overflowRoots = <String>[];
+      for (final line in payload.split('\n')) {
+        if (line.length < 2) continue;
+        final tag = line[0];
+        final arg = line.substring(1);
+        if (tag == 'O') {
+          overflowRoots.add(arg);
+        } else if (tag == 'U' && isBuilt) {
+          dirty += await Isolate.run(() => _updateDirsSync([arg]));
+        }
+      }
+      // 溢出 = 监视线程已死，全量重建补齐（_building 防并发叠加），
+      // 下一轮 drain 的 index_watch_start 会重新拉起线程
+      if (overflowRoots.isNotEmpty && !_building) {
+        unawaited(buildIndex(defaultRoots(), persist: false));
+      }
+      if (dirty > 0) {
+        _cachedCount = await count();
+        _lastBuiltAt = DateTime.now(); // 有增量合并，全量重建退避
+        countNotifier.value = _cachedCount;
+      }
+    } catch (_) {}
+  }
+
+  static String _watchDrainSync() {
+    final lib = RustCrypto.ensureLib();
+    final fn = lib.lookupFunction<
+        ffi.Int32 Function(ffi.Pointer<ffi.Uint8>, ffi.Pointer<ffi.Size>),
+        int Function(ffi.Pointer<ffi.Uint8>, ffi.Pointer<ffi.Size>)>(
+        'index_watch_drain');
+    final lenPtr = calloc<ffi.Size>();
+    try {
+      var rc = fn(ffi.nullptr, lenPtr);
+      if (rc != 0) return '';
+      var len = lenPtr.value;
+      if (len == 0) return '';
+      final buf = calloc<ffi.Uint8>(len);
+      try {
+        rc = fn(buf, lenPtr);
+        if (rc != 0) return '';
+        len = lenPtr.value;
+        return utf8.decode(buf.asTypedList(len), allowMalformed: true);
+      } finally {
+        calloc.free(buf);
+      }
+    } finally {
+      calloc.free(lenPtr);
+    }
+  }
+
+  /// 批量增量合并目录，返回成功合并的目录数
+  static int _updateDirsSync(List<String> dirs) {
+    if (dirs.isEmpty) return 0;
+    final lib = RustCrypto.ensureLib();
+    final fn = lib.lookupFunction<ffi.Int32 Function(ffi.Pointer<ffi.Char>),
+        int Function(ffi.Pointer<ffi.Char>)>('index_update_dir');
+    var ok = 0;
+    for (final d in dirs) {
+      final ptr = d.toNativeUtf8().cast<ffi.Char>();
+      try {
+        if (fn(ptr) == 0) ok++;
+      } catch (_) {
+      } finally {
+        calloc.free(ptr);
+      }
+    }
+    return ok;
   }
 }

@@ -72,17 +72,19 @@ class TrayService {
     // 按设置决定是否广播发现（「可被发现」关闭时仍保留 HTTP 接收端口）
     await LanTransferService.instance.applyDiscoverSetting();
 
+    // 目录变更实时监视（ReadDirectoryChangesW）：新建/删除/改名秒级进索引
+    unawaited(DiskIndexService.ensureWatcher());
+
     await _initSystemTray();
     // 全局接收确认：无论飞传页是否打开，非信任设备发来均弹窗提示（收托盘时也弹）
     LanTransferService.instance.confirmHandler = _globalConfirmRequest;
 
     // 全盘索引定时刷新（目录遍历方案A，已验证可靠）：每 30s 检查一次，
-    // 距上次全量构建超过 5 分钟才重建（rebuildIfStale 内部节流），
-    // 保证新建/改名/删除的文件可搜到且不空窗。USN 路径已移出搜索关键路径。
+    // 距上次全量构建超过 5 分钟才重建（rebuildIfStale 内部节流 + _building 防重入）。
+    // 不再要求 isBuilt：只加载过旧落盘索引也要刷新（新建文件才进得了索引）。
+    // USN 路径已移出搜索关键路径。
     Timer.periodic(const Duration(seconds: 30), (_) {
-      if (DiskIndexService.isBuilt) {
-        unawaited(DiskIndexService.rebuildIfStale());
-      }
+      unawaited(DiskIndexService.rebuildIfStale());
     });
   }
 

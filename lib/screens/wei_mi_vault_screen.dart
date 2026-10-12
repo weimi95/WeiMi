@@ -151,6 +151,23 @@ class WeiMiVaultScreenState extends State<WeiMiVaultScreen> {
       }
       final paths = await DiskIndexService.search(q);
       if (!mounted) return;
+      // 空结果兜底：索引明显过期（如加载的是旧落盘索引、新建文件还没进索引）
+      // 时后台重建一次并自动重搜，避免「文件明明存在却搜不到」。
+      if (paths.isEmpty && DiskIndexService.isStale()) {
+        setState(() => _indexBuilding = true);
+        unawaited(() async {
+          try {
+            await DiskIndexService.rebuildIfStale(
+                maxAge: const Duration(minutes: 2));
+          } catch (_) {}
+          if (!mounted) return;
+          setState(() => _indexBuilding = false);
+          // 查询词没变才自动重搜（重建后 isStale=false，不会再次触发兜底，无死循环）
+          if (_fileQuery == q) {
+            await _runFileGlobalSearch();
+          }
+        }());
+      }
       setState(() {
         _globalResults = paths.map((path) {
           final name = p.basename(path);
@@ -190,6 +207,12 @@ class WeiMiVaultScreenState extends State<WeiMiVaultScreen> {
     super.initState();
     _initRoot();
     _navigateTo(widget.initialPath ?? '');
+    // 预热索引（加载旧索引毫秒级；无索引则后台全量构建），完成后计数自动刷新搜索框
+    unawaited(() async {
+      try {
+        await DiskIndexService.prepareIndex();
+      } catch (_) {}
+    }());
   }
 
   @override
@@ -1154,7 +1177,9 @@ class WeiMiVaultScreenState extends State<WeiMiVaultScreen> {
 
   /// 文件页固定搜索框：有查询词时手机/PC 均直接全盘搜索（结果替换列表），无独立窗口
   Widget _buildFileSearchField() {
-    return Padding(
+    return ValueListenableBuilder<int?>(
+      valueListenable: DiskIndexService.countNotifier,
+      builder: (context, count, _) => Padding(
       padding: const EdgeInsets.fromLTRB(12, 8, 12, 4),
       child: TextField(
         controller: _fileSearchCtrl,
@@ -1198,13 +1223,16 @@ class WeiMiVaultScreenState extends State<WeiMiVaultScreen> {
                       )),
             ],
           ),
-          hintText: '搜索全盘文件（毫秒级匹配）',
+          hintText: count == null
+              ? '搜索全盘文件（毫秒级匹配）'
+              : '搜索全盘文件（$count个文件）',
           border: OutlineInputBorder(
             borderRadius: BorderRadius.circular(10),
           ),
           contentPadding: const EdgeInsets.symmetric(vertical: 8),
         ),
         onChanged: _onFileSearchChanged,
+      ),
       ),
     );
   }
@@ -1718,7 +1746,12 @@ class WeiMiVaultScreenState extends State<WeiMiVaultScreen> {
     final items = _browseItems;
     if (items.isEmpty && _fileQuery.isNotEmpty) {
       return Center(
-        child: Text(_globalResults != null ? '全盘没有找到匹配的文件' : '没有匹配的文件',
+        child: Text(
+            _indexBuilding
+                ? '索引可能过期，正在后台刷新，稍后自动重搜…'
+                : _globalResults != null
+                    ? '全盘没有找到匹配的文件'
+                    : '没有匹配的文件',
             style: TextStyle(fontSize: 14, color: Colors.grey.shade500)),
       );
     }

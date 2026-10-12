@@ -15,6 +15,9 @@ use rand::RngCore;
 // NTFS USN Journal 实时文件索引（仅 Windows；其他平台无此模块，Dart 侧须 Platform.isWindows 守卫）
 #[cfg(windows)]
 mod usn;
+// 目录变更实时监视（ReadDirectoryChangesW，Everything 式增量；仅 Windows）
+#[cfg(windows)]
+mod watcher;
 
 const NONCE_SIZE: usize = 12;
 const TAG_SIZE: usize = 16;
@@ -943,7 +946,7 @@ pub extern "C" fn index_set_excludes(
 }
 
 /// 取目录 mtime（纳秒），失败返回 None
-fn dir_mtime_ns(path: &std::path::Path) -> Option<i64> {
+pub(crate) fn dir_mtime_ns(path: &std::path::Path) -> Option<i64> {
     if let Ok(meta) = std::fs::metadata(path) {
         if let Ok(t) = meta.modified() {
             if let Ok(d) = t.duration_since(std::time::UNIX_EPOCH) {
@@ -1086,7 +1089,7 @@ const INDEX_SKIP_DIRS: &[&str] = &[
     "recovery",
 ];
 
-fn index_skip_dir(name: &str) -> bool {
+pub(crate) fn index_skip_dir(name: &str) -> bool {
     let lower = name.to_lowercase();
     INDEX_SKIP_DIRS.contains(&lower.as_str())
 }
@@ -1101,6 +1104,7 @@ pub extern "C" fn index_init() -> i32 {
     0
 }
 
+#[no_mangle]
 pub extern "C" fn index_build(roots_ptr: *const *const c_char, num_roots: usize) -> i64 {
     let mut roots: Vec<std::path::PathBuf> = Vec::new();
     unsafe {
