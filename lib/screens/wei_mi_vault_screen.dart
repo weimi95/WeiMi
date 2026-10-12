@@ -15,6 +15,7 @@ import '../services/file_viewer_service.dart';
 import '../services/view_prefs_service.dart';
 import '../widgets/file_selection_bar.dart';
 import '../widgets/file_thumbnail.dart';
+import 'file_filter_sheet.dart';
 import 'lan_transfer_screen.dart';
 
 /// WeiMi Vault 屏幕
@@ -95,6 +96,31 @@ class WeiMiVaultScreenState extends State<WeiMiVaultScreen> {
   bool _globalSearching = false;
   bool _indexBuilding = false;
   Timer? _fileDebounce;
+
+  // ============ 类型筛选（目录内容 / 展开子项 / 全盘搜索结果共用） ============
+  FileCategory? _filterCat; // null = 全部
+  Set<String> _filterExts = {}; // 空 = 该分类全部格式
+
+  /// 类型筛选匹配：只作用于文件，目录始终显示（保证可导航）
+  bool _matchFilter(FileItem it) {
+    if (_filterCat == null) return true;
+    if (it.isDirectory) return true;
+    final c = FileCategories.of(it.name);
+    if (_filterCat == FileCategory.other) return c == null;
+    if (c != _filterCat) return false;
+    if (_filterExts.isEmpty) return true;
+    return _filterExts.contains(FileCategories.extOf(it.name));
+  }
+
+  Future<void> _showFilterSheet() async {
+    final r = await FileFilterSheet.show(
+        context, _filterCat, _filterExts);
+    if (r == null || !mounted) return;
+    setState(() {
+      _filterCat = r.$1;
+      _filterExts = r.$2;
+    });
+  }
 
   void _onFileSearchChanged(String v) {
     setState(() => _fileQuery = v.trim());
@@ -1070,6 +1096,9 @@ class WeiMiVaultScreenState extends State<WeiMiVaultScreen> {
                   children: [
                     // 固定顶部搜索框（根视图与浏览视图都显示）
                     if (!_selecting) _buildFileSearchField(),
+                    // 当前类型筛选提示（点击 × 清除）
+                    if (!_selecting && _filterCat != null)
+                      _buildActiveFilterChip(),
                     Expanded(
                       child: _globalResults != null
                           ? _buildFileList()
@@ -1112,28 +1141,43 @@ class WeiMiVaultScreenState extends State<WeiMiVaultScreen> {
         decoration: InputDecoration(
           isDense: true,
           prefixIcon: const Icon(Icons.search, size: 20),
-          suffixIcon: _fileQuery.isEmpty
-              ? null
-              : (_globalSearching
-                  ? const Padding(
-                      padding: EdgeInsets.all(12),
-                      child: SizedBox(
-                        width: 16,
-                        height: 16,
-                        child: CircularProgressIndicator(strokeWidth: 2),
-                      ),
-                    )
-                  : IconButton(
-                      icon: const Icon(Icons.clear, size: 18),
-                      onPressed: () {
-                        _fileDebounce?.cancel();
-                        _fileSearchCtrl.clear();
-                        setState(() {
-                          _fileQuery = '';
-                          _globalResults = null;
-                        });
-                      },
-                    )),
+          suffixIcon: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              IconButton(
+                icon: Icon(
+                  _filterCat == null
+                      ? Icons.filter_list_outlined
+                      : Icons.filter_alt,
+                  size: 20,
+                  color: _filterCat == null ? null : Colors.blue,
+                ),
+                tooltip: '按类型筛选',
+                onPressed: _showFilterSheet,
+              ),
+              if (_fileQuery.isNotEmpty)
+                (_globalSearching
+                    ? const Padding(
+                        padding: EdgeInsets.all(12),
+                        child: SizedBox(
+                          width: 16,
+                          height: 16,
+                          child: CircularProgressIndicator(strokeWidth: 2),
+                        ),
+                      )
+                    : IconButton(
+                        icon: const Icon(Icons.clear, size: 18),
+                        onPressed: () {
+                          _fileDebounce?.cancel();
+                          _fileSearchCtrl.clear();
+                          setState(() {
+                            _fileQuery = '';
+                            _globalResults = null;
+                          });
+                        },
+                      )),
+            ],
+          ),
           hintText: '搜索全盘文件（毫秒级匹配）',
           border: OutlineInputBorder(
             borderRadius: BorderRadius.circular(10),
@@ -1141,6 +1185,53 @@ class WeiMiVaultScreenState extends State<WeiMiVaultScreen> {
           contentPadding: const EdgeInsets.symmetric(vertical: 8),
         ),
         onChanged: _onFileSearchChanged,
+      ),
+    );
+  }
+
+  /// 搜索框下方的筛选状态条
+  Widget _buildActiveFilterChip() {
+    final cat = _filterCat!;
+    final label = _filterExts.isEmpty
+        ? FileCategories.labels[cat]!
+        : '${FileCategories.labels[cat]} · ${_filterExts.length} 种格式';
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(12, 0, 12, 4),
+      child: Row(
+        children: [
+          InkWell(
+            borderRadius: BorderRadius.circular(16),
+            onTap: _showFilterSheet,
+            child: Container(
+              padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+              decoration: BoxDecoration(
+                color: Colors.blue.withValues(alpha: 0.08),
+                borderRadius: BorderRadius.circular(16),
+                border: Border.all(color: Colors.blue.withValues(alpha: 0.4)),
+              ),
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Icon(FileCategories.icons[cat],
+                      size: 14, color: Colors.blue),
+                  const SizedBox(width: 4),
+                  Text(label,
+                      style: const TextStyle(
+                          fontSize: 12, color: Colors.blue)),
+                  const SizedBox(width: 4),
+                  GestureDetector(
+                    onTap: () => setState(() {
+                      _filterCat = null;
+                      _filterExts = {};
+                    }),
+                    child: const Icon(Icons.close,
+                        size: 14, color: Colors.blue),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ],
       ),
     );
   }
@@ -1456,20 +1547,23 @@ class WeiMiVaultScreenState extends State<WeiMiVaultScreen> {
 
   List<Widget> _buildExpandedContent(
       List<FileItem>? children, String filterQuery) {
-    // 搜索过滤（不区分大小写）
-    List<FileItem>? visible = children;
-    if (filterQuery.isNotEmpty && children != null) {
-      final q = filterQuery.toLowerCase();
-      visible =
-          children.where((it) => it.name.toLowerCase().contains(q)).toList();
-    }
-    if (visible == null) {
+    if (children == null) {
       return const [
         Padding(
           padding: EdgeInsets.symmetric(vertical: 12),
           child: Center(child: CircularProgressIndicator()),
         ),
       ];
+    }
+    // 搜索过滤（不区分大小写）+ 类型筛选
+    var visible = children;
+    if (filterQuery.isNotEmpty) {
+      final q = filterQuery.toLowerCase();
+      visible =
+          visible.where((it) => it.name.toLowerCase().contains(q)).toList();
+    }
+    if (_filterCat != null) {
+      visible = visible.where(_matchFilter).toList();
     }
     if (visible.isEmpty) {
       return [
@@ -1482,8 +1576,33 @@ class WeiMiVaultScreenState extends State<WeiMiVaultScreen> {
         const Divider(height: 1, indent: 16),
       ];
     }
+    // 子项跟随全局视图设置：列表 / 宫格 / 瀑布流
     return [
-      for (final item in visible) _buildChildRow(item),
+      AnimatedBuilder(
+        animation: ViewPrefsService.instance,
+        builder: (context, _) {
+          switch (ViewPrefsService.instance.mode) {
+            case ViewMode.grid:
+              return Padding(
+                padding: const EdgeInsets.fromLTRB(24, 4, 10, 4),
+                child: _buildGridContent(visible, shrinkWrap: true),
+              );
+            case ViewMode.waterfall:
+              _ensureAspect(visible);
+              return Padding(
+                padding: const EdgeInsets.fromLTRB(24, 4, 10, 4),
+                child: _buildWaterfallContent(visible, scope: visible),
+              );
+            case ViewMode.list:
+            default:
+              return Column(
+                children: [
+                  for (final item in visible) _buildChildRow(item),
+                ],
+              );
+          }
+        },
+      ),
       const Divider(height: 1, indent: 16),
     ];
   }
@@ -1558,10 +1677,21 @@ class WeiMiVaultScreenState extends State<WeiMiVaultScreen> {
 
   /// 浏览视图条目：桌面端全盘模式下展示全盘结果，否则本地过滤当前目录
   List<FileItem> get _browseItems {
-    if (_globalResults != null) return _globalResults!;
-    if (_fileQuery.isEmpty) return _items;
+    if (_globalResults != null) {
+      return _filterCat == null
+          ? _globalResults!
+          : _globalResults!.where(_matchFilter).toList();
+    }
+    if (_fileQuery.isEmpty) {
+      return _filterCat == null
+          ? _items
+          : _items.where(_matchFilter).toList();
+    }
     final q = _fileQuery.toLowerCase();
-    return _items.where((it) => it.name.toLowerCase().contains(q)).toList();
+    return _items
+        .where((it) => it.name.toLowerCase().contains(q))
+        .where(_matchFilter)
+        .toList();
   }
 
   Widget _buildFileList() {
@@ -1626,9 +1756,16 @@ class WeiMiVaultScreenState extends State<WeiMiVaultScreen> {
 
   /// 宫格视图（文件夹 + 文件卡片）
   Widget _buildGridBody() {
-    final items = _browseItems;
+    return _buildGridContent(_browseItems);
+  }
+
+  /// 宫格内容块：浏览页可滚动；目录展开区 shrinkWrap 嵌入
+  Widget _buildGridContent(List<FileItem> items, {bool shrinkWrap = false}) {
     return GridView.builder(
-      physics: const AlwaysScrollableScrollPhysics(),
+      physics: shrinkWrap
+          ? const NeverScrollableScrollPhysics()
+          : const AlwaysScrollableScrollPhysics(),
+      shrinkWrap: shrinkWrap,
       padding: const EdgeInsets.all(10),
       gridDelegate: const SliverGridDelegateWithMaxCrossAxisExtent(
         maxCrossAxisExtent: 130,
@@ -1644,7 +1781,16 @@ class WeiMiVaultScreenState extends State<WeiMiVaultScreen> {
   /// 瀑布流视图（两列，图片按宽高比）
   Widget _buildWaterfallBody() {
     final items = _browseItems;
-    // 图片比例未缓存的先异步解码，完成后刷新
+    _ensureAspect(items);
+    return SingleChildScrollView(
+      physics: const AlwaysScrollableScrollPhysics(),
+      padding: const EdgeInsets.all(10),
+      child: _buildWaterfallContent(items, scope: items),
+    );
+  }
+
+  /// 图片比例未缓存的先异步解码，完成后刷新
+  void _ensureAspect(List<FileItem> items) {
     final missing = items
         .where((it) =>
             !it.isDirectory &&
@@ -1660,7 +1806,11 @@ class WeiMiVaultScreenState extends State<WeiMiVaultScreen> {
         if (mounted) setState(() {});
       });
     }
+  }
 
+  /// 瀑布流内容块（两列 Row），浏览页与目录展开区共用
+  Widget _buildWaterfallContent(List<FileItem> items,
+      {List<FileItem> scope = const []}) {
     final colA = <FileItem>[];
     final colB = <FileItem>[];
     final hA = <FileItem, double>{};
@@ -1694,20 +1844,16 @@ class WeiMiVaultScreenState extends State<WeiMiVaultScreen> {
               Padding(
                 padding: const EdgeInsets.only(bottom: 10),
                 child: _buildCard(it, hs[it] ?? 160,
-                    index: _browseItems.indexOf(it), scope: _browseItems),
+                    index: scope.indexOf(it), scope: scope),
               ),
           ],
         ),
       );
     }
 
-    return SingleChildScrollView(
-      physics: const AlwaysScrollableScrollPhysics(),
-      padding: const EdgeInsets.all(10),
-      child: Row(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [col(colA, hA), const SizedBox(width: 10), col(colB, hB)],
-      ),
+    return Row(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [col(colA, hA), const SizedBox(width: 10), col(colB, hB)],
     );
   }
 
