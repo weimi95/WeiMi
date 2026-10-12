@@ -22,6 +22,7 @@ import 'screens/settings_screen.dart';
 import 'services/lan_transfer_service.dart';
 import 'services/view_prefs_service.dart';
 import 'services/share_receive_service.dart';
+import 'services/receive_notify_service.dart';
 import 'widgets/file_thumbnail.dart';
 import 'package:path_provider/path_provider.dart';
 
@@ -58,13 +59,16 @@ void main() async {
     try {
       final prefs = await SharedPreferences.getInstance();
       if (prefs.getBool('lan_autostart') ?? true) {
-        LanTransferService.instance.startReceiving();
+        LanTransferService.instance.applyDiscoverSetting();
       }
     } catch (_) {}
   }
 
   // 系统分享接收（Android SEND/SEND_MULTIPLE → 飞传页）
   await ShareReceiveService.instance.init();
+
+  // 接收完成通知（PC 系统通知 / 安卓应用内横幅）
+  await ReceiveNotifyService.instance.init();
 
   if (Platform.isWindows) {
     await FileAssociationService.registerFileAssociation();

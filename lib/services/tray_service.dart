@@ -69,8 +69,8 @@ class TrayService {
     windowManager.addListener(_WindowListener());
 
     // 主程序自身常驻跑微密飞传（替代原独立托盘进程的飞传）
-    await LanTransferService.instance.startReceiving();
-    await LanTransferService.instance.startDiscovery();
+    // 按设置决定是否广播发现（「可被发现」关闭时仍保留 HTTP 接收端口）
+    await LanTransferService.instance.applyDiscoverSetting();
 
     await _initSystemTray();
     // 全局接收确认：无论飞传页是否打开，非信任设备发来均弹窗提示（收托盘时也弹）

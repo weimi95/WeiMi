@@ -7,6 +7,7 @@ import 'package:path/path.dart' as p;
 import 'package:shared_preferences/shared_preferences.dart';
 import 'trusted_devices_service.dart';
 import 'transfer_history_service.dart';
+import 'receive_notify_service.dart';
 
 /// 微密飞传服务（方案 B：自研轻量协议，对标 Landrop）
 ///
@@ -40,6 +41,8 @@ class LanTransferService {
   static const String _kDeviceIdKey = 'lan_device_id';
   static const String _kDeviceNameKey = 'lan_device_name';
   static const String _kWebShareKey = 'web_share_enabled';
+  static const String _kReceiveDirKey = 'lan_receive_dir';
+  static const String _kDiscoverKey = 'lan_discover_enabled';
   /// WS 房间里 App 虚拟设备的固定 id
   static const String kAppPeerId = 'app';
   static const MethodChannel _fgsChannel =
@@ -55,6 +58,8 @@ class LanTransferService {
   bool _discovering = false;
   bool _backgroundMode = false;
   bool _webShareEnabled = true;
+  String _receiveDir = '';
+  bool _discoverEnabled = true;
   // Snapdrop 式 WS 房间：浏览器客户端表
   final Map<String, WebPeer> _webPeers = {};
   int _webPeerSeq = 0;
@@ -112,6 +117,8 @@ class LanTransferService {
     _selfName =
         (name == null || name.isEmpty) ? Platform.localHostname : name;
     _webShareEnabled = prefs.getBool(_kWebShareKey) ?? true;
+    _receiveDir = prefs.getString(_kReceiveDirKey) ?? '';
+    _discoverEnabled = prefs.getBool(_kDiscoverKey) ?? true;
   }
 
   /// 网页快传开关（默认开）
@@ -119,6 +126,48 @@ class LanTransferService {
     _webShareEnabled = v;
     final prefs = await SharedPreferences.getInstance();
     await prefs.setBool(_kWebShareKey, v);
+  }
+
+  /// 飞传接收保存目录（未设置则跟随「加密文件存放目录」）
+  String get receiveDir => _receiveDir;
+
+  Future<void> setReceiveDir(String dir) async {
+    _receiveDir = dir.trim();
+    final prefs = await SharedPreferences.getInstance();
+    if (_receiveDir.isEmpty) {
+      await prefs.remove(_kReceiveDirKey);
+    } else {
+      await prefs.setString(_kReceiveDirKey, _receiveDir);
+    }
+  }
+
+  /// 可被发现：是否广播/应答 UDP 52346。关闭后其他设备搜不到本机，
+  /// 但 HTTP 接收端口保留，直接传/网页版仍能收到。
+  bool get discoverEnabled => _discoverEnabled;
+
+  Future<void> setDiscoverEnabled(bool v) async {
+    _discoverEnabled = v;
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setBool(_kDiscoverKey, v);
+    } catch (_) {}
+    if (v) {
+      await startDiscovery();
+    } else {
+      _discovering = false;
+      await stopReceiving();
+    }
+  }
+
+  /// 启动/托盘常驻时按设置决定是否开启发现（幂等）
+  Future<void> applyDiscoverSetting() async {
+    await _ensureIdentity();
+    if (_discoverEnabled) {
+      await startDiscovery();
+    } else {
+      _discovering = false;
+      await stopReceiving();
+    }
   }
 
   Future<void> setSelfName(String name) async {
@@ -463,6 +512,8 @@ class LanTransferService {
       await req.response.close();
       _events.add(LanEvent(LanEventType.incomingDone,
           name: request.fileName, from: request.senderName, path: savePath));
+      ReceiveNotifyService.instance
+          .fileDone(request.fileName, request.senderName, savePath);
       await TransferHistoryService.instance.add(TransferRecord(
         id: '${DateTime.now().microsecondsSinceEpoch}_in',
         kind: 'file',
@@ -536,6 +587,7 @@ class LanTransferService {
       await req.response.close();
       _events.add(LanEvent(LanEventType.incomingText,
           from: senderName, content: text));
+      ReceiveNotifyService.instance.textDone(senderName, text);
       await TransferHistoryService.instance.add(TransferRecord(
         id: '${DateTime.now().microsecondsSinceEpoch}_int',
         kind: 'text',
@@ -584,6 +636,7 @@ class LanTransferService {
       await req.response.close();
       _events.add(LanEvent(LanEventType.incomingDone,
           name: name, from: from, path: savePath));
+      ReceiveNotifyService.instance.fileDone(name, from, savePath);
       await TransferHistoryService.instance.add(TransferRecord(
         id: '${DateTime.now().microsecondsSinceEpoch}_web',
         kind: 'file',
@@ -633,6 +686,7 @@ class LanTransferService {
       req.response.write(json.encode({'ok': true}));
       await req.response.close();
       _events.add(LanEvent(LanEventType.incomingText, from: from, content: text));
+      ReceiveNotifyService.instance.textDone(from, text);
       await TransferHistoryService.instance.add(TransferRecord(
         id: '${DateTime.now().microsecondsSinceEpoch}_webt',
         kind: 'text',
@@ -662,7 +716,8 @@ class LanTransferService {
   //   to='app' 表示发给本机 App（虚拟设备，直接走现有接收管线）
 
   Future<void> _handleWebSocket(HttpRequest req) async {
-    if (!_webShareEnabled || !_receiving) {
+    // 网页版只受「网页快传」开关约束，与「可被发现」(UDP 广播) 解耦
+    if (!_webShareEnabled) {
       req.response.statusCode = HttpStatus.forbidden;
       await req.response.close();
       return;
@@ -849,6 +904,7 @@ class LanTransferService {
       }
       _events.add(LanEvent(LanEventType.incomingDone,
           name: inbound.name, from: from, path: savePath));
+      ReceiveNotifyService.instance.fileDone(inbound.name, from, savePath);
       await TransferHistoryService.instance.add(TransferRecord(
         id: '${DateTime.now().microsecondsSinceEpoch}_ws',
         kind: 'file',
@@ -882,6 +938,7 @@ class LanTransferService {
 
   void _onAppIncomingText(String from, String text) {
     _events.add(LanEvent(LanEventType.incomingText, from: from, content: text));
+    ReceiveNotifyService.instance.textDone(from, text);
     TransferHistoryService.instance.add(TransferRecord(
       id: '${DateTime.now().microsecondsSinceEpoch}_wst',
       kind: 'text',
@@ -1005,7 +1062,7 @@ class LanTransferService {
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1">
-<title>微密飞传 · 网页快传</title>
+<title>微密飞传 · 网页版</title>
 <style>
   * { margin:0; padding:0; box-sizing:border-box; -webkit-tap-highlight-color:transparent; }
   body { font-family:-apple-system,"PingFang SC","Microsoft YaHei",sans-serif;
@@ -1052,7 +1109,7 @@ class LanTransferService {
 </head>
 <body>
 <header>
-  <h1>微密飞传 · 网页快传</h1>
+  <h1>微密飞传 · 网页版</h1>
   <p>同一 WiFi 下设备互相发现，点设备或拖文件到设备即可发送</p>
 </header>
 <main>
@@ -1273,6 +1330,15 @@ function done(el, text, ok) {
 
   /// 接收文件保存目录：优先「加密文件存放目录」，否则注入的兜底目录
   Future<String> _resolveSaveDir() async {
+    // 1. 飞传专用接收目录（设置里单独指定）
+    final rd = _receiveDir.trim();
+    if (rd.isNotEmpty) {
+      try {
+        final d = Directory(rd);
+        if (await d.exists()) return rd;
+      } catch (_) {}
+    }
+    // 2. 加密文件存放目录
     final prefs = await SharedPreferences.getInstance();
     final vaultDir = prefs.getString('weimi_vault_dir');
     if (vaultDir != null && vaultDir.isNotEmpty) {

@@ -302,7 +302,8 @@ jobs:
       - name: Install Linux dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y clang cmake ninja-build pkg-config libgtk-3-dev liblzma-dev libstdc++-12-dev libayatana-appindicator3-dev
+          # libnotify-dev: local_notifier 插件的 Linux 通知后端（缺它 CMake 直接 FATAL_ERROR）
+          sudo apt-get install -y clang cmake ninja-build pkg-config libgtk-3-dev liblzma-dev libstdc++-12-dev libayatana-appindicator3-dev libnotify-dev
       
       - name: Build Rust library
         run: |

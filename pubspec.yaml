@@ -85,6 +85,9 @@ dependencies:
   # Desktop system tray icon
   system_tray: ^2.0.3
 
+  # Desktop system notifications (receive-done toast)
+  local_notifier: ^0.1.6
+
 dev_dependencies:
   flutter_test:
     sdk: flutter

@@ -7,6 +7,7 @@ import '../services/autostart_service.dart';
 import '../services/lan_transfer_service.dart';
 import '../services/tray_service.dart';
 import '../services/trusted_devices_service.dart';
+import '../services/receive_notify_service.dart';
 import 'exclude_settings_screen.dart';
 
 /// 设置页（单进程方案：直接调本进程 LanTransferService 单例）
@@ -22,9 +23,13 @@ class SettingsScreen extends StatefulWidget {
 
 class _SettingsScreenState extends State<SettingsScreen> {
   bool _webShare = true;
+  bool _recvNotify = true;
   bool _autostartTray = false;
   String _selfName = '本机';
   List<MapEntry<String, String>> _trusted = [];
+  String _receiveDir = '';
+  bool _openRecvDir = false;
+  bool _discoverEnabled = true;
   bool _isDesktop = false;
   /// 关闭按钮行为：'prompt' | 'minimize' | 'quit'
   String _closeAction = 'prompt';
@@ -43,6 +48,10 @@ class _SettingsScreenState extends State<SettingsScreen> {
       setState(() {
         _webShare = svc.webShareEnabled;
         _selfName = svc.selfName.isEmpty ? '本机' : svc.selfName;
+        _recvNotify = ReceiveNotifyService.instance.enabled;
+        _receiveDir = svc.receiveDir;
+        _openRecvDir = ReceiveNotifyService.instance.openDir;
+        _discoverEnabled = svc.discoverEnabled;
       });
     }
     // 信任设备列表来自本进程持久化文件，强制重读最新内容
@@ -107,6 +116,65 @@ class _SettingsScreenState extends State<SettingsScreen> {
   Future<void> _toggleWebShare(bool v) async {
     await LanTransferService.instance.setWebShareEnabled(v);
     if (mounted) setState(() => _webShare = v);
+  }
+
+  Future<void> _toggleRecvNotify(bool v) async {
+    await ReceiveNotifyService.instance.setEnabled(v);
+    if (mounted) setState(() => _recvNotify = v);
+  }
+
+  Future<void> _toggleOpenRecvDir(bool v) async {
+    await ReceiveNotifyService.instance.setOpenDir(v);
+    if (mounted) setState(() => _openRecvDir = v);
+  }
+
+  Future<void> _toggleDiscover(bool v) async {
+    await LanTransferService.instance.setDiscoverEnabled(v);
+    if (mounted) {
+      setState(() => _discoverEnabled = v);
+      _snack(v
+          ? '已开启：其他设备可搜索到本机（网页快传不受影响）'
+          : '已关闭：其他设备搜索不到本机（网页快传仍可用）');
+    }
+  }
+
+  Future<void> _pickReceiveDir() async {
+    final picked = await FilePicker.platform.getDirectoryPath(
+        dialogTitle: '选择飞传接收文件的保存目录');
+    if (picked == null || picked.isEmpty || !mounted) return;
+    // Android 的目录选择器返回 SAF URI（primary:Download），转成真实路径
+    var dir = picked;
+    if (Platform.isAndroid && !picked.startsWith('/')) {
+      final parts = picked.split(':');
+      dir = parts.length == 2 ? '/storage/emulated/0${parts[1]}' : '';
+    }
+    if (dir.isEmpty || !await Directory(dir).exists()) {
+      _snack('该目录不可用，已取消');
+      return;
+    }
+    await LanTransferService.instance.setReceiveDir(dir);
+    if (mounted) setState(() => _receiveDir = dir);
+    _snack('飞传接收文件将保存到：$dir');
+  }
+
+  Future<void> _openReceiveDir() async {
+    final dir = _receiveDir.trim();
+    if (dir.isEmpty) return;
+    try {
+      if (Platform.isWindows) {
+        await Process.run('explorer.exe', [dir.replaceAll('/', '\\')]);
+      } else if (Platform.isMacOS) {
+        await Process.run('open', [dir]);
+      } else if (Platform.isLinux) {
+        await Process.run('xdg-open', [dir]);
+      }
+    } catch (_) {}
+  }
+
+  void _snack(String msg) {
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(content: Text(msg), duration: const Duration(seconds: 2)),
+    );
   }
 
   Future<void> _toggleAutostartTray(bool v) async {
@@ -222,6 +290,49 @@ class _SettingsScreenState extends State<SettingsScreen> {
             value: _webShare,
             onChanged: _toggleWebShare,
           ),
+          SwitchListTile(
+            secondary: const Icon(Icons.radar),
+            title: const Text('可被发现'),
+            subtitle: const Text(
+                '关闭后停止局域网广播，其他设备搜不到本机（网页快传不受影响）'),
+            value: _discoverEnabled,
+            onChanged: _toggleDiscover,
+          ),
+          SwitchListTile(
+            secondary: const Icon(Icons.notifications_active_outlined),
+            title: const Text('接收完成通知'),
+            subtitle: const Text(
+                '收到文件/文本后提示一下（电脑为系统通知，点通知可打开文件所在目录；手机为应用内横幅）'),
+            value: _recvNotify,
+            onChanged: _toggleRecvNotify,
+          ),
+          ListTile(
+            leading: const Icon(Icons.download_outlined),
+            title: const Text('接收保存目录'),
+            subtitle: Text(_receiveDir.isEmpty
+                ? '跟随「加密文件存放目录」'
+                : _receiveDir),
+            trailing: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                if (_receiveDir.isNotEmpty)
+                  TextButton(
+                    onPressed: _openReceiveDir,
+                    child: const Text('打开', style: TextStyle(fontSize: 12)),
+                  ),
+                const Icon(Icons.chevron_right),
+              ],
+            ),
+            onTap: _pickReceiveDir,
+          ),
+          if (_isDesktop)
+            SwitchListTile(
+              secondary: const Icon(Icons.folder_open_outlined),
+              title: const Text('接收后自动打开文件夹'),
+              subtitle: const Text('收到文件后自动打开保存目录（配合上面的通知）'),
+              value: _openRecvDir,
+              onChanged: _toggleOpenRecvDir,
+            ),
           ListTile(
             leading: const Icon(Icons.badge_outlined),
             title: const Text('本机名称'),
