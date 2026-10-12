@@ -99,6 +99,7 @@ extern "system" {
         lpFileSystemNameBuffer: *mut u16,
         nFileSystemNameSize: u32,
     ) -> i32;
+    fn GetLastError() -> u32;
 }
 
 const GENERIC_READ: u32 = 0x8000_0000;
@@ -110,6 +111,9 @@ const INVALID_HANDLE_VALUE: isize = -1;
 const FSCTL_QUERY_USN_JOURNAL: u32 = 0x0009_0068;
 const FSCTL_ENUM_USN_DATA: u32 = 0x0009_00B3;
 const FSCTL_READ_USN_JOURNAL: u32 = 0x0009_009B;
+
+/// FSCTL_ENUM_USN_DATA 枚举到末尾的正常终止码
+const ERROR_HANDLE_EOF: u32 = 38;
 
 /// 只订阅会影响文件名/路径的事件（内容改写等不关我们的事）
 const REASON_MASK: u32 = 0x0000_0100 // USN_REASON_FILE_CREATE
@@ -470,7 +474,9 @@ fn query_journal(h: *mut c_void) -> Option<UsnJournalData> {
 }
 
 /// 全量枚举 journal（首次或 journal 变化时）。
-/// 输出缓冲直接从 USN_RECORD 序列开始（无前导值——那是 READ 的格式）。
+/// 输出缓冲：前 8 字节 = 下一页起始 FileReferenceNumber（前导 USN），
+/// 之后是连续的 USN_RECORD 序列（对照微软官方 EnumUsnData 示例：记录从
+/// `&Buffer[sizeof(USN)]` 开始，分页起点取 `*(USN*)Buffer`）。
 /// 成功返回最后一条记录的 USN（作为下次增量起点）。
 fn enum_full(
     h: *mut c_void,
@@ -509,18 +515,27 @@ fn enum_full(
             )
         };
         if ok == 0 {
+            // 枚举正常读完的标志是 ERROR_HANDLE_EOF（38），不是错误
+            let err = unsafe { GetLastError() };
+            if err == ERROR_HANDLE_EOF {
+                break;
+            }
             return None;
         }
         let got = returned as usize;
-        if got < USN_RECORD_HEADER_LEN {
-            break;
+        if got <= 8 {
+            break; // 只有前导 USN、没有记录 = 枚举结束
         }
-        let mut off = 0usize;
-        let mut last_frn = start_frn;
+        // 前 8 字节 = 下一页起始 FileReferenceNumber
+        let next_frn = u64::from_le_bytes(
+            buf.get(0..8)
+                .and_then(|b| b.try_into().ok())
+                .unwrap_or([0u8; 8]),
+        );
+        let mut off = 8usize; // 跳过前导 USN，从第一条记录开始
         while off + USN_RECORD_HEADER_LEN <= got {
             match parse_record(&buf, off) {
                 Some((rec_len, frn, parent, reason, attrs, name)) => {
-                    last_frn = frn;
                     if let Some(b) = buf.get(off + 24..off + 32) {
                         last_usn = u64::from_le_bytes(b.try_into().unwrap_or([0; 8]));
                     }
@@ -542,12 +557,12 @@ fn enum_full(
                 None => return None, // V3 或损坏 → 回退
             }
         }
-        if last_frn <= start_frn {
+        if next_frn <= start_frn {
             break; // 没有进展，防死循环
         }
-        start_frn = last_frn;
+        start_frn = next_frn;
         if got < buf_size {
-            break; // 读完了
+            break; // 不满一页，读完了
         }
     }
     Some(last_usn)
