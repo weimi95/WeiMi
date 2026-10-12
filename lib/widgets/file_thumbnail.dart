@@ -142,7 +142,7 @@ class FileThumbs {
 /// 文件缩略图组件：
 /// - 图片：真实缩略图（解码降采样省内存）
 /// - 视频：Android 原生抽帧；Windows 走系统缩略图拿首帧
-/// - 其他：Windows 走 IThumbnailProvider 真内容缩略图（三级回退），其余平台按扩展名彩色图标
+/// - 其他：Windows 走 IShellItemImageFactory 真内容缩略图（三级回退），其余平台按扩展名彩色图标
 class FileThumbnail extends StatelessWidget {
   final String path;
   final String name;
@@ -227,7 +227,7 @@ class FileThumbnail extends StatelessWidget {
 }
 
 /// Windows 缩略图加载（三级回退）：
-/// 1. 方案B IThumbnailProvider 真内容缩略图（PSD 画面 / 视频首帧等）
+/// 1. 方案B IShellItemImageFactory 真内容缩略图（PSD 画面 / 视频首帧等）
 /// 2. 方案A 系统文件关联图标（PS logo 等）
 /// 3. Flutter 通用类型图标
 class _WindowsPreview extends StatefulWidget {

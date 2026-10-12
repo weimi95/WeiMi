@@ -74,6 +74,14 @@ final class _BITMAP extends ffi.Struct {
   external ffi.Pointer<ffi.Void> bmBits;
 }
 
+/// IShellItemImageFactory.GetImage 的尺寸参数（按值传递）
+final class _SIZE extends ffi.Struct {
+  @ffi.Int32()
+  external int cx;
+  @ffi.Int32()
+  external int cy;
+}
+
 /// 传给缩略图 isolate 的启动参数
 class _ThumbCfg {
   final String cacheDir;
@@ -81,32 +89,27 @@ class _ThumbCfg {
   const _ThumbCfg(this.cacheDir, this.reply);
 }
 
-/// Windows 真内容缩略图（方案B）：后台 isolate + COM IThumbnailProvider。
+/// Windows 真内容缩略图（方案B）：后台 isolate + COM IShellItemImageFactory。
 ///
 /// - 主 isolate：缓存命中判断（键 = sha1(路径|mtime|大小)）、请求分发、失败负缓存
 /// - 后台 isolate：CoInitializeEx(MTA) 一次，串行处理请求：
-///   SHCreateItemFromParsingName → IShellItem.BindToHandler(BHID_ThumbnailHandler)
-///   → IThumbnailProvider.GetThumbnail(256) → GetDIBits 32bpp → ARGB 合成白底
+///   SHCreateItemFromParsingName(IID_IShellItemImageFactory)
+///   → GetImage(256, THUMBNONLY|BIGGERSIZEOK) → GetDIBits 32bpp → alpha 合成白底
 ///   → 写 24bpp BMP 落盘缓存目录
-/// - 失败（未装 Photoshop、无 provider、COM 错误）返回 null，调用方回退
-///   方案A 系统图标或 Flutter 通用图标。
+/// - 用 ImageFactory 而非直接 BindToHandler(IThumbnailProvider) 的原因（实测）：
+///   Explorer 对 PSD 等格式的缩略图存在 thumbcache 缓存里，GetImage 能读缓存；
+///   直接 BindToHandler 绑定缩略图处理器返回 0x800401E5（MK_E_NOOBJECT）。
+/// - 失败（无缩略图、COM 错误）返回 null，调用方回退方案A 系统图标或通用图标。
 class WindowsThumbnailProvider {
   WindowsThumbnailProvider._();
 
   static const int _thumbSize = 256;
-  static const int _wtsatArgb = 2;
+  // SIIGBF_THUMBNONLY | SIIGBF_BIGGERSIZEOK：只要真缩略图、允许更大图
+  static const int _siigbfThumbOnly = 0x9;
 
-  // IID_IShellItem {43826D1E-E718-42EE-BC55-A1E261C37BFE}
-  static const List<int> _iidShellItem = [
-    0x43826D1E, 0xE718, 0x42EE, 0xBC, 0x55, 0xA1, 0xE2, 0x61, 0xC3, 0x7B, 0xFE,
-  ];
-  // IID_IThumbnailProvider {E357FCCD-A995-4576-B01F-234630154E96}
-  static const List<int> _iidThumbProvider = [
-    0xE357FCCD, 0xA995, 0x4576, 0xB0, 0x1F, 0x23, 0x46, 0x30, 0x15, 0x4E, 0x96,
-  ];
-  // BHID_ThumbnailHandler {7B2E650A-8E20-4FDF-B4D1-0CF45EE1AC6B}
-  static const List<int> _bhidThumbHandler = [
-    0x7B2E650A, 0x8E20, 0x4FDF, 0xB4, 0xD1, 0x0C, 0xF4, 0x5E, 0xE1, 0xAC, 0x6B,
+  // IID_IShellItemImageFactory {BCC18B79-BA16-442F-80C4-8A59C30C463B}
+  static const List<int> _iidImageFactory = [
+    0xBCC18B79, 0xBA16, 0x442F, 0x80, 0xC4, 0x8A, 0x59, 0xC3, 0x0C, 0x46, 0x3B,
   ];
 
   // ---- 主 isolate 状态 ----
@@ -308,62 +311,41 @@ class WindowsThumbnailProvider {
         int Function(int, int, int, int, ffi.Pointer<ffi.Void>,
             ffi.Pointer<_BITMAPINFO>, int)>('GetDIBits');
 
-    final iidShellItem = _makeGuid(_iidShellItem[0], _iidShellItem[1],
-        _iidShellItem[2], _iidShellItem.sublist(3));
-    final iidThumb = _makeGuid(_iidThumbProvider[0], _iidThumbProvider[1],
-        _iidThumbProvider[2], _iidThumbProvider.sublist(3));
-    final bhidThumb = _makeGuid(_bhidThumbHandler[0], _bhidThumbHandler[1],
-        _bhidThumbHandler[2], _bhidThumbHandler.sublist(3));
+    final iidFactory = _makeGuid(_iidImageFactory[0], _iidImageFactory[1],
+        _iidImageFactory[2], _iidImageFactory.sublist(3));
 
     final pathPtr = path.toNativeUtf16().cast<ffi.Uint16>();
     final itemPtr = calloc<ffi.Pointer<ffi.Void>>();
-    final providerPtr = calloc<ffi.Pointer<ffi.Void>>();
     final hbmpPtr = calloc<ffi.IntPtr>();
-    final alphaPtr = calloc<ffi.Uint32>();
     ffi.Pointer<ffi.Uint8>? pix;
     ffi.Pointer<_BITMAPINFO>? bmi;
 
     try {
-      // 1. 路径 -> IShellItem
-      final hr1 = shCreateItem(pathPtr, ffi.nullptr, iidShellItem, itemPtr);
+      // 1. 路径 -> IShellItemImageFactory（GetImage 能读 Explorer 的 thumbcache）
+      final hr1 = shCreateItem(pathPtr, ffi.nullptr, iidFactory, itemPtr);
       final item = itemPtr.value;
       if (hr1 < 0 || item.address == 0) return false;
 
-      // 2. IShellItem.BindToHandler -> IThumbnailProvider
-      final bindToHandler = _vt(item, 3).cast<
+      // 2. IShellItemImageFactory.GetImage(256, THUMBNONLY|BIGGERSIZEOK) -> HBITMAP
+      //    vtable: 0=QI 1=AddRef 2=Release 3=GetImage
+      final getImage = _vt(item, 3).cast<
               ffi.NativeFunction<
-                  ffi.Int32 Function(
-                      ffi.Pointer<ffi.Void>,
-                      ffi.Pointer<ffi.Void>,
-                      ffi.Pointer<_GUID>,
-                      ffi.Pointer<_GUID>,
-                      ffi.Pointer<ffi.Pointer<ffi.Void>>)>>()
+                  ffi.Int32 Function(ffi.Pointer<ffi.Void>, _SIZE, ffi.Uint32,
+                      ffi.Pointer<ffi.IntPtr>)>>()
           .asFunction<
-              int Function(
-                  ffi.Pointer<ffi.Void>,
-                  ffi.Pointer<ffi.Void>,
-                  ffi.Pointer<_GUID>,
-                  ffi.Pointer<_GUID>,
-                  ffi.Pointer<ffi.Pointer<ffi.Void>>)>();
-      final hr2 = bindToHandler(item, ffi.nullptr, bhidThumb, iidThumb,
-          providerPtr);
-      final provider = providerPtr.value;
+              int Function(ffi.Pointer<ffi.Void>, _SIZE, int,
+                  ffi.Pointer<ffi.IntPtr>)>();
+      final size = calloc<_SIZE>();
+      size.ref.cx = _thumbSize;
+      size.ref.cy = _thumbSize;
+      final hr3 = getImage(item, size.ref, _siigbfThumbOnly, hbmpPtr);
+      calloc.free(size);
       _release(item);
-      if (hr2 < 0 || provider.address == 0) return false;
-
-      // 3. IThumbnailProvider.GetThumbnail(256) -> HBITMAP
-      final getThumbnail = _vt(provider, 3).cast<
-              ffi.NativeFunction<
-                  ffi.Int32 Function(ffi.Pointer<ffi.Void>, ffi.Uint32,
-                      ffi.Pointer<ffi.IntPtr>, ffi.Pointer<ffi.Uint32>)>>()
-          .asFunction<
-              int Function(ffi.Pointer<ffi.Void>, int,
-                  ffi.Pointer<ffi.IntPtr>, ffi.Pointer<ffi.Uint32>)>();
-      final hr3 = getThumbnail(provider, _thumbSize, hbmpPtr, alphaPtr);
-      _release(provider);
       if (hr3 < 0) return false;
 
-      final hbmp = hbmpPtr.value;
+      final hbmpRaw = hbmpPtr.value;
+      // GDI 句柄只有低 32 位有效（高位可能被符号扩展污染）
+      final hbmp = hbmpRaw & 0xFFFFFFFF;
       if (hbmp == 0) return false;
 
       try {
@@ -395,15 +377,22 @@ class WindowsThumbnailProvider {
           if (copied == 0) return false;
 
           final bgra = pix!.asTypedList(w * h * 4);
-          final argb = alphaPtr.value == _wtsatArgb;
 
-          // 6. BGRA -> RGB（ARGB 时按 alpha 合成到白底）
+          // 6. BGRA -> RGB（alpha 通道存在非 255 值时按 alpha 合成到白底；
+          //    GetImage 不返回 WTSAT 标志，逐像素扫描代替）
+          var hasAlpha = false;
+          for (var i = 3; i < bgra.length; i += 4) {
+            if (bgra[i] != 255) {
+              hasAlpha = true;
+              break;
+            }
+          }
           final rgb = Uint8List(w * h * 3);
           for (var i = 0, j = 0; i < w * h; i++) {
             var r = bgra[i * 4 + 2];
             var g = bgra[i * 4 + 1];
             var b = bgra[i * 4];
-            if (argb) {
+            if (hasAlpha) {
               final a = bgra[i * 4 + 3];
               if (a != 255) {
                 r = (r * a + 255 * (255 - a)) ~/ 255;
@@ -430,13 +419,9 @@ class WindowsThumbnailProvider {
       return false;
     } finally {
       calloc.free(pathPtr);
-      calloc.free(iidShellItem);
-      calloc.free(iidThumb);
-      calloc.free(bhidThumb);
+      calloc.free(iidFactory);
       calloc.free(itemPtr);
-      calloc.free(providerPtr);
       calloc.free(hbmpPtr);
-      calloc.free(alphaPtr);
       if (pix != null) calloc.free(pix!);
       if (bmi != null) calloc.free(bmi!);
     }

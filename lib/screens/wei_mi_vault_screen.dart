@@ -1066,7 +1066,27 @@ class WeiMiVaultScreenState extends State<WeiMiVaultScreen> {
           : (isRoot
               ? null
               : AppBar(
-                  title: Text(_titleFor(_currentPath, isRoot)),
+                  title: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(_titleFor(_currentPath, isRoot),
+                          style: const TextStyle(fontSize: 16)),
+                      if (_currentPath != kMyComputerPath)
+                        Text(
+                          _currentPath,
+                          style: TextStyle(
+                            fontSize: 11,
+                            color: Theme.of(context)
+                                .colorScheme
+                                .onSurface
+                                .withValues(alpha: 0.55),
+                          ),
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                        ),
+                    ],
+                  ),
                   leading: _historyIndex > 0
                       ? IconButton(
                           icon: const Icon(Icons.arrow_back),
