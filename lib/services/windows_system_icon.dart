@@ -193,13 +193,20 @@ class WindowsSystemIcon {
 
     // 1. SHGetFileInfo 拿文件关联 HICON
     final pathPtr = path.toNativeUtf16().cast<ffi.Uint16>();
-    final shfi = calloc<ffi.Uint8>(536); // sizeof(SHFILEINFOW)
+    // sizeof(SHFILEINFOW) x64 = HICON(8) + iIcon(4) + dwAttributes(4)
+    //   + szDisplayName[MAX_PATH*2=520] + szTypeName[80*2=160] = 696
+    // shell32 会填满整个结构体，缓冲区必须 >= 696，否则越界写踩堆崩溃
+    // （曾因用 536 导致 STATUS_HEAP_CORRUPTION / c0000374，见 2026-10-12 日志）
+    const shfiSize = 696;
+    final shfi = calloc<ffi.Uint8>(shfiSize);
     final hdcScreen = getDC(0);
     var hIcon = 0;
     try {
-      hIcon = shGetFileInfo(pathPtr, FILE_ATTR_NORMAL, shfi.cast(), 536,
+      // 返回值只是成功标志（恒为 1），真正的 HICON 在结构体首字段
+      final ok = shGetFileInfo(pathPtr, FILE_ATTR_NORMAL, shfi.cast(), shfiSize,
           SHGFI_ICON | SHGFI_LARGEICON);
-      if (hIcon == 0) return null;
+      hIcon = shfi.cast<ffi.Uint64>().value;
+      if (ok == 0 || hIcon == 0) return null;
 
       // 2. 绘到白底内存 DC（白底兜住图标透明区域）
       final hdcMem = createCompatibleDC(hdcScreen);
