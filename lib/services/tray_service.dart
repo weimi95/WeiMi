@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:io';
 
 import 'package:flutter/material.dart';
@@ -6,6 +7,7 @@ import 'package:path_provider/path_provider.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:system_tray/system_tray.dart';
 import 'package:window_manager/window_manager.dart';
+import 'disk_index_service.dart';
 import 'lan_transfer_service.dart';
 import 'share_receive_service.dart';
 
@@ -73,6 +75,14 @@ class TrayService {
     await _initSystemTray();
     // 全局接收确认：无论飞传页是否打开，非信任设备发来均弹窗提示（收托盘时也弹）
     LanTransferService.instance.confirmHandler = _globalConfirmRequest;
+
+    // 全盘索引 USN 定时增量（NTFS journal 实时同步，新建/改名/删除秒级可搜；
+    // 索引未建立时不触发，首次搜索时按需建立）。非 NTFS 卷由 Rust 侧回退目录遍历。
+    Timer.periodic(const Duration(seconds: 30), (_) {
+      if (DiskIndexService.isBuilt) {
+        unawaited(DiskIndexService.syncUsn());
+      }
+    });
   }
 
   Future<void> _initSystemTray() async {

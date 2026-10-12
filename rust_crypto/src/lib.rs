@@ -12,6 +12,10 @@ use std::ffi::CStr;
 use std::os::raw::c_char;
 use rand::RngCore;
 
+// NTFS USN Journal 实时文件索引（仅 Windows；其他平台无此模块，Dart 侧须 Platform.isWindows 守卫）
+#[cfg(windows)]
+mod usn;
+
 const NONCE_SIZE: usize = 12;
 const TAG_SIZE: usize = 16;
 const MAGIC_STRING: &[u8] = b"WEIMI_LOCK";
@@ -879,7 +883,7 @@ mod tests {
 
 use std::collections::HashMap;
 
-static INDEX_PATHS: std::sync::Mutex<Option<Vec<String>>> = std::sync::Mutex::new(None);
+pub(crate) static INDEX_PATHS: std::sync::Mutex<Option<Vec<String>>> = std::sync::Mutex::new(None);
 /// 各目录（含根）的 mtime（纳秒），用于增量刷新时判断是否需要重扫
 static INDEX_DIR_MTIMES: std::sync::Mutex<Option<HashMap<String, i64>>> =
     std::sync::Mutex::new(None);
@@ -899,7 +903,7 @@ fn dir_mtime_ns(path: &std::path::Path) -> Option<i64> {
 }
 
 /// 多线程遍历 roots，收集文件路径 + 各目录 mtime，返回容器（不替换外部状态）
-fn scan_roots(roots: &[std::path::PathBuf]) -> (Vec<String>, HashMap<String, i64>) {
+pub(crate) fn scan_roots(roots: &[std::path::PathBuf]) -> (Vec<String>, HashMap<String, i64>) {
     let max_entries: usize = 1_000_000;
     let queue: Arc<std::sync::Mutex<Vec<std::path::PathBuf>>> =
         Arc::new(std::sync::Mutex::new(roots.to_vec()));
@@ -1018,6 +1022,15 @@ fn index_skip_dir(name: &str) -> bool {
 }
 
 #[no_mangle]
+/// 初始化空索引（USN 全量重建前调用：INDEX_PATHS 置空 Vec，usn_sync 往里填）
+#[no_mangle]
+pub extern "C" fn index_init() -> i32 {
+    *INDEX_PATHS.lock().unwrap() = Some(Vec::new());
+    *INDEX_DIR_MTIMES.lock().unwrap() = Some(HashMap::new());
+    *INDEX_ROOTS.lock().unwrap() = Some(Vec::new());
+    0
+}
+
 pub extern "C" fn index_build(roots_ptr: *const *const c_char, num_roots: usize) -> i64 {
     let mut roots: Vec<std::path::PathBuf> = Vec::new();
     unsafe {
