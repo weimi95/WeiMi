@@ -128,7 +128,8 @@ class LanTransferService {
     await prefs.setBool(_kWebShareKey, v);
   }
 
-  /// 飞传接收保存目录（未设置则跟随「加密文件存放目录」）
+  /// 飞传接收保存目录（独立设置，与「加密文件存放目录」无关；
+  /// 未指定时用 defaultReceiveDir()）
   String get receiveDir => _receiveDir;
 
   Future<void> setReceiveDir(String dir) async {
@@ -1328,31 +1329,41 @@ function done(el, text, ok) {
 </html>''';
   }
 
-  /// 接收文件保存目录：优先「加密文件存放目录」，否则注入的兜底目录
+  /// 默认接收目录（未单独指定时用，独立于「加密文件存放目录」）：
+  /// Android → 公共 Download 下（文件管理器可见，无需 SAF）
+  /// 桌面 → 文档目录下
+  String defaultReceiveDir() {
+    const name = '微密飞传接收';
+    if (Platform.isAndroid) {
+      return '/storage/emulated/0/Download/$name';
+    }
+    final fb = fallbackDir ?? Directory.systemTemp.path;
+    return p.join(fb, name);
+  }
+
+  /// 接收文件保存目录：只看「接收保存目录」这一项设置；
+  /// 未指定（或目录不可用）时落到独立默认目录，不再跟随「加密文件存放目录」
   Future<String> _resolveSaveDir() async {
-    // 1. 飞传专用接收目录（设置里单独指定）
     final rd = _receiveDir.trim();
     if (rd.isNotEmpty) {
       try {
         final d = Directory(rd);
-        if (await d.exists()) return rd;
-      } catch (_) {}
+        if (!await d.exists()) await d.create(recursive: true);
+        return rd;
+      } catch (_) {
+        // 目录不可用（被删/无权限）→ 落默认
+      }
     }
-    // 2. 加密文件存放目录
-    final prefs = await SharedPreferences.getInstance();
-    final vaultDir = prefs.getString('weimi_vault_dir');
-    if (vaultDir != null && vaultDir.isNotEmpty) {
-      try {
-        final d = Directory(vaultDir);
-        if (await d.exists()) return vaultDir;
-      } catch (_) {}
-    }
-    final fb = fallbackDir ?? Directory.systemTemp.path;
-    final recv = p.join(fb, 'weimi_vault');
-    final d = Directory(recv);
-    if (!await d.exists()) await d.create(recursive: true);
-    return recv;
+    final def = defaultReceiveDir();
+    try {
+      final d = Directory(def);
+      if (!await d.exists()) await d.create(recursive: true);
+    } catch (_) {}
+    return def;
   }
+
+  /// 当前生效的接收目录（设置页展示用）
+  Future<String> effectiveReceiveDir() => _resolveSaveDir();
 
   Future<String> _resolveSavePath(String fileName) async {
     final dirPath = await _resolveSaveDir();

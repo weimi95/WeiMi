@@ -28,6 +28,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
   String _selfName = '本机';
   List<MapEntry<String, String>> _trusted = [];
   String _receiveDir = '';
+  String _effectiveDir = '';
   bool _openRecvDir = false;
   bool _discoverEnabled = true;
   bool _isDesktop = false;
@@ -57,6 +58,11 @@ class _SettingsScreenState extends State<SettingsScreen> {
     // 信任设备列表来自本进程持久化文件，强制重读最新内容
     await TrustedDevices.instance.reload();
     if (mounted) setState(() => _trusted = TrustedDevices.instance.all);
+    // 当前生效的接收目录（未指定时显示默认目录实际路径）
+    try {
+      final eff = await svc.effectiveReceiveDir();
+      if (mounted) setState(() => _effectiveDir = eff);
+    } catch (_) {}
     if (_isDesktop) {
       if (AutostartService.supported) {
         final enabled =
@@ -153,8 +159,30 @@ class _SettingsScreenState extends State<SettingsScreen> {
       return;
     }
     await LanTransferService.instance.setReceiveDir(dir);
-    if (mounted) setState(() => _receiveDir = dir);
+    if (mounted) {
+      setState(() {
+        _receiveDir = dir;
+        _effectiveDir = dir;
+      });
+    }
     _snack('飞传接收文件将保存到：$dir');
+  }
+
+  /// 清除单独指定的接收目录，回到默认目录（独立于加密文件目录）
+  Future<void> _resetReceiveDir() async {
+    await LanTransferService.instance.setReceiveDir('');
+    if (!mounted) return;
+    String eff = '';
+    try {
+      eff = await LanTransferService.instance.effectiveReceiveDir();
+    } catch (_) {}
+    if (mounted) {
+      setState(() {
+        _receiveDir = '';
+        _effectiveDir = eff;
+      });
+      _snack(eff.isEmpty ? '已恢复默认接收目录' : '已恢复默认接收目录：$eff');
+    }
   }
 
   Future<void> _openReceiveDir() async {
@@ -309,17 +337,26 @@ class _SettingsScreenState extends State<SettingsScreen> {
           ListTile(
             leading: const Icon(Icons.download_outlined),
             title: const Text('接收保存目录'),
-            subtitle: Text(_receiveDir.isEmpty
-                ? '跟随「加密文件存放目录」'
-                : _receiveDir),
+            subtitle: Text(
+              _receiveDir.isEmpty
+                  ? (_effectiveDir.isEmpty ? '默认：文档目录/微密飞传接收' : '默认：$_effectiveDir')
+                  : _receiveDir,
+              maxLines: 2,
+              overflow: TextOverflow.ellipsis,
+            ),
             trailing: Row(
               mainAxisSize: MainAxisSize.min,
               children: [
-                if (_receiveDir.isNotEmpty)
+                if (_receiveDir.isNotEmpty) ...[
                   TextButton(
                     onPressed: _openReceiveDir,
                     child: const Text('打开', style: TextStyle(fontSize: 12)),
                   ),
+                  TextButton(
+                    onPressed: _resetReceiveDir,
+                    child: const Text('默认', style: TextStyle(fontSize: 12)),
+                  ),
+                ],
                 const Icon(Icons.chevron_right),
               ],
             ),
