@@ -14,7 +14,8 @@ import 'rust_crypto.dart';
 ///
 /// - 首次使用全量建立，随后写入 `disk_index.bin`（应用文档目录）
 /// - 之后启动优先从磁盘加载（毫秒级，搜索立即可用），再后台增量刷新
-/// - 增量刷新：比对各根目录 mtime，未变跳过重扫，仅重扫变化的盘/目录
+/// - Windows NTFS 卷走 USN journal 增量（方案B：Everything 同源技术，见 rust usn.rs），
+///   非 NTFS 卷/异常自动回退目录遍历
 /// - 搜索 = 文件名不区分大小写子串匹配，毫秒级
 class DiskIndexService {
   static int? _cachedCount;
@@ -66,17 +67,159 @@ class DiskIndexService {
     return [];
   }
 
-  /// 准备索引：已建立直接返回；否则尝试从磁盘加载（加载成功后后台增量刷新），
-  /// 加载失败则全量重建并落盘。
+  /// 准备索引：已建立直接返回；否则：
+  /// - Windows 且存在 NTFS 卷 → 优先 USN 路径（loadIndex + loadUsnTable + 增量 sync，
+  ///   无落盘则空索引 + USN 全量 ENUM）
+  /// - 其他平台/无 NTFS → 遍历建索引（方案A）
   static Future<int> prepareIndex() async {
     if (isBuilt) return _cachedCount!;
-    final rc = await loadIndex();
-    if (rc == 0 && isBuilt) {
-      // 后台增量刷新，不阻塞调用方
-      unawaited(refreshIndex().then((_) {}));
-      return _cachedCount!;
+    if (Platform.isWindows && await _usnPreferred()) {
+      final rc = await loadIndex();
+      if (rc == 0 && isBuilt) {
+        await _loadUsnTable();
+        unawaited(syncUsn());
+        return _cachedCount!;
+      }
+      // 无落盘索引：空索引 + USN 全量重建（ENUM 远快于目录遍历）
+      await _initEmptyIndex();
+      final n = await syncUsn(full: true);
+      if (n >= 0) return n;
     }
     return buildIndex(defaultRoots());
+  }
+
+  // ==================== USN journal 索引（Windows NTFS，方案B） ====================
+
+  /// USN 状态落盘文件路径
+  static Future<String> _usnTablePath() async {
+    final docs = await getApplicationDocumentsDirectory();
+    return p.join(docs.path, 'usn_table.bin');
+  }
+
+  /// 是否存在 NTFS 卷且 journal 可查询（QUERY 被安全软件拦截时返回 false，走遍历）
+  static Future<bool> _usnPreferred() async {
+    try {
+      return await Isolate.run(() {
+        final lib = RustCrypto.ensureLib();
+        final fn = lib.lookupFunction<ffi.Int32 Function(ffi.Pointer<ffi.Char>),
+            int Function(ffi.Pointer<ffi.Char>)>('usn_volume_supported');
+        for (final root in defaultRoots()) {
+          final ptr = root.toNativeUtf8().cast<ffi.Char>();
+          try {
+            if (fn(ptr) == 1) return true;
+          } finally {
+            calloc.free(ptr);
+          }
+        }
+        return false;
+      });
+    } catch (_) {
+      return false;
+    }
+  }
+
+  /// 初始化空索引（USN 全量重建前）
+  static Future<void> _initEmptyIndex() async {
+    await Isolate.run(() {
+      final lib = RustCrypto.ensureLib();
+      final fn =
+          lib.lookupFunction<ffi.Int32 Function(), int Function()>('index_init');
+      fn();
+    });
+    _cachedCount = 0;
+  }
+
+  /// 加载 USN 目录 FRN 表（启动时紧接 loadIndex）
+  static Future<bool> _loadUsnTable() async {
+    try {
+      final path = await _usnTablePath();
+      final rc = await Isolate.run(() => _usnTableLoadSync(path));
+      return rc == 0;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  /// USN 增量同步（替代 index_refresh 的 Windows 路径）。
+  /// full=true 时强制每卷全量 ENUM。返回总条数，负数错误。
+  /// 有变更才落盘（避免 30s 定时器反复写 100MB 索引文件）。
+  static Future<int> syncUsn({bool full = false}) async {
+    if (!Platform.isWindows || !isBuilt) return -1;
+    final roots = defaultRoots();
+    try {
+      final before = await _usnChanges();
+      final n = await Isolate.run(() => _usnSyncSync(roots, full));
+      if (n < 0) return n;
+      final after = await _usnChanges();
+      _cachedCount = n;
+      if (full || after != before) {
+        await saveIndex();
+        await _saveUsnTable();
+      }
+      return n;
+    } catch (_) {
+      return -1;
+    }
+  }
+
+  static Future<int> _usnChanges() async {
+    return Isolate.run(() {
+      final lib = RustCrypto.ensureLib();
+      final fn = lib.lookupFunction<ffi.Uint64 Function(), int Function()>(
+          'usn_changes');
+      return fn();
+    });
+  }
+
+  static Future<int> _saveUsnTable() async {
+    final path = await _usnTablePath();
+    return Isolate.run(() => _usnTableSaveSync(path));
+  }
+
+  static int _usnSyncSync(List<String> roots, bool full) {
+    final lib = RustCrypto.ensureLib();
+    final name = full ? 'usn_rebuild' : 'usn_sync';
+    final fn = lib.lookupFunction<
+        ffi.Int64 Function(
+            ffi.Pointer<ffi.Pointer<ffi.Char>>, ffi.Size),
+        int Function(
+            ffi.Pointer<ffi.Pointer<ffi.Char>>, int)>(name);
+    final ptrs = calloc<ffi.Pointer<ffi.Char>>(roots.length);
+    for (var i = 0; i < roots.length; i++) {
+      ptrs[i] = roots[i].toNativeUtf8().cast<ffi.Char>();
+    }
+    try {
+      return fn(ptrs, roots.length);
+    } finally {
+      for (var i = 0; i < roots.length; i++) {
+        calloc.free(ptrs[i]);
+      }
+      calloc.free(ptrs);
+    }
+  }
+
+  static int _usnTableSaveSync(String path) {
+    final lib = RustCrypto.ensureLib();
+    final fn = lib.lookupFunction<ffi.Int32 Function(ffi.Pointer<ffi.Char>),
+        int Function(ffi.Pointer<ffi.Char>)>('usn_table_save');
+    final ptr = path.toNativeUtf8().cast<ffi.Char>();
+    try {
+      return fn(ptr);
+    } finally {
+      calloc.free(ptr);
+    }
+  }
+
+  static int _usnTableLoadSync(String path) {
+    final lib = RustCrypto.ensureLib();
+    final fn = lib.lookupFunction<ffi.Int32 Function(ffi.Pointer<ffi.Char>),
+        int Function(ffi.Pointer<ffi.Char>)>('usn_table_load');
+    final ptr = path.toNativeUtf8().cast<ffi.Char>();
+    try {
+      return fn(ptr);
+    } finally {
+      calloc.free(ptr);
+    }
   }
 
   /// 建立索引（全量），返回条数并落盘
@@ -122,6 +265,19 @@ class DiskIndexService {
   /// 释放进程级索引内存 + 删除落盘文件（下次搜索自动重建）
   static Future<void> freeIndex() async {
     await Isolate.run(() => _freeSync());
+    if (Platform.isWindows) {
+      await Isolate.run(() {
+        final lib = RustCrypto.ensureLib();
+        final fn =
+            lib.lookupFunction<ffi.Void Function(), void Function()>(
+                'usn_table_free');
+        fn();
+      });
+      try {
+        final f = File(await _usnTablePath());
+        if (await f.exists()) await f.delete();
+      } catch (_) {}
+    }
     _cachedCount = null;
     try {
       final f = File(await _indexFilePath());

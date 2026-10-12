@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -14,7 +15,6 @@ import '../services/file_viewer_service.dart';
 import '../services/view_prefs_service.dart';
 import '../widgets/file_selection_bar.dart';
 import '../widgets/file_thumbnail.dart';
-import '../widgets/global_search_dialog.dart';
 import 'lan_transfer_screen.dart';
 
 /// WeiMi Vault 屏幕
@@ -91,6 +91,73 @@ class WeiMiVaultScreenState extends State<WeiMiVaultScreen> {
   String _fileQuery = '';
   final TextEditingController _fileSearchCtrl = TextEditingController();
 
+  // ============ 全盘搜索（桌面端主搜索框直搜，无独立窗口） ============
+  List<FileItem>? _globalResults; // 非 null = 浏览视图展示全盘结果
+  bool _globalSearching = false;
+  bool _indexBuilding = false;
+  Timer? _fileDebounce;
+
+  void _onFileSearchChanged(String v) {
+    setState(() => _fileQuery = v.trim());
+    _fileDebounce?.cancel();
+    if (!_isDesktop) return; // 移动端保持本地过滤
+    if (_fileQuery.isEmpty) {
+      setState(() {
+        _globalResults = null;
+        _globalSearching = false;
+        _indexBuilding = false;
+      });
+      return;
+    }
+    _fileDebounce =
+        Timer(const Duration(milliseconds: 300), _runFileGlobalSearch);
+  }
+
+  /// 桌面端全盘搜索：索引未就绪先建（首次约 1~2 分钟，之后毫秒级）
+  Future<void> _runFileGlobalSearch() async {
+    final q = _fileQuery;
+    if (q.isEmpty || _globalSearching) return;
+    setState(() => _globalSearching = true);
+    try {
+      if (!DiskIndexService.isBuilt) {
+        setState(() => _indexBuilding = true);
+        await DiskIndexService.prepareIndex();
+        if (!mounted) return;
+        setState(() => _indexBuilding = false);
+      }
+      final paths = await DiskIndexService.search(q);
+      if (!mounted) return;
+      setState(() {
+        _globalResults = paths.map((path) {
+          final name = p.basename(path);
+          var modified = DateTime.fromMillisecondsSinceEpoch(0);
+          var size = 0;
+          var isDir = false;
+          try {
+            final st = File(path).statSync();
+            modified = st.modified;
+            size = st.size;
+            isDir = FileSystemEntity.isDirectorySync(path);
+          } catch (_) {}
+          return FileItem(
+            name: name,
+            fullPath: path,
+            isDirectory: isDir,
+            size: size,
+            modified: modified,
+          );
+        }).toList();
+        _globalSearching = false;
+      });
+    } catch (_) {
+      if (!mounted) return;
+      setState(() {
+        _globalResults = [];
+        _globalSearching = false;
+      });
+    }
+  }
+
   bool get _isDesktop => !Platform.isAndroid && !Platform.isIOS;
   int _lastSelectIndex = -1; // 浏览视图 Shift 范围选择的锚点
 
@@ -104,6 +171,7 @@ class WeiMiVaultScreenState extends State<WeiMiVaultScreen> {
   @override
   void dispose() {
     _rootScroll.dispose();
+    _fileDebounce?.cancel();
     _fileSearchCtrl.dispose();
     super.dispose();
   }
@@ -761,31 +829,6 @@ class WeiMiVaultScreenState extends State<WeiMiVaultScreen> {
     await _deleteSelected();
   }
 
-  // ============ 全盘搜索（桌面端） ============
-
-  void _openGlobalSearch() {
-    showDialog<String>(
-      context: context,
-      builder: (ctx) => GlobalSearchDialog(initialQuery: _fileQuery),
-    ).then((path) {
-      if (path == null || !mounted) return;
-      try {
-        if (FileSystemEntity.isDirectorySync(path)) {
-          _navigateTo(path);
-        } else {
-          final f = File(path);
-          _openFile(FileItem(
-            name: p.basename(path),
-            fullPath: path,
-            isDirectory: false,
-            size: f.lengthSync(),
-            modified: f.lastModifiedSync(),
-          ));
-        }
-      } catch (_) {}
-    });
-  }
-
   /// 操作后统一刷新：浏览视图刷新当前目录，根视图失效展开缓存
   Future<void> _afterBatchChange(Iterable<String> touchedPaths) async {
     for (final dir in {for (final p0 in touchedPaths) p.dirname(p0)}) {
@@ -1015,7 +1058,8 @@ class WeiMiVaultScreenState extends State<WeiMiVaultScreen> {
     );
   }
 
-  /// 文件页固定搜索框：根视图过滤展开目录的子项，浏览视图过滤当前目录
+  /// 文件页固定搜索框：根视图过滤展开目录的子项，浏览视图本地过滤；
+  /// 桌面端输入即全盘搜索（结果直接替换浏览列表）
   Widget _buildFileSearchField() {
     return Padding(
       padding: const EdgeInsets.fromLTRB(12, 8, 12, 4),
@@ -1024,32 +1068,35 @@ class WeiMiVaultScreenState extends State<WeiMiVaultScreen> {
         decoration: InputDecoration(
           isDense: true,
           prefixIcon: const Icon(Icons.search, size: 20),
-          suffixIcon: Row(mainAxisSize: MainAxisSize.min, children: [
-            if (_isDesktop)
-              Padding(
-                padding: const EdgeInsets.symmetric(horizontal: 4),
-                child: ActionChip(
-                  label: const Text('全盘', style: TextStyle(fontSize: 12)),
-                  visualDensity: VisualDensity.compact,
-                  onPressed: _openGlobalSearch,
-                ),
-              ),
-            if (_fileQuery.isNotEmpty)
-              IconButton(
-                icon: const Icon(Icons.clear, size: 18),
-                onPressed: () {
-                  _fileSearchCtrl.clear();
-                  setState(() => _fileQuery = '');
-                },
-              ),
-          ]),
-          hintText: '搜索文件',
+          suffixIcon: _fileQuery.isEmpty
+              ? null
+              : (_globalSearching
+                  ? const Padding(
+                      padding: EdgeInsets.all(12),
+                      child: SizedBox(
+                        width: 16,
+                        height: 16,
+                        child: CircularProgressIndicator(strokeWidth: 2),
+                      ),
+                    )
+                  : IconButton(
+                      icon: const Icon(Icons.clear, size: 18),
+                      onPressed: () {
+                        _fileDebounce?.cancel();
+                        _fileSearchCtrl.clear();
+                        setState(() {
+                          _fileQuery = '';
+                          _globalResults = null;
+                        });
+                      },
+                    )),
+          hintText: _isDesktop ? '搜索全盘文件（毫秒级匹配）' : '搜索文件',
           border: OutlineInputBorder(
             borderRadius: BorderRadius.circular(10),
           ),
           contentPadding: const EdgeInsets.symmetric(vertical: 8),
         ),
-        onChanged: (v) => setState(() => _fileQuery = v.trim()),
+        onChanged: _onFileSearchChanged,
       ),
     );
   }
@@ -1465,8 +1512,9 @@ class WeiMiVaultScreenState extends State<WeiMiVaultScreen> {
     ),
   );
 
-  /// 浏览视图条目（搜索框过滤，不区分大小写）
+  /// 浏览视图条目：桌面端全盘模式下展示全盘结果，否则本地过滤当前目录
   List<FileItem> get _browseItems {
+    if (_globalResults != null) return _globalResults!;
     if (_fileQuery.isEmpty) return _items;
     final q = _fileQuery.toLowerCase();
     return _items.where((it) => it.name.toLowerCase().contains(q)).toList();
@@ -1476,7 +1524,7 @@ class WeiMiVaultScreenState extends State<WeiMiVaultScreen> {
     final items = _browseItems;
     if (items.isEmpty && _fileQuery.isNotEmpty) {
       return Center(
-        child: Text('没有匹配的文件',
+        child: Text(_globalResults != null ? '全盘没有找到匹配的文件' : '没有匹配的文件',
             style: TextStyle(fontSize: 14, color: Colors.grey.shade500)),
       );
     }

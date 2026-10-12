@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 
@@ -6,11 +7,11 @@ import 'package:flutter/services.dart';
 import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
 
+import '../services/disk_index_service.dart';
 import '../services/file_batch_ops.dart';
 import '../services/view_prefs_service.dart';
 import '../widgets/file_selection_bar.dart';
 import '../widgets/file_thumbnail.dart';
-import '../widgets/global_search_dialog.dart';
 
 /// 最近文件信息
 class RecentFileInfo {
@@ -120,6 +121,76 @@ class RecentFilesScreenState extends State<RecentFilesScreen> {
   FileCategory _filter = FileCategory.all;
   final TextEditingController _searchCtrl = TextEditingController();
 
+  // ============ 全盘搜索（主搜索框直搜，无独立窗口；Windows 走 USN journal 索引） ============
+  List<String>? _globalResults; // 非 null = 全盘结果模式（覆盖最近列表展示）
+  List<RecentFileInfo>? _globalInfos;
+  bool _globalSearching = false;
+  bool _indexBuilding = false;
+  String? _globalError;
+  Timer? _debounce;
+
+  bool get _globalMode => _globalResults != null;
+
+  /// 路径列表 → RecentFileInfo（同步 stat，本地磁盘 300 条约几十毫秒）
+  List<RecentFileInfo> _toInfos(List<String> paths) {
+    return paths.map((path) {
+      final name = path.split(Platform.isWindows ? '\\' : '/').last;
+      var mtime = DateTime.fromMillisecondsSinceEpoch(0);
+      var size = 0;
+      try {
+        final st = File(path).statSync();
+        mtime = st.modified;
+        size = st.size;
+      } catch (_) {}
+      return RecentFileInfo(path: path, name: name, modified: mtime, size: size);
+    }).toList();
+  }
+
+  void _onSearchChanged(String v) {
+    setState(() => _query = v.trim());
+    _debounce?.cancel();
+    if (_query.isEmpty) {
+      setState(() {
+        _globalResults = null;
+        _globalInfos = null;
+        _globalError = null;
+      });
+      return;
+    }
+    _debounce = Timer(const Duration(milliseconds: 300), _runGlobalSearch);
+  }
+
+  /// 全盘搜索：索引未就绪先建（首次约 1~2 分钟，之后毫秒级）
+  Future<void> _runGlobalSearch() async {
+    final q = _query;
+    if (q.isEmpty || _globalSearching) return;
+    setState(() {
+      _globalSearching = true;
+      _globalError = null;
+    });
+    try {
+      if (!DiskIndexService.isBuilt) {
+        setState(() => _indexBuilding = true);
+        await DiskIndexService.prepareIndex();
+        if (!mounted) return;
+        setState(() => _indexBuilding = false);
+      }
+      final r = await DiskIndexService.search(q);
+      if (!mounted) return;
+      setState(() {
+        _globalResults = r;
+        _globalInfos = _toInfos(r);
+        _globalSearching = false;
+      });
+    } catch (e) {
+      if (!mounted) return;
+      setState(() {
+        _globalSearching = false;
+        _globalError = e.toString();
+      });
+    }
+  }
+
   // ============ 多选模式 ============
   final Set<String> _selectedPaths = {};
   bool get _selecting => _selectedPaths.isNotEmpty;
@@ -134,16 +205,6 @@ class RecentFilesScreenState extends State<RecentFilesScreen> {
   // ============ 桌面端交互 ============
 
   bool get _isDesktop => !Platform.isAndroid && !Platform.isIOS;
-
-  /// 全盘搜索（桌面端搜索框右侧入口），选中后直接打开
-  Future<void> _openGlobalSearch() async {
-    final path = await GlobalSearchDialog.show(
-      context,
-      initialQuery: _query,
-    );
-    if (path == null || !mounted) return;
-    await widget.onOpenFile(path);
-  }
 
   /// 桌面端单击：Ctrl=加减选，普通=单选（双击打开，右键菜单）
   void _desktopTapPath(String path) {
@@ -241,6 +302,13 @@ class RecentFilesScreenState extends State<RecentFilesScreen> {
   FileCategory get filter => _filter;
 
   List<RecentFileInfo> get _filtered {
+    if (_globalMode) {
+      Iterable<RecentFileInfo> it = _globalInfos ?? [];
+      if (_filter != FileCategory.all) {
+        it = it.where((f) => FileThumbs.categoryOf(f.name) == _filter);
+      }
+      return it.toList();
+    }
     Iterable<RecentFileInfo> it = _files;
     if (_filter != FileCategory.all) {
       it = it.where((f) => FileThumbs.categoryOf(f.name) == _filter);
@@ -260,6 +328,7 @@ class RecentFilesScreenState extends State<RecentFilesScreen> {
 
   @override
   void dispose() {
+    _debounce?.cancel();
     _searchCtrl.dispose();
     super.dispose();
   }
@@ -768,18 +837,61 @@ class RecentFilesScreenState extends State<RecentFilesScreen> {
     }
 
     final files = _filtered;
+    final globalMode = _globalMode;
 
     Widget content;
-    if (files.isEmpty) {
+    if (globalMode && _globalSearching) {
       content = Center(
         child: Column(
           mainAxisAlignment: MainAxisAlignment.center,
           children: [
-            Icon(Icons.search_off, size: 56, color: Colors.grey.shade300),
+            const CircularProgressIndicator(),
+            const SizedBox(height: 16),
+            Text(
+              _indexBuilding
+                  ? '正在建立全盘索引（首次约 1~2 分钟，之后即时搜索）...'
+                  : '全盘搜索中...',
+              style: TextStyle(fontSize: 14, color: Colors.grey.shade600),
+            ),
+          ],
+        ),
+      );
+    } else if (globalMode && _globalError != null) {
+      content = Center(
+        child: Column(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            Icon(Icons.error_outline, size: 56, color: Colors.red.shade300),
             const SizedBox(height: 12),
-            Text('没有匹配的文件',
+            Text('全盘搜索失败: $_globalError',
+                style: TextStyle(fontSize: 13, color: Colors.grey.shade600)),
+          ],
+        ),
+      );
+    } else if (files.isEmpty) {
+      content = Center(
+        child: Column(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            Icon(
+                globalMode ? Icons.travel_explore : Icons.search_off,
+                size: 56,
+                color: Colors.grey.shade300),
+            const SizedBox(height: 12),
+            Text(
+                globalMode ? '全盘没有找到匹配的文件' : '没有匹配的文件',
                 style: TextStyle(fontSize: 14, color: Colors.grey.shade500)),
           ],
+        ),
+      );
+    } else if (globalMode) {
+      // 全盘结果模式：扁平列表（不按日期分组，mtime 对全盘结果无分区意义）
+      content = Scrollbar(
+        thumbVisibility: true,
+        child: ListView.builder(
+          physics: const AlwaysScrollableScrollPhysics(),
+          itemCount: files.length,
+          itemBuilder: (ctx, i) => _buildListTile(files[i]),
         ),
       );
     } else {
@@ -869,7 +981,7 @@ class RecentFilesScreenState extends State<RecentFilesScreen> {
       );
     }
 
-    // 固定顶部搜索框
+    // 固定顶部搜索框（直搜全盘：输入即全盘结果，无需打开独立窗口）
     content = Column(
       children: [
         Padding(
@@ -880,30 +992,57 @@ class RecentFilesScreenState extends State<RecentFilesScreen> {
               isDense: true,
               prefixIcon: const Icon(Icons.search, size: 20),
               suffixIcon: _query.isEmpty
-                  ? (_isDesktop
-                      ? IconButton(
-                          tooltip: '全盘搜索',
-                          icon: const Icon(Icons.travel_explore, size: 18),
-                          onPressed: _openGlobalSearch,
+                  ? null
+                  : (_globalSearching
+                      ? const Padding(
+                          padding: EdgeInsets.all(12),
+                          child: SizedBox(
+                            width: 16,
+                            height: 16,
+                            child: CircularProgressIndicator(strokeWidth: 2),
+                          ),
                         )
-                      : null)
-                  : IconButton(
-                      icon: const Icon(Icons.clear, size: 18),
-                      onPressed: () {
-                        _searchCtrl.clear();
-                        setState(() => _query = '');
-                      },
-                    ),
-              hintText: '搜索文件名',
+                      : IconButton(
+                          icon: const Icon(Icons.clear, size: 18),
+                          onPressed: () {
+                            _debounce?.cancel();
+                            _searchCtrl.clear();
+                            setState(() {
+                              _query = '';
+                              _globalResults = null;
+                              _globalInfos = null;
+                              _globalError = null;
+                            });
+                          },
+                        )),
+              hintText: '搜索全盘文件（输入文件名，毫秒级匹配）',
               border: OutlineInputBorder(
                 borderRadius: BorderRadius.circular(10),
               ),
               contentPadding: const EdgeInsets.symmetric(vertical: 8),
             ),
-            onChanged: (v) => setState(() => _query = v.trim()),
+            onChanged: _onSearchChanged,
           ),
         ),
-        if (_rescanning)
+        if (globalMode && _globalSearching)
+          const LinearProgressIndicator(minHeight: 2),
+        if (globalMode && _globalInfos != null && !_globalSearching)
+          Padding(
+            padding: const EdgeInsets.fromLTRB(14, 4, 14, 2),
+            child: Row(
+              children: [
+                Icon(Icons.travel_explore,
+                    size: 13, color: Colors.blue.shade400),
+                const SizedBox(width: 4),
+                Text(
+                  '全盘结果 ${_globalInfos!.length} 个（索引共 ${DiskIndexService.indexedCount ?? "?"} 个文件）',
+                  style: TextStyle(
+                      fontSize: 11, color: Colors.blue.shade400),
+                ),
+              ],
+            ),
+          ),
+        if (!globalMode && _rescanning)
           const LinearProgressIndicator(minHeight: 2),
         Expanded(child: content),
       ],
