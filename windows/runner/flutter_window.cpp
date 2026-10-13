@@ -9,19 +9,23 @@
 
 namespace {
 
-// 任务栏图标兜底：显式响应 WM_GETICON。
-// 类图标（WNDCLASS.hIcon）本身已设置，但插件（window_manager 等）子类化
-// 窗口过程后可能干扰 Explorer 的图标查询，导致任务栏显示默认图标。
-// 在消息转发给 Flutter/插件之前先行返回应用图标，确保任务栏/标题栏正确。
+// Taskbar icon fallback: answer WM_GETICON explicitly.
+// The class icon (WNDCLASS.hIcon) is already set, but plugin WndProc
+// subclassing (window_manager, system_tray, etc.) can interfere with
+// Explorer's icon query, leaving the taskbar showing the default icon.
+// Answering before the message is forwarded to Flutter/plugins guarantees
+// the taskbar/title bar always receive the application icon.
+// IMPORTANT: do not name any local identifier "small" -- <windows.h> (via
+// rpcndr.h) performs "#define small char", which corrupts "HICON small = ...".
 LRESULT HandleGetIcon(WPARAM wparam) {
   HMODULE module = GetModuleHandle(nullptr);
   if (wparam == ICON_SMALL) {
-    HICON small = static_cast<HICON>(LoadImage(
+    HICON small_icon = static_cast<HICON>(LoadImage(
         module, MAKEINTRESOURCE(IDI_APP_ICON), IMAGE_ICON,
         GetSystemMetrics(SM_CXSMICON), GetSystemMetrics(SM_CYSMICON),
         LR_SHARED));
-    if (small) {
-      return reinterpret_cast<LRESULT>(small);
+    if (small_icon) {
+      return reinterpret_cast<LRESULT>(small_icon);
     }
   }
   HICON icon = LoadIcon(module, MAKEINTRESOURCE(IDI_APP_ICON));
@@ -40,9 +44,9 @@ bool FlutterWindow::OnCreate() {
     return false;
   }
 
-  // 创建即挂窗口图标：任务栏按钮在窗口显示后立即创建，
-  // WM_SETICON 保证按钮/缩略图/跳转列表从一开始就拿到应用图标，
-  // 不依赖 Explorer 对类图标的回退查询。
+  // Attach the window icon at creation time so the taskbar button / thumbnail
+  // / jump list pick up the app icon immediately, without relying on Explorer
+  // falling back to the class icon.
   {
     HMODULE module = GetModuleHandle(nullptr);
     HICON icon = LoadIcon(module, MAKEINTRESOURCE(IDI_APP_ICON));
@@ -50,13 +54,13 @@ bool FlutterWindow::OnCreate() {
       SendMessage(GetHandle(), WM_SETICON, ICON_BIG,
                   reinterpret_cast<LPARAM>(icon));
     }
-    HICON small = static_cast<HICON>(LoadImage(
+    HICON small_icon = static_cast<HICON>(LoadImage(
         module, MAKEINTRESOURCE(IDI_APP_ICON), IMAGE_ICON,
         GetSystemMetrics(SM_CXSMICON), GetSystemMetrics(SM_CYSMICON),
         LR_SHARED));
-    if (small) {
+    if (small_icon) {
       SendMessage(GetHandle(), WM_SETICON, ICON_SMALL,
-                  reinterpret_cast<LPARAM>(small));
+                  reinterpret_cast<LPARAM>(small_icon));
     }
   }
 
@@ -71,7 +75,7 @@ bool FlutterWindow::OnCreate() {
     return false;
   }
   RegisterPlugins(flutter_controller_->engine());
-  
+
   auto registrar = flutter_controller_->engine()->GetRegistrarForPlugin("FileAssociationPlugin");
   auto plugin_registrar = flutter::PluginRegistrarManager::GetInstance()
       ->GetRegistrar<flutter::PluginRegistrarWindows>(registrar);
@@ -79,7 +83,7 @@ bool FlutterWindow::OnCreate() {
 
   ClipboardPluginRegisterWithRegistrar(
       flutter_controller_->engine()->GetRegistrarForPlugin("ClipboardPlugin"));
-  
+
   SetChildContent(flutter_controller_->view()->GetNativeWindow());
 
   flutter_controller_->engine()->SetNextFrameCallback([&]() {
@@ -106,8 +110,9 @@ LRESULT
 FlutterWindow::MessageHandler(HWND hwnd, UINT const message,
                               WPARAM const wparam,
                               LPARAM const lparam) noexcept {
-  // WM_GETICON 先于插件转发处理：确保 Explorer 的任务栏图标查询
-  // 永远拿到应用图标（不受任何插件窗口过程子类化影响）。
+  // Handle WM_GETICON before any plugin/Flutter forwarding so Explorer's
+  // taskbar icon query always gets the app icon, regardless of WndProc
+  // subclassing.
   if (message == WM_GETICON) {
     return HandleGetIcon(wparam);
   }
