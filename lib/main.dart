@@ -8,7 +8,9 @@ import 'package:desktop_drop/desktop_drop.dart';
 import 'package:cross_file/cross_file.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'framework/bootstrap.dart';
+import 'framework/module_registry.dart';
 import 'framework/setting_store.dart';
+import 'modules/language_module.dart';
 import 'modules/quick_search_module.dart';
 import 'services/tray_service.dart';
 import 'services/hotkey_service.dart';
@@ -124,6 +126,9 @@ class _MyAppState extends State<MyApp> {
   void initState() {
     super.initState();
     _localizationService = LocalizationService.getInstance();
+    // 语言模块挂接整机刷新回调：设置中心切语言后 UI 立即生效
+    final lang = ModuleRegistry.module('language');
+    if (lang is LanguageModule) lang.onLanguageChanged = _onLanguageChanged;
   }
 
   @override
