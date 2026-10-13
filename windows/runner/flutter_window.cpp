@@ -5,6 +5,30 @@
 #include "flutter/generated_plugin_registrant.h"
 #include "file_association_plugin.h"
 #include "clipboard_plugin.h"
+#include "resource.h"
+
+namespace {
+
+// 任务栏图标兜底：显式响应 WM_GETICON。
+// 类图标（WNDCLASS.hIcon）本身已设置，但插件（window_manager 等）子类化
+// 窗口过程后可能干扰 Explorer 的图标查询，导致任务栏显示默认图标。
+// 在消息转发给 Flutter/插件之前先行返回应用图标，确保任务栏/标题栏正确。
+LRESULT HandleGetIcon(WPARAM wparam) {
+  HMODULE module = GetModuleHandle(nullptr);
+  if (wparam == ICON_SMALL) {
+    HICON small = static_cast<HICON>(LoadImage(
+        module, MAKEINTRESOURCE(IDI_APP_ICON), IMAGE_ICON,
+        GetSystemMetrics(SM_CXSMICON), GetSystemMetrics(SM_CYSMICON),
+        LR_SHARED));
+    if (small) {
+      return reinterpret_cast<LRESULT>(small);
+    }
+  }
+  HICON icon = LoadIcon(module, MAKEINTRESOURCE(IDI_APP_ICON));
+  return icon ? reinterpret_cast<LRESULT>(icon) : 0;
+}
+
+}  // namespace
 
 FlutterWindow::FlutterWindow(const flutter::DartProject& project)
     : project_(project) {}
@@ -14,6 +38,26 @@ FlutterWindow::~FlutterWindow() {}
 bool FlutterWindow::OnCreate() {
   if (!Win32Window::OnCreate()) {
     return false;
+  }
+
+  // 创建即挂窗口图标：任务栏按钮在窗口显示后立即创建，
+  // WM_SETICON 保证按钮/缩略图/跳转列表从一开始就拿到应用图标，
+  // 不依赖 Explorer 对类图标的回退查询。
+  {
+    HMODULE module = GetModuleHandle(nullptr);
+    HICON icon = LoadIcon(module, MAKEINTRESOURCE(IDI_APP_ICON));
+    if (icon) {
+      SendMessage(GetHandle(), WM_SETICON, ICON_BIG,
+                  reinterpret_cast<LPARAM>(icon));
+    }
+    HICON small = static_cast<HICON>(LoadImage(
+        module, MAKEINTRESOURCE(IDI_APP_ICON), IMAGE_ICON,
+        GetSystemMetrics(SM_CXSMICON), GetSystemMetrics(SM_CYSMICON),
+        LR_SHARED));
+    if (small) {
+      SendMessage(GetHandle(), WM_SETICON, ICON_SMALL,
+                  reinterpret_cast<LPARAM>(small));
+    }
   }
 
   RECT frame = GetClientArea();
@@ -62,6 +106,12 @@ LRESULT
 FlutterWindow::MessageHandler(HWND hwnd, UINT const message,
                               WPARAM const wparam,
                               LPARAM const lparam) noexcept {
+  // WM_GETICON 先于插件转发处理：确保 Explorer 的任务栏图标查询
+  // 永远拿到应用图标（不受任何插件窗口过程子类化影响）。
+  if (message == WM_GETICON) {
+    return HandleGetIcon(wparam);
+  }
+
   // Give Flutter, including plugins, an opportunity to handle window messages.
   if (flutter_controller_) {
     std::optional<LRESULT> result =

@@ -12,6 +12,7 @@ import '../services/encryption_service.dart';
 import '../services/file_batch_ops.dart';
 import '../services/file_operations_service.dart';
 import '../services/file_viewer_service.dart';
+import '../services/quick_search_window.dart';
 import '../services/view_prefs_service.dart';
 import '../widgets/file_selection_bar.dart';
 import '../widgets/file_thumbnail.dart';
@@ -205,6 +206,13 @@ class WeiMiVaultScreenState extends State<WeiMiVaultScreen> {
   @override
   void initState() {
     super.initState();
+    // 浮窗「打开主界面 / 去主界面展示全部结果」带过来的搜索词：
+    // 写入搜索框并立即触发全盘搜索（不要像新开窗口一样丢掉关键词）。
+    final pending = WindowModeService.instance.takePendingQuery();
+    if (pending != null && pending.isNotEmpty) {
+      _fileSearchCtrl.text = pending;
+      _onFileSearchChanged(pending);
+    }
     _initRoot();
     _navigateTo(widget.initialPath ?? '');
     // 预热索引（加载旧索引毫秒级；无索引则后台全量构建），完成后计数自动刷新搜索框

@@ -1205,17 +1205,92 @@ pub extern "C" fn index_search(
     0
 }
 
-/// 索引落盘：路径列表 + 各目录 mtime + 根列表，二进制（magic WMIX + version）
+/// v1/v2 通用 body 写入：路径列表 + 各目录 mtime + 根列表。
+fn write_index_body<W: std::io::Write>(
+    w: &mut W,
+    paths: &[String],
+    rmt: &HashMap<String, i64>,
+    roots: &[String],
+) -> Result<(), ()> {
+    let wb = |w: &mut W, b: &[u8]| w.write_all(b).map_err(|_| ());
+    wb(w, &(paths.len() as u64).to_le_bytes())?;
+    for p in paths {
+        let b = p.as_bytes();
+        wb(w, &(b.len() as u32).to_le_bytes())?;
+        wb(w, b)?;
+    }
+    wb(w, &(rmt.len() as u64).to_le_bytes())?;
+    for (k, v) in rmt {
+        let b = k.as_bytes();
+        wb(w, &(b.len() as u32).to_le_bytes())?;
+        wb(w, b)?;
+        wb(w, &v.to_le_bytes())?;
+    }
+    wb(w, &(roots.len() as u64).to_le_bytes())?;
+    for r in roots {
+        let b = r.as_bytes();
+        wb(w, &(b.len() as u32).to_le_bytes())?;
+        wb(w, b)?;
+    }
+    Ok(())
+}
+
+/// v1/v2 通用 body 解析。
+fn parse_index_body<R: std::io::Read>(
+    r: &mut R,
+) -> Result<(Vec<String>, HashMap<String, i64>, Vec<String>), ()> {
+    let mut nbuf = [0u8; 8];
+    let mut rb = |r: &mut R, b: &mut [u8]| r.read_exact(b).map_err(|_| ());
+    rb(r, &mut nbuf)?;
+    let fc = u64::from_le_bytes(nbuf);
+    let mut paths = Vec::with_capacity(fc as usize);
+    for _ in 0..fc {
+        let mut lb = [0u8; 4];
+        rb(r, &mut lb)?;
+        let l = u32::from_le_bytes(lb) as usize;
+        let mut buf = vec![0u8; l];
+        rb(r, &mut buf)?;
+        paths.push(String::from_utf8_lossy(&buf).into_owned());
+    }
+    rb(r, &mut nbuf)?;
+    let mc = u64::from_le_bytes(nbuf);
+    let mut rmt = HashMap::with_capacity(mc as usize);
+    for _ in 0..mc {
+        let mut lb = [0u8; 4];
+        rb(r, &mut lb)?;
+        let l = u32::from_le_bytes(lb) as usize;
+        let mut buf = vec![0u8; l];
+        rb(r, &mut buf)?;
+        let key = String::from_utf8_lossy(&buf).into_owned();
+        let mut mb = [0u8; 8];
+        rb(r, &mut mb)?;
+        let mt = i64::from_le_bytes(mb);
+        rmt.insert(key, mt);
+    }
+    rb(r, &mut nbuf)?;
+    let rc = u64::from_le_bytes(nbuf);
+    let mut roots = Vec::with_capacity(rc as usize);
+    for _ in 0..rc {
+        let mut lb = [0u8; 4];
+        rb(r, &mut lb)?;
+        let l = u32::from_le_bytes(lb) as usize;
+        let mut buf = vec![0u8; l];
+        rb(r, &mut buf)?;
+        roots.push(String::from_utf8_lossy(&buf).into_owned());
+    }
+    Ok((paths, rmt, roots))
+}
+
+/// 索引落盘：magic WMIX + version。
+/// v2（当前）：body 整体 deflate 压缩（miniz_oxide），约 128MB → 18MB；
+/// v1（旧版未压缩）仍可读，升级后下一次落盘自动变为 v2。
 #[no_mangle]
 pub extern "C" fn index_save(file_ptr: *const c_char) -> i32 {
     let cpath = unsafe { CStr::from_ptr(file_ptr) };
     let path = cpath.to_string_lossy().to_string();
-    let f = match std::fs::File::create(&path) {
-        Ok(f) => f,
-        Err(_) => return -2,
-    };
-    let mut w = BufWriter::new(f);
-    {
+
+    // 先在内存里组 body（拿锁期间完成，不做 IO）
+    let body = {
         let pg = INDEX_PATHS.lock().unwrap();
         let rg = INDEX_DIR_MTIMES.lock().unwrap();
         let og = INDEX_ROOTS.lock().unwrap();
@@ -1231,54 +1306,33 @@ pub extern "C" fn index_save(file_ptr: *const c_char) -> i32 {
             Some(r) => r,
             None => return -1,
         };
-        if w.write_all(&[0x57u8, 0x4d, 0x49, 0x58]).is_err() {
+        let mut body: Vec<u8> = Vec::with_capacity(1 << 20);
+        if write_index_body(&mut body, paths, rmt, roots).is_err() {
             return -3;
         }
-        if w.write_all(&1u32.to_le_bytes()).is_err() {
-            return -3;
-        }
-        // 文件路径
-        if w.write_all(&(paths.len() as u64).to_le_bytes()).is_err() {
-            return -3;
-        }
-        for p in paths {
-            let b = p.as_bytes();
-            if w.write_all(&(b.len() as u32).to_le_bytes()).is_err() {
-                return -3;
-            }
-            if w.write_all(b).is_err() {
-                return -3;
-            }
-        }
-        // 目录 mtime
-        if w.write_all(&(rmt.len() as u64).to_le_bytes()).is_err() {
-            return -3;
-        }
-        for (k, v) in rmt {
-            let b = k.as_bytes();
-            if w.write_all(&(b.len() as u32).to_le_bytes()).is_err() {
-                return -3;
-            }
-            if w.write_all(b).is_err() {
-                return -3;
-            }
-            if w.write_all(&v.to_le_bytes()).is_err() {
-                return -3;
-            }
-        }
-        // 根列表
-        if w.write_all(&(roots.len() as u64).to_le_bytes()).is_err() {
-            return -3;
-        }
-        for r in roots {
-            let b = r.as_bytes();
-            if w.write_all(&(b.len() as u32).to_le_bytes()).is_err() {
-                return -3;
-            }
-            if w.write_all(b).is_err() {
-                return -3;
-            }
-        }
+        body
+    };
+
+    // body 压缩（zlib wrapper，level 6）
+    let compressed = miniz_oxide::deflate::compress_to_vec_zlib(&body, 6);
+
+    let f = match std::fs::File::create(&path) {
+        Ok(f) => f,
+        Err(_) => return -2,
+    };
+    let mut w = BufWriter::new(f);
+    if w.write_all(&[0x57u8, 0x4d, 0x49, 0x58]).is_err() {
+        return -3;
+    }
+    if w.write_all(&2u32.to_le_bytes()).is_err() {
+        return -3;
+    }
+    // v2: 压缩后长度 + 压缩 payload
+    if w.write_all(&(compressed.len() as u64).to_le_bytes()).is_err() {
+        return -3;
+    }
+    if w.write_all(&compressed).is_err() {
+        return -3;
     }
     match w.flush() {
         Ok(_) => 0,
@@ -1286,7 +1340,8 @@ pub extern "C" fn index_save(file_ptr: *const c_char) -> i32 {
     }
 }
 
-/// 从落盘文件恢复索引（成功返回 0）
+/// 从落盘文件恢复索引（成功返回 0）。
+/// 兼容 v1（未压缩）与 v2（deflate 压缩）。
 #[no_mangle]
 pub extern "C" fn index_load(file_ptr: *const c_char) -> i32 {
     let cpath = unsafe { CStr::from_ptr(file_ptr) };
@@ -1304,68 +1359,41 @@ pub extern "C" fn index_load(file_ptr: *const c_char) -> i32 {
     if r.read_exact(&mut ver).is_err() {
         return -4;
     }
-    let _ver = u32::from_le_bytes(ver);
-    let mut nbuf = [0u8; 8];
-    // 文件路径
-    if r.read_exact(&mut nbuf).is_err() {
-        return -4;
-    }
-    let fc = u64::from_le_bytes(nbuf);
-    let mut paths = Vec::with_capacity(fc as usize);
-    for _ in 0..fc {
-        let mut lb = [0u8; 4];
-        if r.read_exact(&mut lb).is_err() {
-            return -4;
+    let ver = u32::from_le_bytes(ver);
+    let (paths, rmt, roots) = match ver {
+        1 => match parse_index_body(&mut r) {
+            Ok(v) => v,
+            Err(_) => return -4,
+        },
+        2 => {
+            let mut nbuf = [0u8; 8];
+            if r.read_exact(&mut nbuf).is_err() {
+                return -4;
+            }
+            let clen = u64::from_le_bytes(nbuf) as usize;
+            // 上限保护：解压前校验长度（索引上限 100 万条，压缩后不会超过 64MB）
+            if clen == 0 || clen > (64 << 20) {
+                return -4;
+            }
+            let mut compressed = vec![0u8; clen];
+            if r.read_exact(&mut compressed).is_err() {
+                return -4;
+            }
+            let body = match miniz_oxide::inflate::decompress_to_vec_zlib_with_limit(
+                &compressed,
+                (256 << 20),
+            ) {
+                Ok(b) => b,
+                Err(_) => return -4,
+            };
+            let mut br = std::io::Cursor::new(body);
+            match parse_index_body(&mut br) {
+                Ok(v) => v,
+                Err(_) => return -4,
+            }
         }
-        let l = u32::from_le_bytes(lb) as usize;
-        let mut buf = vec![0u8; l];
-        if r.read_exact(&mut buf).is_err() {
-            return -4;
-        }
-        paths.push(String::from_utf8_lossy(&buf).into_owned());
-    }
-    // 目录 mtime
-    if r.read_exact(&mut nbuf).is_err() {
-        return -4;
-    }
-    let mc = u64::from_le_bytes(nbuf);
-    let mut rmt = HashMap::with_capacity(mc as usize);
-    for _ in 0..mc {
-        let mut lb = [0u8; 4];
-        if r.read_exact(&mut lb).is_err() {
-            return -4;
-        }
-        let l = u32::from_le_bytes(lb) as usize;
-        let mut buf = vec![0u8; l];
-        if r.read_exact(&mut buf).is_err() {
-            return -4;
-        }
-        let key = String::from_utf8_lossy(&buf).into_owned();
-        let mut mb = [0u8; 8];
-        if r.read_exact(&mut mb).is_err() {
-            return -4;
-        }
-        let mt = i64::from_le_bytes(mb);
-        rmt.insert(key, mt);
-    }
-    // 根列表
-    if r.read_exact(&mut nbuf).is_err() {
-        return -4;
-    }
-    let rc = u64::from_le_bytes(nbuf);
-    let mut roots = Vec::with_capacity(rc as usize);
-    for _ in 0..rc {
-        let mut lb = [0u8; 4];
-        if r.read_exact(&mut lb).is_err() {
-            return -4;
-        }
-        let l = u32::from_le_bytes(lb) as usize;
-        let mut buf = vec![0u8; l];
-        if r.read_exact(&mut buf).is_err() {
-            return -4;
-        }
-        roots.push(String::from_utf8_lossy(&buf).into_owned());
-    }
+        _ => return -4,
+    };
     *INDEX_PATHS.lock().unwrap() = Some(paths);
     *INDEX_DIR_MTIMES.lock().unwrap() = Some(rmt);
     *INDEX_ROOTS.lock().unwrap() = Some(roots);
