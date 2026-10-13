@@ -17,6 +17,21 @@ int APIENTRY wWinMain(_In_ HINSTANCE instance, _In_opt_ HINSTANCE prev,
   // plugins.
   ::CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
 
+  // Set an explicit AppUserModelID so Windows 7+ taskbar associates the
+  // window button with our app icon. Loaded dynamically to avoid a link
+  // dependency on shell32.lib.
+  typedef HRESULT(WINAPI *SetAppIdFn)(PCWSTR);
+  HMODULE shell_module = ::LoadLibraryW(L"shell32.dll");
+  if (shell_module) {
+    SetAppIdFn set_app_id = reinterpret_cast<SetAppIdFn>(
+        ::GetProcAddress(shell_module,
+                         "SetCurrentProcessExplicitAppUserModelID"));
+    if (set_app_id) {
+      set_app_id(L"WeiMi.File.App");
+    }
+    ::FreeLibrary(shell_module);
+  }
+
   flutter::DartProject project(L"data");
 
   std::vector<std::string> command_line_arguments =

@@ -155,6 +155,13 @@ class TrayService {
     try {
       await LanTransferService.instance.stopReceiving();
     } catch (_) {}
+    // 先删托盘图标再退进程：否则 exit(0) 瞬间终止，Explorer 里残留
+    // 幽灵托盘图标（要鼠标移上去才清理）。destroy 失败不阻退出。
+    try {
+      await _tray.destroy();
+    } catch (e) {
+      debugPrint('tray: destroy failed: $e');
+    }
     exit(0);
   }
 
