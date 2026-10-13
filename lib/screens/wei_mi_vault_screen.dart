@@ -179,7 +179,7 @@ class WeiMiVaultScreenState extends State<WeiMiVaultScreen> {
   }
 
   Future<void> _loadSearchHistory() async {
-    final items = await SearchHistoryService.instance.load();
+    final items = await SearchHistoryService.load();
     if (mounted) setState(() => _searchHistory = items);
   }
 
@@ -193,7 +193,7 @@ class WeiMiVaultScreenState extends State<WeiMiVaultScreen> {
   }
 
   Future<void> _clearSearchHistory() async {
-    await SearchHistoryService.instance.clear();
+    await SearchHistoryService.clear();
     if (mounted) setState(() => _searchHistory = []);
   }
 
@@ -272,7 +272,7 @@ class WeiMiVaultScreenState extends State<WeiMiVaultScreen> {
       if (!mounted) return;
       // 落一条搜索历史（去重 + 按 qs_history_limit 裁剪），供下次聚焦搜索框展示
       unawaited(() async {
-        final items = await SearchHistoryService.instance.record(q);
+        final items = await SearchHistoryService.record(q);
         if (mounted) setState(() => _searchHistory = items);
       }());
       // 空结果兜底：索引明显过期（如加载的是旧落盘索引、新建文件还没进索引）
