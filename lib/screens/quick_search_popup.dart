@@ -337,7 +337,16 @@ class _QuickSearchPopupState extends State<QuickSearchPopup> {
               Expanded(
                 child: Listener(
                   onPointerSignal: (event) {
-                    if (event is PointerScrollEvent) _onWheel(event.scrollDelta.dy);
+                    // 兼容各 Flutter 版本：滚轮事件基类为 PointerSignalEvent，
+                    // 具体滚轮子类（PointerScrollEvent）携带 scrollDelta，但不保证被导出。
+                    double dy = 0;
+                    try {
+                      final d = (event as dynamic).scrollDelta;
+                      if (d is Offset) dy = d.dy;
+                    } catch (_) {
+                      dy = 0;
+                    }
+                    if (dy != 0) _onWheel(dy);
                   },
                   child: _buildBody(theme),
                 ),
