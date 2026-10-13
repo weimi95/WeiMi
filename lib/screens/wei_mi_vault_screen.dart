@@ -272,8 +272,11 @@ class WeiMiVaultScreenState extends State<WeiMiVaultScreen> {
       if (!mounted) return;
       // 落一条搜索历史（去重 + 按 qs_history_limit 裁剪），供下次聚焦搜索框展示
       unawaited(() async {
-        final items = await SearchHistoryService.record(q);
-        if (mounted) setState(() => _searchHistory = items);
+        await SearchHistoryService.record(q);
+        if (mounted) {
+          final items = await SearchHistoryService.load();
+          if (mounted) setState(() => _searchHistory = items);
+        }
       }());
       // 空结果兜底：索引明显过期（如加载的是旧落盘索引、新建文件还没进索引）
       // 时后台重建一次并自动重搜，避免「文件明明存在却搜不到」。
