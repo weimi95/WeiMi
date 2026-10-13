@@ -23,6 +23,10 @@ import 'exclude_service.dart';
 class DiskIndexService {
   static int? _cachedCount;
   static DateTime? _lastBuiltAt;
+  /// 上次索引落盘时间（内存重建不写盘，落盘间隔超过 _persistMaxAge 才补写，
+  /// 避免落盘索引无限腐化——v1.0.43 修复）
+  static DateTime? _lastPersistAt;
+  static const Duration _persistMaxAge = Duration(minutes: 30);
   static bool _building = false; // 防重入：全量构建进行中时不再叠加
 
   /// 是否把移动设备（U盘/移动硬盘，DRIVE_REMOVABLE）纳入索引（仅 Windows 有意义）。
@@ -169,9 +173,13 @@ class DiskIndexService {
     if (_lastBuiltAt != null && now.difference(_lastBuiltAt!) < maxAge) {
       return _cachedCount!;
     }
-    // 周期性刷新只更新内存索引，不重复写盘（避免约 100MB 索引文件频繁落盘）。
-    // 落盘由首次 buildIndex（persist 默认 true）完成，作为下次启动的快速加载源。
-    return buildIndex(defaultRoots(), persist: false);
+    // 周期性刷新默认只更新内存索引，不重复写盘（避免约 100MB 索引文件频繁落盘）。
+    // 但若距上次落盘已超过 _persistMaxAge，本次重建顺带 persist——
+    // 否则落盘索引会无限腐化（v1.0.43 修复：32 小时前的旧索引反复加载，
+    // 每次重启都丢一批 watcher 启动前新建的文件）。
+    final needPersist = _lastPersistAt == null ||
+        now.difference(_lastPersistAt!) >= _persistMaxAge;
+    return buildIndex(defaultRoots(), persist: needPersist);
   }
 
   // ==================== USN journal 索引（Windows NTFS，方案B） ====================
@@ -320,7 +328,10 @@ class DiskIndexService {
       _cachedCount = n;
       _lastBuiltAt = DateTime.now();
       countNotifier.value = n;
-      if (persist) await saveIndex();
+      if (persist) {
+        await saveIndex();
+        _lastPersistAt = DateTime.now();
+      }
       return n;
     } finally {
       _building = false;
@@ -339,7 +350,9 @@ class DiskIndexService {
       try {
         final f = File(path);
         if (await f.exists()) {
-          _lastBuiltAt = (await f.stat()).modified;
+          final m = (await f.stat()).modified;
+          _lastBuiltAt = m;
+          _lastPersistAt = m;
         }
       } catch (_) {}
     }
@@ -615,8 +628,11 @@ class DiskIndexService {
       }
       if (dirty > 0) {
         _cachedCount = await count();
-        _lastBuiltAt = DateTime.now(); // 有增量合并，全量重建退避
         countNotifier.value = _cachedCount;
+        // 注意：不刷新 _lastBuiltAt。增量合并不代表全量构建刚发生过——
+        // 若在此续期，托盘 rebuildIfStale 的 5 分钟退避将永远满足，
+        // 全量重建被永久压制（v1.0.43 修复：旧索引+启动前丢失事件
+        // 导致新文件永远搜不到的根因）。
       }
     } catch (_) {}
   }
