@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:io';
 import 'dart:convert';
 import 'package:flutter/material.dart';
@@ -6,7 +7,12 @@ import 'package:file_picker/file_picker.dart';
 import 'package:desktop_drop/desktop_drop.dart';
 import 'package:cross_file/cross_file.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import 'framework/bootstrap.dart';
+import 'framework/setting_store.dart';
+import 'modules/quick_search_module.dart';
 import 'services/tray_service.dart';
+import 'services/hotkey_service.dart';
+import 'services/quick_search_window.dart';
 import 'services/file_operations_service.dart';
 import 'services/encryption_service.dart';
 import 'services/file_viewer_service.dart';
@@ -19,6 +25,7 @@ import 'screens/language_screen.dart';
 import 'screens/wei_mi_vault_screen.dart';
 import 'screens/operation_history_screen.dart';
 import 'screens/settings_screen.dart';
+import 'screens/quick_search_popup.dart';
 import 'services/lan_transfer_service.dart';
 import 'services/view_prefs_service.dart';
 import 'services/share_receive_service.dart';
@@ -47,6 +54,10 @@ void main() async {
 
   // 桌面端：加载关闭按钮行为设置（收托盘/退出/询问）
   await TrayService.instance.loadPrefs();
+
+  // 统一设置层 + 功能模块注册表（设置中心/文件动作的单一数据源）
+  await SettingStore.init();
+  bootstrapModules();
 
   // 局域网接收文件的兜底目录（用户未设置加密目录时用）
   try {
@@ -80,6 +91,19 @@ void main() async {
       await TrayService.instance.initDesktop();
     } catch (e) {
       debugPrint('desktop init failed: $e');
+    }
+    // 全局「双击 Ctrl」呼出快捷搜索浮窗（仅 Windows：GetAsyncKeyState 轮询）
+    if (Platform.isWindows) {
+      HotkeyService.instance.onDoubleCtrl = () =>
+          unawaited(WindowModeService.instance.togglePopup());
+      QuickSearchActions.onEnabledChanged = (enabled) {
+        if (enabled) {
+          HotkeyService.instance.start();
+        } else {
+          HotkeyService.instance.stop();
+        }
+      };
+      HotkeyService.instance.start();
     }
   }
 
@@ -127,9 +151,14 @@ class _MyAppState extends State<MyApp> {
             colorScheme: ColorScheme.fromSeed(seedColor: Colors.blue),
             useMaterial3: true,
           ),
-          home: HomePage(
-            localizationService: localizationService,
-            onLanguageChanged: _onLanguageChanged,
+          home: ValueListenableBuilder<bool>(
+            valueListenable: WindowModeService.instance.popupMode,
+            builder: (ctx, popup, _) => popup
+                ? const QuickSearchPopup()
+                : HomePage(
+                    localizationService: localizationService,
+                    onLanguageChanged: _onLanguageChanged,
+                  ),
           ),
         );
       },

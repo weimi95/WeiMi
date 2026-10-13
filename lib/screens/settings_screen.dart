@@ -1,21 +1,14 @@
-import 'dart:async';
-import 'dart:io';
-
-import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
-import 'package:path_provider/path_provider.dart';
-import '../services/autostart_service.dart';
-import '../services/disk_index_service.dart';
-import '../services/lan_transfer_service.dart';
-import '../services/tray_service.dart';
-import '../services/trusted_devices_service.dart';
-import '../services/receive_notify_service.dart';
-import 'exclude_settings_screen.dart';
 
-/// 设置页（单进程方案：直接调本进程 LanTransferService 单例）
-/// - 微密飞传：网页快传开关、本机名称、信任设备
-/// - 通用：清理缓存
-/// - 桌面端：开机自动启动微密文件（常驻托盘）
+import '../framework/module_registry.dart';
+import '../framework/setting_store.dart';
+
+/// 设置中心：分类导航 + 注册表渲染。
+///
+/// 左侧（宽屏）或顶部（窄屏）的分类来自各功能模块的注册
+/// （见 framework/module_registry.dart），设置项由模块通过
+/// SettingDef 贡献，本页只负责渲染与读写（统一走 SettingStore）。
+/// 新增功能的设置 = 模块里加一条 SettingDef，无需改本页。
 class SettingsScreen extends StatefulWidget {
   const SettingsScreen({super.key});
 
@@ -24,470 +17,399 @@ class SettingsScreen extends StatefulWidget {
 }
 
 class _SettingsScreenState extends State<SettingsScreen> {
-  bool _webShare = true;
-  bool _recvNotify = true;
-  bool _autostartTray = false;
-  String _selfName = '本机';
-  List<MapEntry<String, String>> _trusted = [];
-  String _receiveDir = '';
-  String _effectiveDir = '';
-  bool _openRecvDir = false;
-  bool _discoverEnabled = true;
-  bool _isDesktop = false;
-  /// 全盘搜索是否扫描索引移动设备（U盘/移动硬盘，仅 Windows）
-  bool _indexRemovable = false;
-  /// 关闭按钮行为：'prompt' | 'minimize' | 'quit'
-  String _closeAction = 'prompt';
+  String? _selectedId;
 
   @override
   void initState() {
     super.initState();
-    _isDesktop = !Platform.isAndroid && !Platform.isIOS;
-    _load();
+    final mods = ModuleRegistry.modules;
+    if (mods.isNotEmpty) _selectedId = mods.first.id;
   }
 
-  Future<void> _load() async {
-    if (!mounted) return;
-    final svc = LanTransferService.instance;
-    if (mounted) {
-      setState(() {
-        _webShare = svc.webShareEnabled;
-        _selfName = svc.selfName.isEmpty ? '本机' : svc.selfName;
-        _recvNotify = ReceiveNotifyService.instance.enabled;
-        _receiveDir = svc.receiveDir;
-        _openRecvDir = ReceiveNotifyService.instance.openDir;
-        _discoverEnabled = svc.discoverEnabled;
-      });
-    }
-    // 信任设备列表来自本进程持久化文件，强制重读最新内容
-    await TrustedDevices.instance.reload();
-    if (mounted) setState(() => _trusted = TrustedDevices.instance.all);
-    // 当前生效的接收目录（未指定时显示默认目录实际路径）
-    try {
-      final eff = await svc.effectiveReceiveDir();
-      if (mounted) setState(() => _effectiveDir = eff);
-    } catch (_) {}
-    if (_isDesktop) {
-      if (AutostartService.supported) {
-        final enabled =
-            await AutostartService.isEnabled(valueName: 'WeiMiFile');
-        if (mounted) setState(() => _autostartTray = enabled);
-      }
-      _closeAction = TrayService.instance.closeAction;
-      if (mounted) setState(() {});
-    }
-    if (Platform.isWindows) {
-      await DiskIndexService.loadRemovablePref();
-      if (mounted) {
-        setState(() => _indexRemovable = DiskIndexService.includeRemovable);
-      }
-    }
-  }
-
-  Future<void> _pickCloseAction() async {
-    final cur = TrayService.instance.closeAction;
-    final picked = await showDialog<String>(
-      context: context,
-      builder: (ctx) => AlertDialog(
-        title: const Text('点右上角关闭按钮时'),
-        content: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            _closeActionRadio(ctx, 'prompt', '弹窗询问（默认）',
-                '每次弹确认框问「收进托盘 / 退出」', cur),
-            _closeActionRadio(ctx, 'minimize', '直接收进托盘',
-                '静默最小化，微密飞传后台常驻', cur),
-            _closeActionRadio(ctx, 'quit', '直接退出程序',
-                '静默退出，需从托盘图标重新打开', cur),
-          ],
-        ),
-        actions: [
-          TextButton(
-              onPressed: () => Navigator.pop(ctx), child: const Text('取消')),
-        ],
-      ),
-    );
-    if (picked != null && mounted) {
-      await TrayService.instance.setCloseAction(picked);
-      setState(() => _closeAction = picked);
-    }
-  }
-
-  Widget _closeActionRadio(BuildContext ctx, String value, String title,
-      String subtitle, String cur) {
-    final selected = cur == value;
-    return RadioListTile<String>(
-      value: value,
-      groupValue: cur,
-      onChanged: (v) => Navigator.pop(ctx, v),
-      contentPadding: const EdgeInsets.only(bottom: 4),
-      dense: true,
-      title: Text(title,
-          style: TextStyle(
-              fontWeight: selected ? FontWeight.bold : FontWeight.normal)),
-      subtitle: Text(subtitle, style: const TextStyle(fontSize: 12)),
-    );
-  }
-
-  Future<void> _toggleWebShare(bool v) async {
-    await LanTransferService.instance.setWebShareEnabled(v);
-    if (mounted) setState(() => _webShare = v);
-  }
-
-  Future<void> _toggleRecvNotify(bool v) async {
-    await ReceiveNotifyService.instance.setEnabled(v);
-    if (mounted) setState(() => _recvNotify = v);
-  }
-
-  Future<void> _toggleOpenRecvDir(bool v) async {
-    await ReceiveNotifyService.instance.setOpenDir(v);
-    if (mounted) setState(() => _openRecvDir = v);
-  }
-
-  Future<void> _toggleDiscover(bool v) async {
-    await LanTransferService.instance.setDiscoverEnabled(v);
-    if (mounted) {
-      setState(() => _discoverEnabled = v);
-      _snack(v
-          ? '已开启：其他设备可搜索到本机（网页快传不受影响）'
-          : '已关闭：其他设备搜索不到本机（网页快传仍可用）');
-    }
-  }
-
-  Future<void> _pickReceiveDir() async {
-    final picked = await FilePicker.platform.getDirectoryPath(
-        dialogTitle: '选择飞传接收文件的保存目录');
-    if (picked == null || picked.isEmpty || !mounted) return;
-    // Android 的目录选择器返回 SAF URI（primary:Download），转成真实路径
-    var dir = picked;
-    if (Platform.isAndroid && !picked.startsWith('/')) {
-      final parts = picked.split(':');
-      dir = parts.length == 2 ? '/storage/emulated/0${parts[1]}' : '';
-    }
-    if (dir.isEmpty || !await Directory(dir).exists()) {
-      _snack('该目录不可用，已取消');
-      return;
-    }
-    await LanTransferService.instance.setReceiveDir(dir);
-    if (mounted) {
-      setState(() {
-        _receiveDir = dir;
-        _effectiveDir = dir;
-      });
-    }
-    _snack('飞传接收文件将保存到：$dir');
-  }
-
-  /// 清除单独指定的接收目录，回到默认目录（独立于加密文件目录）
-  Future<void> _resetReceiveDir() async {
-    await LanTransferService.instance.setReceiveDir('');
-    if (!mounted) return;
-    String eff = '';
-    try {
-      eff = await LanTransferService.instance.effectiveReceiveDir();
-    } catch (_) {}
-    if (mounted) {
-      setState(() {
-        _receiveDir = '';
-        _effectiveDir = eff;
-      });
-      _snack(eff.isEmpty ? '已恢复默认接收目录' : '已恢复默认接收目录：$eff');
-    }
-  }
-
-  Future<void> _openReceiveDir() async {
-    final dir = _receiveDir.trim();
-    if (dir.isEmpty) return;
-    try {
-      if (Platform.isWindows) {
-        await Process.run('explorer.exe', [dir.replaceAll('/', '\\')]);
-      } else if (Platform.isMacOS) {
-        await Process.run('open', [dir]);
-      } else if (Platform.isLinux) {
-        await Process.run('xdg-open', [dir]);
-      }
-    } catch (_) {}
-  }
-
-  void _snack(String msg) {
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(content: Text(msg), duration: const Duration(seconds: 2)),
-    );
-  }
-
-  Future<void> _toggleAutostartTray(bool v) async {
-    final ok = await AutostartService.setEnabled(v,
-        exePath: Platform.resolvedExecutable, valueName: 'WeiMiFile');
-    if (mounted) {
-      setState(() => _autostartTray = ok ? v : _autostartTray);
-      ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-        content: Text(ok
-            ? (v ? '已开启开机自动启动微密文件' : '已关闭开机自动启动微密文件')
-            : '设置失败，请检查系统权限'),
-        backgroundColor: ok ? Colors.green : Colors.red,
-      ));
-    }
-  }
-
-  Future<void> _editName() async {
-    final controller =
-        TextEditingController(text: _selfName == '本机' ? '' : _selfName);
-    final r = await showDialog<String>(
-      context: context,
-      builder: (ctx) => AlertDialog(
-        title: const Text('本机名称'),
-        content: TextField(
-          controller: controller,
-          maxLength: 20,
-          decoration: const InputDecoration(hintText: '对方设备列表里显示的名字'),
-        ),
-        actions: [
-          TextButton(
-              onPressed: () => Navigator.pop(ctx), child: const Text('取消')),
-          TextButton(
-              onPressed: () => Navigator.pop(ctx, controller.text),
-              child: const Text('保存')),
-        ],
-      ),
-    );
-    if (r != null && r.trim().isNotEmpty && mounted) {
-      await LanTransferService.instance.setSelfName(r.trim());
-      setState(() => _selfName = r.trim());
-    }
-  }
-
-  Future<void> _removeTrusted(String id) async {
-    await TrustedDevices.instance.remove(id);
-    await TrustedDevices.instance.reload();
-    if (mounted) setState(() => _trusted = TrustedDevices.instance.all);
-  }
-
-  Future<void> _clearCache() async {
-    int cleared = 0;
-    try {
-      final tmp = await getTemporaryDirectory();
-      cleared = await _dirSize(tmp);
-      // 清空临时目录内容（保留目录本身）
-      if (await tmp.exists()) {
-        await for (final e in tmp.list()) {
-          try {
-            await e.delete(recursive: true);
-          } catch (_) {}
-        }
-      }
-    } catch (_) {}
-    // Android 上顺带清 file_picker 缓存
-    if (Platform.isAndroid) {
-      try {
-        await FilePicker.platform.clearTemporaryFiles();
-      } catch (_) {}
-    }
-    if (mounted) {
-      ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-        content: Text('已清理 ${_fmtSize(cleared)} 缓存'),
-        backgroundColor: Colors.green,
-      ));
-    }
-  }
-
-  Future<int> _dirSize(Directory dir) async {
-    int total = 0;
-    try {
-      await for (final e in dir.list(recursive: true, followLinks: false)) {
-        if (e is File) {
-          try {
-            total += await e.length();
-          } catch (_) {}
-        }
-      }
-    } catch (_) {}
-    return total;
-  }
-
-  String _fmtSize(int bytes) {
-    if (bytes < 1024) return '$bytes B';
-    if (bytes < 1024 * 1024) return '${(bytes / 1024).toStringAsFixed(1)} KB';
-    if (bytes < 1024 * 1024 * 1024) {
-      return '${(bytes / 1024 / 1024).toStringAsFixed(1)} MB';
-    }
-    return '${(bytes / 1024 / 1024 / 1024).toStringAsFixed(2)} GB';
+  FeatureModule? get _current {
+    final id = _selectedId;
+    if (id == null) return null;
+    return ModuleRegistry.module(id);
   }
 
   @override
   Widget build(BuildContext context) {
+    final mods = ModuleRegistry.modules;
+    final wide = MediaQuery.of(context).size.width >= 860;
+
     return Scaffold(
       appBar: AppBar(title: const Text('设置')),
-      body: ListView(
+      body: mods.isEmpty
+          ? const Center(child: Text('暂无设置项'))
+          : wide
+              ? Row(
+                  children: [
+                    SizedBox(
+                      width: 220,
+                      child: _CategoryNav(
+                        modules: mods,
+                        selectedId: _selectedId,
+                        onSelect: (id) => setState(() => _selectedId = id),
+                      ),
+                    ),
+                    const VerticalDivider(width: 1),
+                    Expanded(child: _SettingsPanel(module: _current)),
+                  ],
+                )
+              : Column(
+                  children: [
+                    _CategoryTabs(
+                      modules: mods,
+                      selectedId: _selectedId,
+                      onSelect: (id) => setState(() => _selectedId = id),
+                    ),
+                    const Divider(height: 1),
+                    Expanded(child: _SettingsPanel(module: _current)),
+                  ],
+                ),
+    );
+  }
+}
+
+/// 宽屏左侧分类导航。
+class _CategoryNav extends StatelessWidget {
+  const _CategoryNav({
+    required this.modules,
+    required this.selectedId,
+    required this.onSelect,
+  });
+
+  final List<FeatureModule> modules;
+  final String? selectedId;
+  final ValueChanged<String> onSelect;
+
+  @override
+  Widget build(BuildContext context) {
+    return ListView(
+      padding: const EdgeInsets.symmetric(vertical: 8, horizontal: 8),
+      children: [
+        for (final m in modules)
+          Container(
+            margin: const EdgeInsets.only(bottom: 2),
+            decoration: BoxDecoration(
+              color: m.id == selectedId
+                  ? Theme.of(context).colorScheme.primaryContainer
+                  : null,
+              borderRadius: BorderRadius.circular(10),
+            ),
+            child: ListTile(
+              dense: true,
+              shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(10)),
+              leading: Icon(m.icon, size: 20),
+              title: Text(m.name,
+                  style: const TextStyle(
+                      fontSize: 14, fontWeight: FontWeight.w500)),
+              selected: m.id == selectedId,
+              onTap: () => onSelect(m.id),
+            ),
+          ),
+      ],
+    );
+  }
+}
+
+/// 窄屏顶部分类横滑标签。
+class _CategoryTabs extends StatelessWidget {
+  const _CategoryTabs({
+    required this.modules,
+    required this.selectedId,
+    required this.onSelect,
+  });
+
+  final List<FeatureModule> modules;
+  final String? selectedId;
+  final ValueChanged<String> onSelect;
+
+  @override
+  Widget build(BuildContext context) {
+    return SizedBox(
+      height: 52,
+      child: ListView(
+        scrollDirection: Axis.horizontal,
+        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 8),
         children: [
-          _sectionHeader('微密飞传'),
-          SwitchListTile(
-            secondary: const Icon(Icons.language),
-            title: const Text('网页快传'),
-            subtitle: const Text(
-                '浏览器打开 http://本机IP:端口 即可发送文件/文本给本机，免确认直接接收'),
-            value: _webShare,
-            onChanged: _toggleWebShare,
-          ),
-          SwitchListTile(
-            secondary: const Icon(Icons.radar),
-            title: const Text('可被发现'),
-            subtitle: const Text(
-                '关闭后停止局域网广播，其他设备搜不到本机（网页快传不受影响）'),
-            value: _discoverEnabled,
-            onChanged: _toggleDiscover,
-          ),
-          SwitchListTile(
-            secondary: const Icon(Icons.notifications_active_outlined),
-            title: const Text('接收完成通知'),
-            subtitle: const Text(
-                '收到文件/文本后提示一下（电脑为系统通知，点通知可打开文件所在目录；手机为应用内横幅）'),
-            value: _recvNotify,
-            onChanged: _toggleRecvNotify,
-          ),
-          ListTile(
-            leading: const Icon(Icons.download_outlined),
-            title: const Text('接收保存目录'),
-            subtitle: Text(
-              _receiveDir.isEmpty
-                  ? (_effectiveDir.isEmpty ? '默认：文档目录/微密飞传接收' : '默认：$_effectiveDir')
-                  : _receiveDir,
-              maxLines: 2,
-              overflow: TextOverflow.ellipsis,
-            ),
-            trailing: Row(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                if (_receiveDir.isNotEmpty) ...[
-                  TextButton(
-                    onPressed: _openReceiveDir,
-                    child: const Text('打开', style: TextStyle(fontSize: 12)),
-                  ),
-                  TextButton(
-                    onPressed: _resetReceiveDir,
-                    child: const Text('默认', style: TextStyle(fontSize: 12)),
-                  ),
-                ],
-                const Icon(Icons.chevron_right),
-              ],
-            ),
-            onTap: _pickReceiveDir,
-          ),
-          if (_isDesktop)
-            SwitchListTile(
-              secondary: const Icon(Icons.folder_open_outlined),
-              title: const Text('接收后自动打开文件夹'),
-              subtitle: const Text('收到文件后自动打开保存目录（配合上面的通知）'),
-              value: _openRecvDir,
-              onChanged: _toggleOpenRecvDir,
-            ),
-          ListTile(
-            leading: const Icon(Icons.badge_outlined),
-            title: const Text('本机名称'),
-            subtitle: Text(_selfName),
-            trailing: const Icon(Icons.chevron_right),
-            onTap: _editName,
-          ),
-          ListTile(
-            leading: const Icon(Icons.verified_user_outlined),
-            title: const Text('信任设备'),
-            subtitle: Text(
-                '${_trusted.length} 台 · 信任过的设备发来文件/文本免确认直接接收'),
-          ),
-          if (_trusted.isEmpty)
-            const Padding(
-              padding: EdgeInsets.only(left: 56, right: 16, bottom: 8),
-              child: Text('暂无信任设备。在飞传页点设备右侧菜单「添加信任」。',
-                  style: TextStyle(fontSize: 12)),
-            )
-          else
-            ..._trusted.map((e) => ListTile(
-                  contentPadding: const EdgeInsets.only(left: 56, right: 8),
-                  leading: const Icon(Icons.devices, size: 20),
-                  title: Text(e.value, style: const TextStyle(fontSize: 14)),
-                  trailing: TextButton(
-                    onPressed: () => _removeTrusted(e.key),
-                    child: const Text('移除',
-                        style: TextStyle(color: Colors.red)),
-                  ),
-                )),
-          const Divider(),
-          _sectionHeader('全盘搜索'),
-          if (Platform.isWindows)
-            SwitchListTile(
-              secondary: const Icon(Icons.usb),
-              title: const Text('扫描索引移动设备'),
-              subtitle: const Text(
-                  'U盘、移动硬盘等可移动磁盘纳入全盘索引（改动后自动重建索引）'),
-              value: _indexRemovable,
-              onChanged: _toggleIndexRemovable,
-            ),
-          ListTile(
-            leading: const Icon(Icons.folder_off_outlined),
-            title: const Text('排除文件夹'),
-            subtitle: const Text('这些文件夹不扫描不索引，可加快搜索、省内存'),
-            trailing: const Icon(Icons.chevron_right),
-            onTap: () {
-              Navigator.push(
-                context,
-                MaterialPageRoute(
-                    builder: (context) => const ExcludeSettingsScreen()),
-              );
-            },
-          ),
-          const Divider(),
-          _sectionHeader('通用'),
-          ListTile(
-            leading: const Icon(Icons.cleaning_services_outlined),
-            title: const Text('清理缓存'),
-            subtitle: const Text('预览缩略图、分享中转等临时文件'),
-            trailing: const Icon(Icons.chevron_right),
-            onTap: _clearCache,
-          ),
-          if (_isDesktop) ...[
-            const Divider(),
-            _sectionHeader('桌面端'),
-            if (AutostartService.supported)
-              SwitchListTile(
-                secondary: const Icon(Icons.power_settings_new),
-                title: const Text('开机自动启动微密文件'),
-                subtitle: const Text(
-                    '登录系统后自动运行微密文件并常驻托盘，可随时从托盘退出'),
-                value: _autostartTray,
-                onChanged: _toggleAutostartTray,
+          for (final m in modules)
+            Padding(
+              padding: const EdgeInsets.only(right: 8),
+              child: ChoiceChip(
+                avatar: Icon(m.icon, size: 16),
+                label: Text(m.name),
+                selected: m.id == selectedId,
+                onSelected: (_) => onSelect(m.id),
               ),
-            ListTile(
-              leading: const Icon(Icons.close_fullscreen_outlined),
-              title: const Text('点右上角关闭按钮时'),
-              subtitle: Text(_closeAction == 'prompt'
-                  ? '弹窗询问（默认）'
-                  : (_closeAction == 'minimize' ? '直接收进托盘' : '直接退出程序')),
-              trailing: const Icon(Icons.chevron_right),
-              onTap: _pickCloseAction,
             ),
-          ],
-          const SizedBox(height: 24),
         ],
       ),
     );
   }
+}
 
-  /// 切换「扫描索引移动设备」：保存设置 + 后台全量重建 + 监视器按新根重拉
-  Future<void> _toggleIndexRemovable(bool v) async {
-    setState(() => _indexRemovable = v);
-    unawaited(DiskIndexService.applyRemovableSetting(v));
+/// 右侧/下方设置面板：渲染选中模块的全部设置项。
+class _SettingsPanel extends StatelessWidget {
+  const _SettingsPanel({required this.module});
+
+  final FeatureModule? module;
+
+  @override
+  Widget build(BuildContext context) {
+    if (module == null) {
+      return const SizedBox.shrink();
+    }
+    final defs = module!.settings.where((d) => d.isVisibleNow).toList();
+    if (defs.isEmpty) {
+      return Center(
+        child: Text('「${module!.name}」暂无设置项',
+            style: TextStyle(color: Theme.of(context).hintColor)),
+      );
+    }
+
+    // 按 group 分小节（group 为空的归入无标题首节）
+    final groups = <String?, List<SettingDef>>{};
+    for (final d in defs) {
+      groups.putIfAbsent(d.group, () => []).add(d);
+    }
+
+    return ListView(
+      padding: const EdgeInsets.only(bottom: 24),
+      children: [
+        for (final entry in groups.entries) ...[
+          if (entry.key != null)
+            _groupHeader(context, entry.key!)
+          else
+            const SizedBox(height: 8),
+          for (final d in entry.value) _buildTile(context, d),
+        ],
+      ],
+    );
   }
 
-  Widget _sectionHeader(String title) {
+  Widget _groupHeader(BuildContext context, String title) {
     return Padding(
       padding: const EdgeInsets.fromLTRB(16, 16, 16, 4),
       child: Text(
         title,
         style: TextStyle(
           fontSize: 13,
-          fontWeight: FontWeight.bold,
-          color: Colors.blue.shade700,
+          fontWeight: FontWeight.w500,
+          color: Theme.of(context).colorScheme.primary,
         ),
       ),
+    );
+  }
+
+  Widget _buildTile(BuildContext context, SettingDef def) {
+    switch (def.type) {
+      case SettingType.boolean:
+        return _SwitchTile(def: def);
+      case SettingType.integer:
+      case SettingType.decimal:
+        return _SliderTile(def: def);
+      case SettingType.text:
+        return _TextTile(def: def);
+      case SettingType.choice:
+        return _ChoiceTile(def: def);
+      case SettingType.custom:
+        return def.customTile?.call(context) ?? const SizedBox.shrink();
+    }
+  }
+}
+
+/// 开关项：值监听 + 写库 + onChanged 联动。
+class _SwitchTile extends StatelessWidget {
+  const _SwitchTile({required this.def});
+
+  final SettingDef def;
+
+  @override
+  Widget build(BuildContext context) {
+    final fallback = def.defaultValue is bool ? def.defaultValue as bool : false;
+    return ValueListenableBuilder<dynamic>(
+      valueListenable: SettingStore.listen(def.key, fallback),
+      builder: (context, v, _) {
+        final on = v is bool ? v : fallback;
+        return SwitchListTile(
+          secondary: Icon(def.icon ?? Icons.tune, size: 20),
+          title: Text(def.title, style: const TextStyle(fontSize: 14)),
+          subtitle: def.subtitle == null
+              ? null
+              : Text(def.subtitle!, style: const TextStyle(fontSize: 12)),
+          value: on,
+          onChanged: (nv) async {
+            await SettingStore.set(def.key, nv);
+            def.onChanged?.call(context, nv);
+          },
+        );
+      },
+    );
+  }
+}
+
+/// 滑块项（整数/小数）。
+class _SliderTile extends StatelessWidget {
+  const _SliderTile({required this.def});
+
+  final SettingDef def;
+
+  @override
+  Widget build(BuildContext context) {
+    final isInt = def.type == SettingType.integer;
+    final fallback = (def.defaultValue is num)
+        ? (def.defaultValue as num).toDouble()
+        : (def.min ?? 0);
+    return ValueListenableBuilder<dynamic>(
+      valueListenable: SettingStore.listen(def.key, fallback),
+      builder: (context, v, _) {
+        final dv = (v is num) ? v.toDouble() : fallback;
+        return ListTile(
+          leading: Icon(def.icon ?? Icons.tune, size: 20),
+          title: Text(def.title, style: const TextStyle(fontSize: 14)),
+          subtitle: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              if (def.subtitle != null)
+                Text(def.subtitle!, style: const TextStyle(fontSize: 12)),
+              Slider(
+                value: dv.clamp(def.min ?? 0, def.max ?? 1),
+                min: def.min ?? 0,
+                max: def.max ?? 1,
+                divisions: def.divisions,
+                label: isInt ? dv.round().toString() : dv.toStringAsFixed(2),
+                onChanged: (nv) async {
+                  await SettingStore.set(
+                      def.key, isInt ? nv.round() : double.parse(nv.toStringAsFixed(2)));
+                  def.onChanged?.call(context, nv);
+                },
+              ),
+            ],
+          ),
+        );
+      },
+    );
+  }
+}
+
+/// 文本项：点击弹对话框编辑。
+class _TextTile extends StatelessWidget {
+  const _TextTile({required this.def});
+
+  final SettingDef def;
+
+  @override
+  Widget build(BuildContext context) {
+    final fallback =
+        def.defaultValue is String ? def.defaultValue as String : '';
+    return ValueListenableBuilder<dynamic>(
+      valueListenable: SettingStore.listen(def.key, fallback),
+      builder: (context, v, _) {
+        final s = v is String ? v : fallback;
+        return ListTile(
+          leading: Icon(def.icon ?? Icons.tune, size: 20),
+          title: Text(def.title, style: const TextStyle(fontSize: 14)),
+          subtitle: Text(s.isEmpty ? (def.subtitle ?? '未设置') : s,
+              style: const TextStyle(fontSize: 12),
+              maxLines: 2,
+              overflow: TextOverflow.ellipsis),
+          trailing: const Icon(Icons.edit_outlined, size: 18),
+          onTap: () async {
+            final controller = TextEditingController(text: s);
+            final r = await showDialog<String>(
+              context: context,
+              builder: (ctx) => AlertDialog(
+                title: Text(def.title),
+                content: TextField(
+                  controller: controller,
+                  autofocus: true,
+                  decoration: InputDecoration(
+                      hintText: def.subtitle ?? '请输入'),
+                ),
+                actions: [
+                  TextButton(
+                      onPressed: () => Navigator.pop(ctx),
+                      child: const Text('取消')),
+                  TextButton(
+                      onPressed: () => Navigator.pop(ctx, controller.text.trim()),
+                      child: const Text('保存')),
+                ],
+              ),
+            );
+            if (r != null) {
+              await SettingStore.set(def.key, r);
+              def.onChanged?.call(context, r);
+            }
+          },
+        );
+      },
+    );
+  }
+}
+
+/// 单选项：点击弹底部选择器。
+class _ChoiceTile extends StatelessWidget {
+  const _ChoiceTile({required this.def});
+
+  final SettingDef def;
+
+  @override
+  Widget build(BuildContext context) {
+    final options = def.options ?? const [];
+    final fallback = options.isNotEmpty ? options.first : '';
+    return ValueListenableBuilder<dynamic>(
+      valueListenable: SettingStore.listen(def.key, fallback),
+      builder: (context, v, _) {
+        final cur = v is String ? v : fallback;
+        return ListTile(
+          leading: Icon(def.icon ?? Icons.tune, size: 20),
+          title: Text(def.title, style: const TextStyle(fontSize: 14)),
+          subtitle: def.subtitle == null
+              ? null
+              : Text(def.subtitle!, style: const TextStyle(fontSize: 12)),
+          trailing: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Text(def.optionLabels?[cur] ?? cur,
+                  style: const TextStyle(fontSize: 13)),
+              const Icon(Icons.chevron_right, size: 18),
+            ],
+          ),
+          onTap: () async {
+            final picked = await showModalBottomSheet<String>(
+              context: context,
+              builder: (ctx) => SafeArea(
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Padding(
+                      padding: const EdgeInsets.all(14),
+                      child: Text(def.title,
+                          style: const TextStyle(
+                              fontSize: 15, fontWeight: FontWeight.w500)),
+                    ),
+                    for (final opt in options)
+                      RadioListTile<String>(
+                        value: opt,
+                        groupValue: cur,
+                        title: Text(def.optionLabels?[opt] ?? opt,
+                            style: const TextStyle(fontSize: 14)),
+                        onChanged: (nv) => Navigator.pop(ctx, nv),
+                      ),
+                    const SizedBox(height: 8),
+                  ],
+                ),
+              ),
+            );
+            if (picked != null && picked != cur) {
+              await SettingStore.set(def.key, picked);
+              def.onChanged?.call(context, picked);
+            }
+          },
+        );
+      },
     );
   }
 }

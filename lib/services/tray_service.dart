@@ -9,6 +9,7 @@ import 'package:system_tray/system_tray.dart';
 import 'package:window_manager/window_manager.dart';
 import 'disk_index_service.dart';
 import 'lan_transfer_service.dart';
+import 'quick_search_window.dart';
 import 'share_receive_service.dart';
 
 /// 单进程托盘：主程序自身常驻托盘。
@@ -139,6 +140,11 @@ class TrayService {
 
   /// 从托盘打开主窗口：恢复窗口并退出瘦身模式。
   Future<void> openMainWindow() async {
+    // 若当前是浮窗态，先恢复主窗口几何与内容（否则会以浮窗形态显示）
+    if (WindowModeService.instance.isPopup) {
+      await WindowModeService.instance.hidePopup(openMain: true);
+      return;
+    }
     await exitLeanMode();
     await windowManager.show();
     await windowManager.focus();
@@ -156,6 +162,8 @@ class TrayService {
   Future<void> enterLeanMode() async {
     if (_lean) return;
     _lean = true;
+    // 复位浮窗态：收托盘后下次双击 Ctrl 应直接呼出浮窗
+    WindowModeService.instance.popupMode.value = false;
     try {
       await windowManager.hide();
     } catch (_) {}
@@ -190,6 +198,12 @@ class _WindowListener extends WindowListener {
   @override
   void onWindowFocus() async {
     await TrayService.instance.exitLeanMode();
+  }
+
+  @override
+  void onWindowBlur() {
+    // 浮窗态失焦自动收起（设置项 qs_hide_on_blur 可关）
+    WindowModeService.instance.onWindowBlur();
   }
 }
 
