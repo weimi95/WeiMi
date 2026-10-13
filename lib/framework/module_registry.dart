@@ -46,11 +46,14 @@ class FileActionDef {
 ///
 /// 新增功能 = 新建模块文件 + 在 [ModuleRegistry.bootstrap] 注册，
 /// 不改动任何主线代码。
+///
+/// 注意：字段由子类以 getter override 提供（见 LanTransferModule 等），
+/// 构造参数仅作默认值/测试直传用，故均为可选。
 class FeatureModule {
   const FeatureModule({
-    required this.id,
-    required this.name,
-    required this.icon,
+    this.id = '',
+    this.name = '',
+    this.icon = Icons.extension,
     this.order = 100,
     this.desktopOnly = false,
     this.settings = const [],

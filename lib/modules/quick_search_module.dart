@@ -42,7 +42,7 @@ class QuickSearchModule extends FeatureModule {
           subtitle: '开启后，任意界面双击 Ctrl 呼出全盘搜索浮窗',
           type: SettingType.boolean,
           defaultValue: true,
-          onChanged: (ctx, v) => QuickSearchActions.onEnabledChanged(v as bool),
+          onChanged: (ctx, v) => QuickSearchActions.onEnabledChanged?.call(v as bool),
         ),
         SettingDef(
           key: 'qs_hide_on_blur',

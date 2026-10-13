@@ -135,7 +135,7 @@ class _QuickSearchPopupState extends State<QuickSearchPopup> {
     final showActions = SettingStore.get<bool>('qs_show_actions', true);
     final selectedHit =
         (_selected >= 0 && _selected < _hits.length) ? _hits[_selected] : null;
-    final actions = selectedHit == null
+    final List<FileActionDef> actions = selectedHit == null
         ? const []
         : ModuleRegistry.actionsFor(selectedHit.path, contextId: 'quick_popup');
 
@@ -314,56 +314,62 @@ class _QuickSearchPopupState extends State<QuickSearchPopup> {
       itemExtent: 52,
       itemBuilder: (ctx, i) {
         final hit = _hits[i];
-        return InkWell(
-          selected: i == _selected,
-          onTap: () => setState(() => _selected = i),
-          onDoubleTap: () {
-            _findOpenAction(hit.path)?.onExecute?.call(context, hit.path);
-          },
-          child: Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
-            child: Row(
-              children: [
-                FileThumbnail(path: hit.path, name: hit.name, size: 32),
-                const SizedBox(width: 10),
-                Expanded(
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    mainAxisAlignment: MainAxisAlignment.center,
-                    children: [
-                      Row(
-                        children: [
-                          Flexible(
-                            child: Text(
-                              hit.name,
-                              style: TextStyle(
-                                fontSize: 13,
-                                color: i == _selected
-                                    ? theme.colorScheme.primary
-                                    : null,
+        final selected = i == _selected;
+        return Container(
+          color: selected
+              ? theme.colorScheme.primaryContainer.withValues(alpha: 0.45)
+              : null,
+          child: InkWell(
+            onTap: () => setState(() => _selected = i),
+            onDoubleTap: () {
+              _findOpenAction(hit.path)?.onExecute?.call(context, hit.path);
+            },
+            child: Padding(
+              padding:
+                  const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+              child: Row(
+                children: [
+                  FileThumbnail(path: hit.path, name: hit.name, size: 32),
+                  const SizedBox(width: 10),
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      mainAxisAlignment: MainAxisAlignment.center,
+                      children: [
+                        Row(
+                          children: [
+                            Flexible(
+                              child: Text(
+                                hit.name,
+                                style: TextStyle(
+                                  fontSize: 13,
+                                  color: selected
+                                      ? theme.colorScheme.primary
+                                      : null,
+                                ),
+                                maxLines: 1,
+                                overflow: TextOverflow.ellipsis,
                               ),
-                              maxLines: 1,
-                              overflow: TextOverflow.ellipsis,
                             ),
-                          ),
-                          if (hit.isEncrypted) ...[
-                            const SizedBox(width: 6),
-                            Icon(Icons.lock,
-                                size: 12, color: theme.colorScheme.primary),
+                            if (hit.isEncrypted) ...[
+                              const SizedBox(width: 6),
+                              Icon(Icons.lock,
+                                  size: 12, color: theme.colorScheme.primary),
+                            ],
                           ],
-                        ],
-                      ),
-                      Text(
-                        hit.dir,
-                        style: TextStyle(
-                            fontSize: 11, color: theme.hintColor),
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
-                      ),
-                    ],
+                        ),
+                        Text(
+                          hit.dir,
+                          style:
+                              TextStyle(fontSize: 11, color: theme.hintColor),
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                        ),
+                      ],
+                    ),
                   ),
-                ),
-              ],
+                ],
+              ),
             ),
           ),
         );

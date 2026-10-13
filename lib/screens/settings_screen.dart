@@ -275,7 +275,7 @@ class _SliderTile extends StatelessWidget {
               if (def.subtitle != null)
                 Text(def.subtitle!, style: const TextStyle(fontSize: 12)),
               Slider(
-                value: dv.clamp(def.min ?? 0, def.max ?? 1),
+                value: dv.clamp(def.min ?? 0, def.max ?? 1).toDouble(),
                 min: def.min ?? 0,
                 max: def.max ?? 1,
                 divisions: def.divisions,
