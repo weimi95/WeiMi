@@ -13,11 +13,39 @@ import '../services/file_batch_ops.dart';
 import '../services/file_operations_service.dart';
 import '../services/file_viewer_service.dart';
 import '../services/quick_search_window.dart';
+import '../services/search_history_service.dart';
 import '../services/view_prefs_service.dart';
 import '../widgets/file_selection_bar.dart';
 import '../widgets/file_thumbnail.dart';
 import 'file_filter_sheet.dart';
 import 'lan_transfer_screen.dart';
+
+/// 缩略图档位 → 宫格单元格最大宽度（手机默认「中」，与 PC 一致降认知负担）
+double _gridExtentFor(ThumbSize s) {
+  final desktop = !Platform.isAndroid && !Platform.isIOS;
+  return switch (s) {
+    ThumbSize.small => desktop ? 100 : 90,
+    ThumbSize.medium => desktop ? 130 : 110,
+    ThumbSize.large => desktop ? 170 : 150,
+  };
+}
+
+/// 缩略图档位 → 列表视图缩略图尺寸
+double _listThumbFor(ThumbSize s) => switch (s) {
+      ThumbSize.small => 36.0,
+      ThumbSize.medium => 42.0,
+      ThumbSize.large => 56.0,
+    };
+
+/// 缩略图档位 → 瀑布流列宽
+double _waterfallWidthFor(ThumbSize s) {
+  final desktop = !Platform.isAndroid && !Platform.isIOS;
+  return switch (s) {
+    ThumbSize.small => desktop ? 180 : 160,
+    ThumbSize.medium => desktop ? 260 : 230,
+    ThumbSize.large => desktop ? 360 : 320,
+  };
+}
 
 /// WeiMi Vault 屏幕
 ///
@@ -91,6 +119,9 @@ class WeiMiVaultScreenState extends State<WeiMiVaultScreen> {
   // ============ 固定搜索框（根视图与浏览视图共用） ============
   String _fileQuery = '';
   final TextEditingController _fileSearchCtrl = TextEditingController();
+  final FocusNode _searchFocusNode = FocusNode();
+  bool _showSearchHistory = false; // 聚焦且无输入时展示历史（点击外部收起）
+  List<String> _searchHistory = [];
 
   // ============ 全盘搜索（主搜索框直搜全盘，手机/PC 通用，无独立窗口） ============
   List<FileItem>? _globalResults; // 非 null = 浏览视图展示全盘结果
@@ -134,8 +165,95 @@ class WeiMiVaultScreenState extends State<WeiMiVaultScreen> {
       });
       return;
     }
+    // 有输入即收起历史面板
+    if (_showSearchHistory) setState(() => _showSearchHistory = false);
     _fileDebounce =
         Timer(const Duration(milliseconds: 300), _runFileGlobalSearch);
+  }
+
+  /// 聚焦搜索框且无输入时展示历史记录（点击外部/有输入即收起）
+  void _onSearchTap() {
+    if (_fileSearchCtrl.text.trim().isNotEmpty) return;
+    if (_showSearchHistory || _searchHistory.isEmpty) return;
+    setState(() => _showSearchHistory = true);
+  }
+
+  Future<void> _loadSearchHistory() async {
+    final items = await SearchHistoryService.instance.load();
+    if (mounted) setState(() => _searchHistory = items);
+  }
+
+  /// 点历史项：填入并直接搜索
+  void _applyHistoryQuery(String q) {
+    _fileDebounce?.cancel();
+    _fileSearchCtrl.text = q;
+    _searchFocusNode.unfocus();
+    setState(() => _showSearchHistory = false);
+    _onFileSearchChanged(q);
+  }
+
+  Future<void> _clearSearchHistory() async {
+    await SearchHistoryService.instance.clear();
+    if (mounted) setState(() => _searchHistory = []);
+  }
+
+  /// 搜索历史面板（搜索框下方，聚焦且无输入时展示）
+  Widget _buildSearchHistoryPanel() {
+    if (!_showSearchHistory || _searchHistory.isEmpty) {
+      return const SizedBox.shrink();
+    }
+    return Container(
+      margin: const EdgeInsets.fromLTRB(12, 0, 12, 4),
+      decoration: BoxDecoration(
+        color: Theme.of(context).cardColor,
+        borderRadius: BorderRadius.circular(10),
+        border: Border.all(color: Colors.grey.shade300),
+      ),
+      constraints: const BoxConstraints(maxHeight: 260),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          Padding(
+            padding: const EdgeInsets.fromLTRB(12, 6, 4, 0),
+            child: Row(
+              children: [
+                Icon(Icons.history, size: 16, color: Colors.grey.shade600),
+                const SizedBox(width: 6),
+                Text('搜索历史',
+                    style: TextStyle(
+                        fontSize: 12, color: Colors.grey.shade600)),
+                const Spacer(),
+                TextButton(
+                  onPressed: _clearSearchHistory,
+                  style: TextButton.styleFrom(
+                      padding: const EdgeInsets.symmetric(horizontal: 10),
+                      minimumSize: const Size(0, 32)),
+                  child: const Text('清空', style: TextStyle(fontSize: 12)),
+                ),
+              ],
+            ),
+          ),
+          Flexible(
+            child: ListView.builder(
+              shrinkWrap: true,
+              padding: const EdgeInsets.only(bottom: 6),
+              itemCount: _searchHistory.length,
+              itemBuilder: (context, i) {
+                final q = _searchHistory[i];
+                return ListTile(
+                  dense: true,
+                  visualDensity: VisualDensity.compact,
+                  leading: const Icon(Icons.north_west, size: 16),
+                  title: Text(q, maxLines: 1, overflow: TextOverflow.ellipsis),
+                  onTap: () => _applyHistoryQuery(q),
+                );
+              },
+            ),
+          ),
+        ],
+      ),
+    );
   }
 
   /// 全盘搜索（手机/PC 通用）：索引未就绪先建（首次约 1~2 分钟，之后毫秒级）
@@ -152,6 +270,11 @@ class WeiMiVaultScreenState extends State<WeiMiVaultScreen> {
       }
       final paths = await DiskIndexService.search(q);
       if (!mounted) return;
+      // 落一条搜索历史（去重 + 按 qs_history_limit 裁剪），供下次聚焦搜索框展示
+      unawaited(() async {
+        final items = await SearchHistoryService.instance.record(q);
+        if (mounted) setState(() => _searchHistory = items);
+      }());
       // 空结果兜底：索引明显过期（如加载的是旧落盘索引、新建文件还没进索引）
       // 时后台重建一次并自动重搜，避免「文件明明存在却搜不到」。
       if (paths.isEmpty && DiskIndexService.isStale()) {
@@ -215,6 +338,13 @@ class WeiMiVaultScreenState extends State<WeiMiVaultScreen> {
     }
     _initRoot();
     _navigateTo(widget.initialPath ?? '');
+    _loadSearchHistory();
+    // 失焦即收起历史面板（点历史项时 _applyHistoryQuery 已先 unfocus 并关面板）
+    _searchFocusNode.addListener(() {
+      if (!_searchFocusNode.hasFocus && _showSearchHistory) {
+        setState(() => _showSearchHistory = false);
+      }
+    });
     // 预热索引（加载旧索引毫秒级；无索引则后台全量构建），完成后计数自动刷新搜索框
     unawaited(() async {
       try {
@@ -228,6 +358,7 @@ class WeiMiVaultScreenState extends State<WeiMiVaultScreen> {
     _rootScroll.dispose();
     _fileDebounce?.cancel();
     _fileSearchCtrl.dispose();
+    _searchFocusNode.dispose();
     super.dispose();
   }
 
@@ -1147,6 +1278,8 @@ class WeiMiVaultScreenState extends State<WeiMiVaultScreen> {
                   children: [
                     // 固定顶部搜索框（根视图与浏览视图都显示）
                     if (!_selecting) _buildFileSearchField(),
+                    // 搜索历史面板（聚焦搜索框且无输入时展示）
+                    if (!_selecting) _buildSearchHistoryPanel(),
                     // 当前类型筛选提示（点击 × 清除）
                     if (!_selecting && _filterCat != null)
                       _buildActiveFilterChip(),
@@ -1191,6 +1324,8 @@ class WeiMiVaultScreenState extends State<WeiMiVaultScreen> {
       padding: const EdgeInsets.fromLTRB(12, 8, 12, 4),
       child: TextField(
         controller: _fileSearchCtrl,
+        focusNode: _searchFocusNode,
+        onTap: _onSearchTap,
         decoration: InputDecoration(
           isDense: true,
           prefixIcon: const Icon(Icons.search, size: 20),
@@ -1828,8 +1963,8 @@ class WeiMiVaultScreenState extends State<WeiMiVaultScreen> {
           : const AlwaysScrollableScrollPhysics(),
       shrinkWrap: shrinkWrap,
       padding: const EdgeInsets.all(10),
-      gridDelegate: const SliverGridDelegateWithMaxCrossAxisExtent(
-        maxCrossAxisExtent: 130,
+      gridDelegate: SliverGridDelegateWithMaxCrossAxisExtent(
+        maxCrossAxisExtent: _gridExtentFor(ViewPrefsService.instance.thumbSize),
         mainAxisSpacing: 10,
         crossAxisSpacing: 10,
         childAspectRatio: 0.78,
@@ -1872,6 +2007,7 @@ class WeiMiVaultScreenState extends State<WeiMiVaultScreen> {
   /// 瀑布流内容块（两列 Row），浏览页与目录展开区共用
   Widget _buildWaterfallContent(List<FileItem> items,
       {List<FileItem> scope = const []}) {
+    final colWidth = _waterfallWidthFor(ViewPrefsService.instance.thumbSize);
     final colA = <FileItem>[];
     final colB = <FileItem>[];
     final hA = <FileItem, double>{};
@@ -1884,7 +2020,7 @@ class WeiMiVaultScreenState extends State<WeiMiVaultScreen> {
           ? 120.0
           : ratio == null || ratio <= 0
               ? 160.0
-              : (260.0 / ratio).clamp(120.0, 320.0);
+              : (colWidth / ratio).clamp(120.0, 320.0);
       final itemH = thumbH + 52;
       if (sumA <= sumB) {
         colA.add(it);
@@ -1925,6 +2061,8 @@ class WeiMiVaultScreenState extends State<WeiMiVaultScreen> {
     final selected = selectable && _selectedPaths.contains(item.fullPath);
 
     Widget thumbArea;
+    // 缩略图区底色：contain 模式下横竖图留白的背板（随主题明暗自适应）
+    final thumbBg = Theme.of(context).colorScheme.surfaceContainerHighest;
     if (item.isDirectory) {
       thumbArea = Icon(
         Icons.folder,
@@ -1932,14 +2070,31 @@ class WeiMiVaultScreenState extends State<WeiMiVaultScreen> {
         color: Colors.amber.shade600,
       );
     } else if (thumbHeight != null) {
-      // 瀑布流：固定高度容器内放缩略图
-      thumbArea = SizedBox(
-        width: double.infinity,
-        height: thumbHeight,
-        child: FileThumbnail(path: item.fullPath, name: item.name, size: 64),
+      // 瀑布流：固定高度容器内等比缩放完整显示（不裁切）
+      thumbArea = Container(
+        color: thumbBg,
+        child: SizedBox(
+          width: double.infinity,
+          height: thumbHeight,
+          child: FileThumbnail(
+            path: item.fullPath,
+            name: item.name,
+            size: 64,
+            fit: BoxFit.contain,
+          ),
+        ),
       );
     } else {
-      thumbArea = FileThumbnail(path: item.fullPath, name: item.name, size: 72);
+      // 宫格：图片区撑满卡片宽，contain 不裁切
+      thumbArea = ColoredBox(
+        color: thumbBg,
+        child: FileThumbnail(
+          path: item.fullPath,
+          name: item.name,
+          size: 72,
+          fit: BoxFit.contain,
+        ),
+      );
     }
 
     final Widget imageSection = thumbHeight != null
@@ -2190,7 +2345,12 @@ class _FileListItem extends StatelessWidget {
     } else if (item.isDirectory) {
       leading = const Icon(Icons.folder, color: Colors.amber);
     } else {
-      leading = FileThumbnail(path: item.fullPath, name: item.name, size: 42);
+      leading = FileThumbnail(
+        path: item.fullPath,
+        name: item.name,
+        size: _listThumbFor(ViewPrefsService.instance.thumbSize),
+        fit: BoxFit.contain,
+      );
     }
     return GestureDetector(
       onDoubleTap: onDoubleTap,

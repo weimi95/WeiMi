@@ -35,6 +35,19 @@ class GeneralModule extends FeatureModule {
           type: SettingType.custom,
           customTile: (ctx) => const _ClearCacheTile(),
         ),
+        // 搜索历史条数：主界面搜索框与 PC 快捷浮窗共用（key 未变，prefs 兼容）
+        SettingDef(
+          key: 'qs_history_limit',
+          title: '保留搜索历史条数',
+          icon: Icons.history_outlined,
+          group: '搜索',
+          subtitle: '搜索框聚焦无输入时展示历史，0 表示不记录历史',
+          type: SettingType.integer,
+          defaultValue: 10,
+          min: 0,
+          max: 50,
+          divisions: 50,
+        ),
         if (_isDesktop)
           SettingDef(
             key: 'autostart_enabled',

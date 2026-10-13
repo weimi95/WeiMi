@@ -148,27 +148,43 @@ class FileThumbnail extends StatelessWidget {
   final String name;
   final double size;
 
+  /// 图片填充方式：BoxFit.cover = 裁切铺满（默认，适合小图标）；
+  /// BoxFit.contain = 等比缩放完整显示（横竖版图片不裁切）
+  final BoxFit fit;
+
   const FileThumbnail({
     super.key,
     required this.path,
     required this.name,
     this.size = 42,
+    this.fit = BoxFit.cover,
   });
 
   @override
   Widget build(BuildContext context) {
     if (FileThumbs.isImage(name)) {
+      // cover：正方形画布裁切铺满（小图标场景）；contain：不锁画布，
+      // 由父容器给边界、图片等比缩放完整显示（宫格/瀑布流大图场景）
+      final img = fit == BoxFit.contain
+          ? Image.file(
+              File(path),
+              fit: BoxFit.contain,
+              cacheWidth: 256,
+              gaplessPlayback: true,
+              errorBuilder: (_, __, ___) => _iconBox(),
+            )
+          : Image.file(
+              File(path),
+              width: size,
+              height: size,
+              fit: BoxFit.cover,
+              cacheWidth: 256,
+              gaplessPlayback: true,
+              errorBuilder: (_, __, ___) => _iconBox(),
+            );
       return ClipRRect(
         borderRadius: BorderRadius.circular(8),
-        child: Image.file(
-          File(path),
-          width: size,
-          height: size,
-          fit: BoxFit.cover,
-          cacheWidth: 256,
-          gaplessPlayback: true,
-          errorBuilder: (_, __, ___) => _iconBox(),
-        ),
+        child: fit == BoxFit.contain ? Center(child: img) : img,
       );
     }
     if (FileThumbs.isVideo(name)) {
@@ -177,7 +193,7 @@ class FileThumbnail extends StatelessWidget {
         return ClipRRect(
           borderRadius: BorderRadius.circular(8),
           child: _WindowsPreview(path: path, name: name, size: size,
-              video: true),
+              video: true, fit: fit),
         );
       }
       return ClipRRect(
@@ -191,7 +207,7 @@ class FileThumbnail extends StatelessWidget {
                 fit: StackFit.expand,
                 children: [
                   Image.memory(data,
-                      fit: BoxFit.cover, gaplessPlayback: true),
+                      fit: fit, gaplessPlayback: true),
                   const Center(
                     child: Icon(Icons.play_arrow,
                         color: Colors.white, size: 22),
@@ -207,7 +223,7 @@ class FileThumbnail extends StatelessWidget {
     // Windows 桌面：真内容缩略图 -> 系统图标 -> 通用图标的三级回退
     // （PSD 显示画面、docx/pdf 显示文档预览、无 provider 显示类型 logo）
     if (Platform.isWindows) {
-      return _WindowsPreview(path: path, name: name, size: size);
+      return _WindowsPreview(path: path, name: name, size: size, fit: fit);
     }
     return _iconBox();
   }
@@ -235,12 +251,14 @@ class _WindowsPreview extends StatefulWidget {
   final String name;
   final double size;
   final bool video;
+  final BoxFit fit;
 
   const _WindowsPreview({
     required this.path,
     required this.name,
     required this.size,
     this.video = false,
+    this.fit = BoxFit.cover,
   });
 
   @override
@@ -279,11 +297,15 @@ class _WindowsPreviewState extends State<_WindowsPreview> {
   Widget build(BuildContext context) {
     final f = _bmpPath == null ? null : File(_bmpPath!);
     if (f != null && f.existsSync()) {
-      final img = Image.file(f,
-          width: widget.size,
-          height: widget.size,
-          fit: BoxFit.cover,
-          gaplessPlayback: true);
+      // cover：正方形画布；contain：铺满父容器等比缩放
+      final img = widget.fit == BoxFit.contain
+          ? Image.file(f,
+              fit: BoxFit.contain, gaplessPlayback: true)
+          : Image.file(f,
+              width: widget.size,
+              height: widget.size,
+              fit: BoxFit.cover,
+              gaplessPlayback: true);
       if (!widget.video) return img;
       return Stack(
         fit: StackFit.expand,

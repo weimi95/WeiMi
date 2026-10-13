@@ -1063,6 +1063,18 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                 case 'view_waterfall':
                   ViewPrefsService.instance.setMode(ViewMode.waterfall);
                   break;
+                case 'thumb_small':
+                  ViewPrefsService.instance
+                      .setThumbSize(ThumbSize.small);
+                  break;
+                case 'thumb_medium':
+                  ViewPrefsService.instance
+                      .setThumbSize(ThumbSize.medium);
+                  break;
+                case 'thumb_large':
+                  ViewPrefsService.instance
+                      .setThumbSize(ThumbSize.large);
+                  break;
                 case 'settings':
                   Navigator.push(
                     context,
@@ -1090,6 +1102,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
             },
             itemBuilder: (ctx) {
               final mode = ViewPrefsService.instance.mode;
+              final thumb = ViewPrefsService.instance.thumbSize;
               PopupMenuEntry<String> item(String value, IconData icon,
                   String label,
                   {bool checked = false}) {
@@ -1115,6 +1128,16 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                     checked: mode == ViewMode.grid),
                 item('view_waterfall', Icons.dashboard_outlined, '瀑布流视图',
                     checked: mode == ViewMode.waterfall),
+                const PopupMenuDivider(),
+                item('thumb_small', Icons.photo_size_select_small,
+                    '缩略图：小',
+                    checked: thumb == ThumbSize.small),
+                item('thumb_medium', Icons.photo_size_select_actual,
+                    '缩略图：中',
+                    checked: thumb == ThumbSize.medium),
+                item('thumb_large', Icons.photo_size_select_large,
+                    '缩略图：大',
+                    checked: thumb == ThumbSize.large),
                 const PopupMenuDivider(),
                 item('settings', Icons.settings_outlined, '设置'),
                 item('language', Icons.language, t('language')),

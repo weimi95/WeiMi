@@ -73,18 +73,6 @@ class QuickSearchModule extends FeatureModule {
           type: SettingType.boolean,
           defaultValue: true,
         ),
-        SettingDef(
-          key: 'qs_history_limit',
-          title: '保留搜索历史条数',
-          icon: Icons.history_outlined,
-          subtitle: '搜索框聚焦无输入时展示历史，0 表示不记录历史',
-          group: '浮窗行为',
-          type: SettingType.integer,
-          defaultValue: 10,
-          min: 0,
-          max: 50,
-          divisions: 50,
-        ),
       ];
 
   @override

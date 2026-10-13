@@ -4,6 +4,9 @@ import 'package:shared_preferences/shared_preferences.dart';
 /// 文件浏览视图模式
 enum ViewMode { list, grid, waterfall }
 
+/// 缩略图大小档位（列表/宫格/瀑布流共用，分平台给默认数值）
+enum ThumbSize { small, medium, large }
+
 /// 最近页日期分区模式
 enum GroupMode { none, day, month, year }
 
@@ -14,13 +17,16 @@ class ViewPrefsService extends ChangeNotifier {
 
   static const _key = 'weimi_view_mode';
   static const _groupKey = 'weimi_group_mode';
+  static const _thumbKey = 'weimi_thumb_size';
 
   ViewMode _mode = ViewMode.list;
   GroupMode _group = GroupMode.none;
+  ThumbSize _thumb = ThumbSize.medium;
   bool _loaded = false;
 
   ViewMode get mode => _mode;
   GroupMode get group => _group;
+  ThumbSize get thumbSize => _thumb;
 
   Future<void> load() async {
     if (_loaded) return;
@@ -33,6 +39,9 @@ class ViewPrefsService extends ChangeNotifier {
       if (g == 'day') _group = GroupMode.day;
       if (g == 'month') _group = GroupMode.month;
       if (g == 'year') _group = GroupMode.year;
+      final th = prefs.getString(_thumbKey);
+      if (th == 'small') _thumb = ThumbSize.small;
+      if (th == 'large') _thumb = ThumbSize.large;
       _loaded = true;
       notifyListeners();
     } catch (_) {}
@@ -55,6 +64,16 @@ class ViewPrefsService extends ChangeNotifier {
     try {
       final prefs = await SharedPreferences.getInstance();
       await prefs.setString(_groupKey, g.name);
+    } catch (_) {}
+  }
+
+  Future<void> setThumbSize(ThumbSize s) async {
+    if (s == _thumb) return;
+    _thumb = s;
+    notifyListeners();
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setString(_thumbKey, s.name);
     } catch (_) {}
   }
 
