@@ -71,10 +71,59 @@ class DiskIndexService {
   /// 已索引条数（未建立返回 null）
   static int? get indexedCount => isBuilt ? _cachedCount : null;
 
+  /// 索引数据目录。桌面端优先放在程序目录下的 Data 子目录——与软件本体同目录，
+  /// 便携版整个文件夹拷走/删掉时索引随之走，不留隐藏残留（对齐 Everything 把
+  /// .db 放程序目录的做法）。程序目录不可写（装到 Program Files）时回退到
+  /// 应用文档目录。移动端无程序目录概念，用私有文档目录。
+  static Future<String> _indexDataDir() async {
+    if (!Platform.isAndroid && !Platform.isIOS) {
+      try {
+        final dir = p.join(p.dirname(Platform.resolvedExecutable), 'Data');
+        await Directory(dir).create(recursive: true);
+        // 探测写权限：建目录成功不代表可写（Program Files 下某些 UAC 重定向场景），
+        // 落个探针文件实测一遍，失败则回退文档目录
+        final probe = File(p.join(dir, '.weimi_probe'));
+        if (await probe.exists()) {
+          await probe.delete();
+        } else {
+          await probe.writeAsString('');
+          await probe.delete();
+        }
+        return dir;
+      } catch (_) {}
+    }
+    final docs = await getApplicationDocumentsDirectory();
+    return docs.path;
+  }
+
+  /// 一次性迁移标记（旧索引从文档目录搬到数据目录）
+  static bool _migrated = false;
+
   /// 落盘文件路径
   static Future<String> _indexFilePath() async {
-    final docs = await getApplicationDocumentsDirectory();
-    return p.join(docs.path, 'disk_index.bin');
+    if (!_migrated) {
+      _migrated = true;
+      await _migrateLegacyIndex();
+    }
+    return p.join(await _indexDataDir(), 'disk_index.bin');
+  }
+
+  /// 旧版本把索引落在「文档」目录（disk_index.bin / usn_table.bin），
+  /// 升级后一次性搬到数据目录，避免 128MB 索引白扫一遍。搬移而非复制，
+  /// 保证磁盘上只有一份。
+  static Future<void> _migrateLegacyIndex() async {
+    try {
+      final dataDir = await _indexDataDir();
+      final docs = (await getApplicationDocumentsDirectory()).path;
+      if (p.equals(dataDir, docs)) return;
+      for (final name in const ['disk_index.bin', 'usn_table.bin']) {
+        final src = p.join(docs, name);
+        final dst = p.join(dataDir, name);
+        if (await File(src).exists() && !await File(dst).exists()) {
+          await File(src).rename(dst);
+        }
+      }
+    } catch (_) {}
   }
 
   /// 是否存在已落盘的索引文件
@@ -184,10 +233,9 @@ class DiskIndexService {
 
   // ==================== USN journal 索引（Windows NTFS，方案B） ====================
 
-  /// USN 状态落盘文件路径
+  /// USN 状态落盘文件路径（与索引同目录）
   static Future<String> _usnTablePath() async {
-    final docs = await getApplicationDocumentsDirectory();
-    return p.join(docs.path, 'usn_table.bin');
+    return p.join(await _indexDataDir(), 'usn_table.bin');
   }
 
   /// 是否存在 NTFS 卷且 journal 可查询（QUERY 被安全软件拦截时返回 false，走遍历）
