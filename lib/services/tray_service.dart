@@ -56,6 +56,11 @@ class TrayService {
     if (_initialized) return;
     _initialized = true;
 
+    // 缩略图缓存字节限额 64MB（默认只限张数不限字节，宫格/瀑布流狂滚会吃上百 MB）
+    try {
+      PaintingBinding.instance.imageCache.maximumSizeBytes = 64 << 20;
+    } catch (_) {}
+
     await windowManager.ensureInitialized();
     const opts = WindowOptions(
       size: Size(1100, 800),
@@ -165,7 +170,8 @@ class TrayService {
     exit(0);
   }
 
-  /// 收托盘瘦身：隐藏窗口 + 清空图片缓存（缩略图等占大头）。
+  /// 收托盘瘦身：隐藏窗口 + 清空图片缓存 + 释放全盘索引内存。
+  /// 索引下次搜索前由 prepareIndex 从磁盘毫秒级加载或重建，无感恢复。
   Future<void> enterLeanMode() async {
     if (_lean) return;
     _lean = true;
@@ -176,6 +182,9 @@ class TrayService {
     } catch (_) {}
     try {
       PaintingBinding.instance.imageCache.clear();
+    } catch (_) {}
+    try {
+      await DiskIndexService.releaseMemory();
     } catch (_) {}
   }
 

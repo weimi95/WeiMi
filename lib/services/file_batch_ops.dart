@@ -120,6 +120,11 @@ class FileBatchOps {
               title: const Text('加密'),
               onTap: () => Navigator.pop(ctx, 'encrypt'),
             ),
+            ListTile(
+              leading: const Icon(Icons.open_in_new),
+              title: Text(single ? '用系统打开' : '用系统打开所选'),
+              onTap: () => Navigator.pop(ctx, 'systemopen'),
+            ),
           ],
         ),
       ),

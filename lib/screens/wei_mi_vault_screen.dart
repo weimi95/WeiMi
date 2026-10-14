@@ -14,6 +14,7 @@ import '../services/file_operations_service.dart';
 import '../services/file_viewer_service.dart';
 import '../services/quick_search_window.dart';
 import '../services/search_history_service.dart';
+import '../services/system_open_service.dart';
 import '../services/view_prefs_service.dart';
 import '../widgets/file_selection_bar.dart';
 import '../widgets/file_thumbnail.dart';
@@ -684,7 +685,12 @@ class WeiMiVaultScreenState extends State<WeiMiVaultScreen> {
 
   // ============ 文件操作 ============
 
-  Future<void> _openFile(FileItem item) async {
+  /// 智能打开（单击/双击/点击统一入口）：
+  /// - 文件夹 → 进入
+  /// - 加密文件 → 直接问密码，输完直接查看
+  /// - 非加密 + 内置支持格式 → 直接查看
+  /// - 非加密 + 不支持格式 → 直接调系统打开菜单
+  Future<void> _smartOpen(FileItem item) async {
     if (!mounted) return;
 
     if (item.isDirectory) {
@@ -692,59 +698,49 @@ class WeiMiVaultScreenState extends State<WeiMiVaultScreen> {
       return;
     }
 
-    final result = await showModalBottomSheet<FileAction>(
-      context: context,
-      isScrollControlled: true,
-      backgroundColor: Colors.transparent,
-      builder: (ctx) => _FileActionSheet(item: item),
-    );
-
-    if (result == null || !mounted) return;
-
-    switch (result) {
-      case FileAction.view:
-        await _viewFile(item);
-        break;
-
-      case FileAction.encrypt:
-        if (item.isEncryptedFile) {
-          if (mounted) ScaffoldMessenger.of(context).showSnackBar(
-            const SnackBar(content: Text('该文件已加密')),
-          );
-          break;
-        }
-        _encryptFile(item.fullPath);
-        break;
-
-      case FileAction.decrypt:
-        if (!item.isEncryptedFile) {
-          if (mounted) ScaffoldMessenger.of(context).showSnackBar(
-            const SnackBar(content: Text('该文件未加密')),
-          );
-          break;
-        }
-        await _decryptWithDialog(item);
-        break;
-
-      case FileAction.delete:
-        await _deleteFile(item);
-        break;
-    }
-  }
-
-  /// 内置查看器打开（加密文件先问密码）
-  Future<void> _viewFile(FileItem item) async {
-    final isEnc = await EncryptionService.isEncryptedFile(item.fullPath);
-    if (isEnc) {
+    if (item.isEncryptedFile) {
       final hint = await EncryptionService.getPasswordHint(item.fullPath);
       final password = await _showPasswordDialog(hint: hint);
-      if (password != null) {
-        await FileViewerService.openFile(
-          context, item.fullPath, password: password, isEncrypted: true,
+      if (password == null || !mounted) return;
+      await _viewFile(item, presetPassword: password);
+      return;
+    }
+
+    final type = FileOperationsService.getFileType(item.fullPath);
+    if (type == FileType.unknown) {
+      final ok = await SystemOpenService.open(item.fullPath);
+      if (!ok && mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('系统中没有能打开此文件的应用')),
         );
       }
-    } else {
-      await FileViewerService.openFile(context, item.fullPath);
+      return;
+    }
+    await _viewFile(item);
+  }
+
+  /// 内置查看器打开（加密文件先问密码；可由 _smartOpen 预置密码避免二次询问）
+  Future<void> _viewFile(FileItem item, {String? presetPassword}) async {
+    String? password = presetPassword;
+    if (password == null) {
+      final isEnc = await EncryptionService.isEncryptedFile(item.fullPath);
+      if (isEnc) {
+        final hint = await EncryptionService.getPasswordHint(item.fullPath);
+        password = await _showPasswordDialog(hint: hint);
+        if (password == null) return;
+      }
+    }
+    try {
+      await FileViewerService.openFile(
+        context, item.fullPath,
+        password: password, isEncrypted: password != null,
+      );
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('$e')),
+        );
+      }
     }
   }
 
@@ -919,7 +915,7 @@ class WeiMiVaultScreenState extends State<WeiMiVaultScreen> {
     if (item.isDirectory) {
       _navigateTo(item.fullPath);
     } else {
-      _openFile(item);
+      _smartOpen(item);
     }
   }
 
@@ -965,6 +961,7 @@ class WeiMiVaultScreenState extends State<WeiMiVaultScreen> {
         if (item.isEncryptedFile)
           _ctxMenuItem('decrypt', Icons.lock_open_outlined, '解密'),
         _ctxMenuItem('view', Icons.visibility_outlined, '查看'),
+        _ctxMenuItem('systemopen', Icons.open_in_new, '用系统打开'),
         _ctxMenuItem('openfolder', Icons.folder_open, '打开所在路径'),
         const PopupMenuDivider(),
         _ctxMenuItem('copypath', Icons.content_copy, '复制完整路径'),
@@ -984,6 +981,14 @@ class WeiMiVaultScreenState extends State<WeiMiVaultScreen> {
         break;
       case 'view':
         await _viewFile(item);
+        break;
+      case 'systemopen':
+        final ok = await SystemOpenService.open(item.fullPath);
+        if (!ok && mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(content: Text('系统中没有能打开此文件的应用')),
+          );
+        }
         break;
       case 'encrypt':
         _encryptFile(item.fullPath);
@@ -1111,6 +1116,13 @@ class WeiMiVaultScreenState extends State<WeiMiVaultScreen> {
             if (!mounted) return;
             await _encryptFile(f);
           }
+        }
+        if (mounted) _clearSelection();
+        break;
+      case 'systemopen':
+        // 逐个调系统打开（多选时可能弹多个窗口，用户预期内）
+        for (final f in _selectedPaths.toList()) {
+          await SystemOpenService.open(f);
         }
         if (mounted) _clearSelection();
         break;
@@ -1844,7 +1856,7 @@ class WeiMiVaultScreenState extends State<WeiMiVaultScreen> {
                 if (_selecting) {
                   if (selectable) _toggleSelect(item.fullPath);
                 } else {
-                  _openFile(item);
+                  _smartOpen(item);
                 }
               },
         onLongPress: selectable && !_isDesktop
@@ -1932,7 +1944,7 @@ class WeiMiVaultScreenState extends State<WeiMiVaultScreen> {
                             if (_selecting) {
                               if (selectable) _toggleSelect(item.fullPath);
                             } else {
-                              _openFile(item);
+                              _smartOpen(item);
                             }
                           },
                     onDoubleTap:
@@ -2117,7 +2129,7 @@ class WeiMiVaultScreenState extends State<WeiMiVaultScreen> {
               if (_selecting) {
                 if (selectable) _toggleSelect(item.fullPath);
               } else {
-                _openFile(item);
+                _smartOpen(item);
               }
             },
       onDoubleTap: _isDesktop ? () => _desktopOpen(item) : null,
@@ -2269,51 +2281,6 @@ IconData _fileIcon(FileItem item) {
     return Icons.text_snippet;
   }
   return Icons.insert_drive_file;
-}
-
-/// 文件底部操作菜单
-enum FileAction { view, encrypt, decrypt, delete }
-
-class _FileActionSheet extends StatelessWidget {
-  final FileItem item;
-  const _FileActionSheet({required this.item});
-
-  @override
-  Widget build(BuildContext context) {
-    return Container(
-      padding: EdgeInsets.only(bottom: MediaQuery.of(context).viewInsets.bottom),
-      decoration: const BoxDecoration(
-        color: Colors.white,
-        borderRadius: BorderRadius.vertical(top: Radius.circular(16)),
-      ),
-      child: Padding(
-        padding: const EdgeInsets.all(16),
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Text(item.name, style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w500)),
-            const SizedBox(height: 8),
-            Text(item.humanSize, style: TextStyle(fontSize: 12, color: Colors.grey)),
-            const Divider(height: 24),
-            _actionRow(context, icon: Icons.visibility, label: '查看', action: FileAction.view),
-            if (!item.isEncryptedFile)
-              _actionRow(context, icon: Icons.lock, label: '加密', action: FileAction.encrypt),
-            if (item.isEncryptedFile)
-              _actionRow(context, icon: Icons.lock_open, label: '解密', action: FileAction.decrypt),
-            _actionRow(context, icon: Icons.delete, label: '删除', action: FileAction.delete, color: Colors.red),
-          ],
-        ),
-      ),
-    );
-  }
-
-  Widget _actionRow(BuildContext ctx, {required IconData icon, required String label, required FileAction action, Color? color}) {
-    return ListTile(
-      leading: Icon(icon, color: color ?? Colors.black87),
-      title: Text(label, style: TextStyle(color: color)),
-      onTap: () => Navigator.pop(ctx, action),
-    );
-  }
 }
 
 /// 文件列表行

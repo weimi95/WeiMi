@@ -429,6 +429,23 @@ class DiskIndexService {
     return Isolate.run(() => _countSync());
   }
 
+  /// 释放索引内存（收托盘/隐藏窗口时调用，降低常驻内存）。
+  /// Rust 侧 drop 路径 Vec + MTIMES 表 + 根列表，Dart 侧计数清零。
+  /// 下次搜索前 prepareIndex/rebuildIfStale 会从磁盘加载（毫秒级）或全量重建，无感恢复。
+  static Future<void> releaseMemory() async {
+    try {
+      await Isolate.run(() {
+        final lib = RustCrypto.ensureLib();
+        final fn = lib.lookupFunction<ffi.Void Function(), void Function()>(
+            'index_free');
+        fn();
+      });
+    } catch (_) {}
+    _cachedCount = null;
+    _lastBuiltAt = null;
+    countNotifier.value = null;
+  }
+
   /// 释放进程级索引内存 + 删除落盘文件（下次搜索自动重建）
   static Future<void> freeIndex() async {
     await Isolate.run(() => _freeSync());

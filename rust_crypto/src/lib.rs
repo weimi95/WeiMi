@@ -1141,10 +1141,13 @@ pub extern "C" fn index_count() -> i64 {
     }
 }
 
-/// 释放全盘索引内存（置回 None，Vec 随 drop 归还）
+/// 释放全盘索引内存（全部置回 None：路径 Vec + 目录 MTIMES 表 + 根列表）。
+/// 收托盘/隐藏窗口时调用，内存随 drop 归还；下次搜索前 rebuildIfStale 会重建。
 #[no_mangle]
 pub extern "C" fn index_free() {
     *INDEX_PATHS.lock().unwrap() = None;
+    *INDEX_DIR_MTIMES.lock().unwrap() = None;
+    *INDEX_ROOTS.lock().unwrap() = None;
 }
 
 #[no_mangle]
