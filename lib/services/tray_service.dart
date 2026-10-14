@@ -8,22 +8,27 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'package:system_tray/system_tray.dart';
 import 'package:window_manager/window_manager.dart';
 import 'disk_index_service.dart';
+import 'daemon_service.dart';
 import 'lan_transfer_service.dart';
 import 'quick_search_window.dart';
 import 'share_receive_service.dart';
 
-/// 单进程托盘：主程序自身常驻托盘。
-///
-/// 关窗 = 收托盘（隐藏窗口 + 清空图片缓存瘦身），微密飞传仍在后台跑；
-/// 托盘菜单「退出」= 真正退出进程。相比双进程（独立托盘进程）方案，
-/// 少一个 Flutter 引擎实例 + 无 IPC 层，结构更简单、生命周期可控。
+/// 托盘策略（v1.0.47 起双模式）：
+/// - 守护进程模式（Windows 默认开）：weimi_daemon.exe 托管托盘+飞传（约 10MB），
+///   关窗 = UI 进程直接退出（Flutter 引擎内存归零）；UI 运行期间守护进程让出端口。
+/// - 自托管模式（守护进程缺失/被关）：维持 v1.0.37 单进程方案——关窗收托盘，
+///   进程常驻（收托盘时释放索引+图片缓存瘦身）。
 class TrayService {
   TrayService._();
   static final TrayService instance = TrayService._();
 
   bool _initialized = false;
   bool _lean = false;
+  bool _daemonMode = false; // 守护进程接管托盘+飞传
   final SystemTray _tray = SystemTray();
+
+  /// 是否处于守护进程模式（诊断/设置页展示用）。
+  bool get daemonMode => _daemonMode;
 
   /// 关闭按钮行为设置：
   /// - 'prompt'（默认）：弹确认框问「收托盘 / 退出」
@@ -74,6 +79,15 @@ class TrayService {
     });
     windowManager.addListener(_WindowListener());
 
+    // 守护进程模式：确保 weimi_daemon.exe 在跑并推配置（ui_active=true，
+    // 守护进程让出端口给 UI）；成功则 UI 不再自建托盘，关窗即退出 UI 进程。
+    if (await DaemonService.enabled()) {
+      _daemonMode = await DaemonService.ensureRunning();
+      if (_daemonMode) {
+        await DaemonService.pushConfig(uiActive: true);
+      }
+    }
+
     // 主程序自身常驻跑微密飞传（替代原独立托盘进程的飞传）
     // 按设置决定是否广播发现（「可被发现」关闭时仍保留 HTTP 接收端口）
     await LanTransferService.instance.applyDiscoverSetting();
@@ -81,7 +95,9 @@ class TrayService {
     // 目录变更实时监视（ReadDirectoryChangesW）：新建/删除/改名秒级进索引
     unawaited(DiskIndexService.ensureWatcher());
 
-    await _initSystemTray();
+    if (!_daemonMode) {
+      await _initSystemTray();
+    }
     // 全局接收确认：无论飞传页是否打开，非信任设备发来均弹窗提示（收托盘时也弹）
     LanTransferService.instance.confirmHandler = _globalConfirmRequest;
 
@@ -155,8 +171,14 @@ class TrayService {
     await windowManager.focus();
   }
 
-  /// 真正退出（托盘菜单「退出」）。
+  /// 真正退出（托盘菜单「退出」/ 关闭确认「退出程序」）。
+  /// 守护进程模式下先通知守护进程一并退出，托盘不留残留。
   Future<void> exitApp() async {
+    if (_daemonMode) {
+      try {
+        await DaemonService.pushConfig(quit: true);
+      } catch (_) {}
+    }
     try {
       await LanTransferService.instance.stopReceiving();
     } catch (_) {}
@@ -168,6 +190,20 @@ class TrayService {
       debugPrint('tray: destroy failed: $e');
     }
     exit(0);
+  }
+
+  /// 守护进程模式关窗：把飞传交给守护进程，UI 进程直接退出。
+  /// 守护进程不在或推送失败时返回 false（调用方回退自托管收托盘）。
+  Future<bool> handOffToDaemon() async {
+    if (!_daemonMode) return false;
+    try {
+      final ok = await DaemonService.pushConfig(uiActive: false);
+      if (ok) {
+        await _tray.destroy().catchError((_) {});
+        exit(0);
+      }
+    } catch (_) {}
+    return false;
   }
 
   /// 收托盘瘦身：隐藏窗口 + 清空图片缓存 + 释放全盘索引内存。
@@ -199,6 +235,11 @@ class _WindowListener extends WindowListener {
   @override
   void onWindowClose() async {
     final action = TrayService.instance.closeAction;
+    // 守护进程模式：收托盘路径（prompt/minimize）变成 UI 退出 + 守护进程接管；
+    // closeAction='quit' 表示用户明确要求关闭即完全退出，不走接管。
+    if (action != 'quit' && await TrayService.instance.handOffToDaemon()) {
+      return;
+    }
     if (action == 'quit') {
       // 静默退出
       await TrayService.instance.exitApp();
@@ -234,18 +275,19 @@ Future<void> _showCloseConfirm() async {
     await TrayService.instance.enterLeanMode();
     return;
   }
+  final daemonMode = TrayService.instance.daemonMode;
   final choice = await showDialog<bool>(
     context: ctx,
     barrierDismissible: false,
     builder: (c) => AlertDialog(
       title: const Text('关闭微密文件'),
-      content: const Text(
-          '选择「收进托盘」后，程序会继续在后台运行（微密飞传保持可用）；\n'
-          '选择「退出程序」则完全关闭应用。'),
+      content: Text(daemonMode
+          ? '选择「收进后台」后，主程序会退出（几乎不占内存），\n托盘和微密飞传由轻量守护进程（约 10MB）继续运行；\n选择「退出程序」则连守护进程一起完全关闭。'
+          : '选择「收进托盘」后，程序会继续在后台运行（微密飞传保持可用）；\n选择「退出程序」则完全关闭应用。'),
       actions: [
         TextButton(
           onPressed: () => Navigator.pop(c, false),
-          child: const Text('收进托盘'),
+          child: const Text('收进后台'),
         ),
         TextButton(
           onPressed: () => Navigator.pop(c, true),

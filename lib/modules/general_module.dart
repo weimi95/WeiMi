@@ -56,6 +56,17 @@ class GeneralModule extends FeatureModule {
             type: SettingType.custom,
             customTile: (ctx) => const _AutostartTile(),
           ),
+        if (_isDesktop && Platform.isWindows)
+          SettingDef(
+            key: 'daemon_enabled',
+            title: '后台省内存模式（守护进程）',
+            icon: Icons.memory_outlined,
+            group: '桌面端',
+            subtitle: '关窗后主程序退出，托盘与飞传交给轻量守护进程（约 10MB）；重启应用后生效',
+            type: SettingType.bool,
+            defaultValue: true,
+            visible: () => _isDesktop && Platform.isWindows,
+          ),
         SettingDef(
           key: 'tray_close_action',
           title: '点右上角关闭按钮时',

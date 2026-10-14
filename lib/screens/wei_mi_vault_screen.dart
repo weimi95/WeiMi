@@ -5,6 +5,8 @@ import 'package:flutter/services.dart';
 import 'package:file_picker/file_picker.dart' hide FileType;
 import 'package:path/path.dart' as p;
 import 'package:permission_handler/permission_handler.dart';
+
+import '../services/android_compat.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import '../models/file_item.dart';
 import '../services/disk_index_service.dart';
@@ -392,11 +394,16 @@ class WeiMiVaultScreenState extends State<WeiMiVaultScreen> {
       }
     }
 
-    // Android 存储权限状态
+    // Android 存储权限状态（API 30+ 查「所有文件访问」，低版本查传统存储权限）
     if (Platform.isAndroid) {
       try {
-        final status = await Permission.manageExternalStorage.status;
-        _storageGranted = status.isGranted;
+        if (await AndroidCompat.useManageStorage()) {
+          final status = await Permission.manageExternalStorage.status;
+          _storageGranted = status.isGranted;
+        } else {
+          final status = await Permission.storage.status;
+          _storageGranted = status.isGranted;
+        }
       } catch (_) {}
     }
 
@@ -412,43 +419,76 @@ class WeiMiVaultScreenState extends State<WeiMiVaultScreen> {
   // ============ 权限 ============
 
   Future<void> _requestStoragePermission() async {
-    final status = await Permission.manageExternalStorage.request();
-    if (status.isGranted) {
-      if (mounted) setState(() => _storageGranted = true);
-    } else if (status.isPermanentlyDenied || status.isRestricted) {
+    final useManage = await AndroidCompat.useManageStorage();
+    final perm =
+        useManage ? Permission.manageExternalStorage : Permission.storage;
+    var status = await perm.request();
+    if (status.isPermanentlyDenied || status.isRestricted) {
+      if (useManage && mounted) await _showManageStorageGuide();
       await openAppSettings();
     }
     // 复查一次（用户可能去设置里开了再回来）
-    final now = await Permission.manageExternalStorage.status;
+    final now = await perm.status;
     if (mounted) setState(() => _storageGranted = now.isGranted);
   }
 
-  Widget get _permissionBanner => Container(
-        margin: const EdgeInsets.fromLTRB(12, 8, 12, 0),
-        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-        decoration: BoxDecoration(
-          color: Colors.orange.shade50,
-          borderRadius: BorderRadius.circular(8),
-          border: Border.all(color: Colors.orange.shade200),
+  /// 「所有文件访问」授权指引（跳设置前先讲清步骤，避免用户找不到开关）。
+  Future<void> _showManageStorageGuide() async {
+    await showDialog<void>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('授权步骤'),
+        content: const Text(
+          '1. 在接下来的设置页找到「微密文件」\n'
+          '2. 点「权限」→「文件和媒体」\n'
+          '3. 选择「允许管理所有文件」\n\n'
+          '该权限仅用于浏览和加密本地文件，微密不会上传任何数据。',
         ),
-        child: Row(
-          children: [
-            Icon(Icons.warning_amber_outlined,
-                size: 20, color: Colors.orange.shade700),
-            const SizedBox(width: 8),
-            Expanded(
-              child: Text(
-                '需要「所有文件访问」权限才能浏览手机目录',
-                style: TextStyle(fontSize: 13, color: Colors.orange.shade900),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.pop(ctx), child: const Text('知道了')),
+        ],
+      ),
+    );
+  }
+
+  Widget get _permissionBanner {
+    return FutureBuilder<bool>(
+      future: AndroidCompat.useManageStorage(),
+      builder: (ctx, snap) {
+        final useManage = snap.data ?? true;
+        return Container(
+          margin: const EdgeInsets.fromLTRB(12, 8, 12, 0),
+          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+          decoration: BoxDecoration(
+            color: Colors.orange.shade50,
+            borderRadius: BorderRadius.circular(8),
+            border: Border.all(color: Colors.orange.shade200),
+          ),
+          child: Row(
+            children: [
+              Icon(Icons.warning_amber_outlined,
+                  size: 20, color: Colors.orange.shade700),
+              const SizedBox(width: 8),
+              Expanded(
+                child: Text(
+                  useManage
+                      ? '需要「所有文件访问」权限才能浏览手机目录'
+                      : '需要存储权限才能浏览手机目录',
+                  style: TextStyle(
+                      fontSize: 13, color: Colors.orange.shade900),
+                ),
               ),
-            ),
-            TextButton(
-              onPressed: _requestStoragePermission,
-              child: const Text('去授权'),
-            ),
-          ],
-        ),
-      );
+              TextButton(
+                onPressed: _requestStoragePermission,
+                child: const Text('去授权'),
+              ),
+            ],
+          ),
+        );
+      },
+    );
+  }
 
   // ============ 我的目录：添加 / 移除 ============
 

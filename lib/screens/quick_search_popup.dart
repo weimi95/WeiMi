@@ -7,9 +7,12 @@ import 'package:path/path.dart' as p;
 import '../framework/module_registry.dart';
 import '../framework/setting_store.dart';
 import '../services/disk_index_service.dart';
+import '../services/quick_launch_service.dart';
 import '../services/quick_search_window.dart';
 import '../services/search_history_service.dart';
+import '../services/system_open_service.dart';
 import '../widgets/file_thumbnail.dart';
+import 'package:url_launcher/url_launcher.dart';
 
 /// 快捷搜索浮窗（双击 Ctrl 呼出）。
 ///
@@ -54,6 +57,7 @@ class _QuickSearchPopupState extends State<QuickSearchPopup> {
   bool _focused = true;
   bool _showHistory = false; // 主动点搜索框/按方向键后才展示历史（呼出时保持窄条）
   List<String> _history = [];
+  List<QuickLaunchItem> _quickLaunch = [];
   Timer? _debounce;
 
   int get _guideIndex => _hits.length; // 引导位紧跟最后一条结果
@@ -74,6 +78,7 @@ class _QuickSearchPopupState extends State<QuickSearchPopup> {
     _controller.addListener(_onQueryChanged);
     _inputFocus.addListener(_onFocusChanged);
     unawaited(_reloadHistory());
+    unawaited(_reloadQuickLaunch());
   }
 
   @override
@@ -90,6 +95,213 @@ class _QuickSearchPopupState extends State<QuickSearchPopup> {
   Future<void> _reloadHistory() async {
     final list = await SearchHistoryService.load();
     if (mounted) setState(() => _history = list);
+  }
+
+  Future<void> _reloadQuickLaunch() async {
+    final list = await QuickLaunchService.load();
+    if (mounted) setState(() => _quickLaunch = list);
+  }
+
+  Future<void> _openQuickLaunch(QuickLaunchItem item) async {
+    if (item.url) {
+      final uri = Uri.tryParse(item.target);
+      if (uri != null) {
+        try {
+          await launchUrl(uri, mode: LaunchMode.externalApplication);
+        } catch (_) {}
+      }
+      return;
+    }
+    unawaited(SystemOpenService.open(item.target));
+  }
+
+  Future<void> _showQuickLaunchMenu(
+      QuickLaunchItem? item, int? index, TapUpDetails d) async {
+    final overlay =
+        Overlay.of(context).context.findRenderObject() as RenderBox;
+    final pos = RelativeRect.fromLTRB(
+      d.globalPosition.dx,
+      d.globalPosition.dy,
+      overlay.size.width - d.globalPosition.dx,
+      overlay.size.height - d.globalPosition.dy,
+    );
+    final action = await showMenu<String>(
+      context: context,
+      position: pos,
+      items: [
+        if (item != null)
+          const PopupMenuItem(value: 'open', child: Text('打开')),
+        if (item != null)
+          const PopupMenuItem(value: 'edit', child: Text('编辑')),
+        if (item != null)
+          const PopupMenuItem(value: 'remove', child: Text('删除')),
+        const PopupMenuItem(value: 'add', child: Text('添加快捷项')),
+      ],
+    );
+    if (!mounted || action == null) return;
+    if (action == 'open' && item != null) return _openQuickLaunch(item);
+    if (action == 'remove' && index != null) {
+      await QuickLaunchService.remove(index);
+      await _reloadQuickLaunch();
+      return;
+    }
+    if (action == 'edit' && item != null && index != null) {
+      final edited = await _editQuickLaunchDialog(item);
+      if (edited != null) {
+        await QuickLaunchService.update(index, edited);
+        await _reloadQuickLaunch();
+      }
+      return;
+    }
+    if (action == 'add') {
+      final created = await _editQuickLaunchDialog(null);
+      if (created != null) {
+        await QuickLaunchService.add(created);
+        await _reloadQuickLaunch();
+      }
+    }
+  }
+
+  /// 添加 / 编辑快捷项弹窗（item=null 为添加）。
+  Future<QuickLaunchItem?> _editQuickLaunchDialog(
+      QuickLaunchItem? item) async {
+    final nameCtrl = TextEditingController(text: item?.name ?? '');
+    final targetCtrl = TextEditingController(text: item?.target ?? '');
+    final formKey = GlobalKey<FormState>();
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: Text(item == null ? '添加快捷项' : '编辑快捷项'),
+        content: Form(
+          key: formKey,
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              TextFormField(
+                controller: nameCtrl,
+                autofocus: true,
+                decoration: const InputDecoration(
+                    labelText: '名称', hintText: '如：记事本、百度'),
+                validator: (v) =>
+                    (v == null || v.trim().isEmpty) ? '请输入名称' : null,
+              ),
+              TextFormField(
+                controller: targetCtrl,
+                decoration: const InputDecoration(
+                  labelText: '路径或网址',
+                  hintText: r'如 C:\Windows\notepad.exe 或 https://…',
+                ),
+                validator: (v) =>
+                    (v == null || v.trim().isEmpty) ? '请输入路径或网址' : null,
+              ),
+            ],
+          ),
+        ),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.pop(ctx, false),
+              child: const Text('取消')),
+          FilledButton(
+              onPressed: () {
+                if (formKey.currentState?.validate() ?? false) {
+                  Navigator.pop(ctx, true);
+                }
+              },
+              child: const Text('确定')),
+        ],
+      ),
+    );
+    if (ok != true) return null;
+    return QuickLaunchItem(
+        name: nameCtrl.text.trim(), target: targetCtrl.text.trim());
+  }
+
+  Widget _buildQuickLaunchStrip(ThemeData theme) {
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.fromLTRB(8, 5, 8, 5),
+      decoration: BoxDecoration(
+        border: Border(
+          bottom: BorderSide(color: theme.dividerColor, width: 0.5),
+        ),
+      ),
+      child: SizedBox(
+        height: 58,
+        child: Row(
+          children: [
+            Expanded(
+              child: GestureDetector(
+                behavior: HitTestBehavior.translucent,
+                onSecondaryTapUp: (d) => _showQuickLaunchMenu(null, null, d),
+                child: ListView.separated(
+                  scrollDirection: Axis.horizontal,
+                  padding: EdgeInsets.zero,
+                  itemCount: _quickLaunch.length,
+                  separatorBuilder: (_, __) => const SizedBox(width: 2),
+                  itemBuilder: (ctx, i) {
+                    final it = _quickLaunch[i];
+                    return GestureDetector(
+                      onSecondaryTapUp: (d) => _showQuickLaunchMenu(it, i, d),
+                      child: InkWell(
+                        borderRadius: BorderRadius.circular(8),
+                        onTap: () => _openQuickLaunch(it),
+                        child: SizedBox(
+                          width: 66,
+                          child: Column(
+                            mainAxisAlignment: MainAxisAlignment.center,
+                            children: [
+                              Icon(
+                                it.url ? Icons.public : Icons.apps,
+                                size: 26,
+                                color: it.url
+                                    ? theme.colorScheme.primary
+                                    : theme.colorScheme.onSurfaceVariant,
+                              ),
+                              const SizedBox(height: 2),
+                              Text(
+                                it.name,
+                                style: const TextStyle(fontSize: 10),
+                                maxLines: 1,
+                                overflow: TextOverflow.ellipsis,
+                              ),
+                            ],
+                          ),
+                        ),
+                      ),
+                    );
+                  },
+                ),
+              ),
+            ),
+            const SizedBox(width: 2),
+            InkWell(
+              borderRadius: BorderRadius.circular(8),
+              onTap: () async {
+                final created = await _editQuickLaunchDialog(null);
+                if (created != null) {
+                  await QuickLaunchService.add(created);
+                  await _reloadQuickLaunch();
+                }
+              },
+              child: SizedBox(
+                width: 44,
+                child: Column(
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  children: [
+                    Icon(Icons.add,
+                        size: 26, color: theme.colorScheme.primary),
+                    const SizedBox(height: 2),
+                    Text('添加',
+                        style: TextStyle(
+                            fontSize: 10, color: theme.hintColor)),
+                  ],
+                ),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
   }
 
   void _onFocusChanged() {
@@ -332,6 +544,8 @@ class _QuickSearchPopupState extends State<QuickSearchPopup> {
                 ],
               ),
             ),
+            // 快捷方式区（常驻：呼出即见，右键可添加/编辑/删除）
+            _buildQuickLaunchStrip(theme),
             // 主体：窄条时不渲染（窗口本身只有 64 高）
             if (_expanded)
               Expanded(

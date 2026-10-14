@@ -198,8 +198,74 @@ class DiskIndexService {
     if (isBuilt) return _cachedCount!;
     await loadRemovablePref(); // 先读设置再定 roots（移动设备开关）
     final rc = await loadIndex();
-    if (rc == 0 && isBuilt) return _cachedCount!;
+    if (rc == 0 && isBuilt) {
+      unawaited(startupHealthCheck()); // 从磁盘加载的索引做一次健康度抽样
+      return _cachedCount!;
+    }
     return buildIndex(defaultRoots());
+  }
+
+  // ==================== 启动自检（索引健康度抽样，v1.0.47） ====================
+
+  static bool _healthChecked = false;
+
+  /// 启动自检：随机抽样索引条目比对磁盘，缺失率 > 5% 判定索引腐化
+  /// （大量删除/移动/换盘未同步），后台自动全量重建（顺带落盘）。
+  /// 每个进程生命周期只对「从磁盘加载」的索引执行一次；全量新建的索引不检。
+  static Future<void> startupHealthCheck() async {
+    if (_healthChecked || !isBuilt) return;
+    _healthChecked = true;
+    try {
+      final count = _cachedCount ?? 0;
+      if (count <= 0) return;
+      final n = count < 200 ? count : 200;
+      final sample = await Isolate.run(() => _sampleSync(n));
+      if (sample.isEmpty) return;
+      var missing = 0;
+      for (final path in sample) {
+        try {
+          if (!File(path).existsSync()) missing++;
+        } catch (_) {
+          missing++;
+        }
+      }
+      if (missing / sample.length > 0.05) {
+        await buildIndex(defaultRoots(), persist: true);
+      }
+    } catch (_) {
+      // 自检失败不影响主流程
+    }
+  }
+
+  /// 从 Rust 索引随机抽 n 条路径（两次调用须同 seed 保证取样一致）。
+  static List<String> _sampleSync(int n) {
+    final lib = RustCrypto.ensureLib();
+    final fn = lib.lookupFunction<
+        ffi.Int32 Function(ffi.Uint64, ffi.Size, ffi.Pointer<ffi.Uint8>,
+            ffi.Pointer<ffi.Size>),
+        int Function(int, int, ffi.Pointer<ffi.Uint8>,
+            ffi.Pointer<ffi.Size>)>('index_sample');
+    final seed = DateTime.now().microsecondsSinceEpoch & 0x7FFFFFFFFFFFFFFF;
+    final lenPtr = calloc<ffi.Size>();
+    try {
+      var rc = fn(seed, n, ffi.nullptr, lenPtr);
+      if (rc != 0) return const [];
+      var len = lenPtr.value;
+      if (len == 0) return const [];
+      final buf = calloc<ffi.Uint8>(len);
+      try {
+        rc = fn(seed, n, buf, lenPtr);
+        if (rc != 0) return const [];
+        len = lenPtr.value;
+        final text =
+            utf8.decode(buf.asTypedList(len), allowMalformed: true);
+        return text.split('\n').where((e) => e.isNotEmpty).toList();
+      } finally {
+        calloc.free(buf);
+      }
+    } finally {
+      calloc.free(lenPtr);
+    }
   }
 
   /// 索引是否明显过期（加载自旧落盘文件或距上次构建超过 [maxAge]）。

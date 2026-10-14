@@ -1208,6 +1208,57 @@ pub extern "C" fn index_search(
     0
 }
 
+/// 启动自检抽样：按 LCG 伪随机取 n 条路径（\n 连接）。
+/// 同 seed 结果可复现；n > 总数时全量。只读不写，O(n)。
+#[no_mangle]
+pub extern "C" fn index_sample(
+    seed: u64,
+    n: usize,
+    out_ptr: *mut u8,
+    out_len: *mut usize,
+) -> i32 {
+    if out_len.is_null() {
+        return -3;
+    }
+    let guard = INDEX_PATHS.lock().unwrap();
+    let data = match guard.as_ref() {
+        Some(d) => d,
+        None => return -1,
+    };
+    let total = data.len();
+    if total == 0 {
+        return 0;
+    }
+    let take = n.min(total);
+    let mut state = seed ^ 0x9E37_79B9_7F4A_7C15;
+    let mut picked: Vec<&str> = Vec::with_capacity(take);
+    let mut seen = std::collections::HashSet::new();
+    let mut attempts: usize = 0;
+    while picked.len() < take && attempts < take * 20 + 64 {
+        attempts += 1;
+        state = state
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
+        let idx = (state >> 16) as usize % total;
+        if seen.insert(idx) {
+            picked.push(data[idx].as_str());
+        }
+    }
+    let joined = picked.join("\n");
+    let out = joined.as_bytes();
+    unsafe {
+        if out_ptr.is_null() {
+            *out_len = out.len();
+        } else {
+            let cap = *out_len;
+            let m = out.len().min(cap);
+            std::ptr::copy_nonoverlapping(out.as_ptr(), out_ptr, m);
+            *out_len = m;
+        }
+    }
+    0
+}
+
 /// v1/v2 通用 body 写入：路径列表 + 各目录 mtime + 根列表。
 fn write_index_body<W: std::io::Write>(
     w: &mut W,

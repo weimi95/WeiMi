@@ -15,9 +15,10 @@ class WindowModeService {
 
   final ValueNotifier<bool> popupMode = ValueNotifier<bool>(false);
 
-  /// 浮窗两态尺寸：刚呼出只有搜索框（窄条），输入内容后展开成完整结果窗。
-  static const Size popupCollapsedSize = Size(680, 64);
-  static const Size popupExpandedSize = Size(680, 480);
+  /// 浮窗两态尺寸：刚呼出 = 搜索框 + 快捷方式区（常驻条），
+  /// 输入内容后展开成完整结果窗（快捷条仍在）。
+  static const Size popupCollapsedSize = Size(680, 140);
+  static const Size popupExpandedSize = Size(680, 520);
 
   /// 浮窗 → 主界面要带过去的搜索词（「打开主界面」时由浮窗写入，
   /// 主界面 WeiMiVaultScreenState.initState 消费）。
