@@ -176,7 +176,7 @@ class TrayService {
   Future<void> exitApp() async {
     if (_daemonMode) {
       try {
-        await DaemonService.pushConfig(quit: true);
+        await DaemonService.pushConfig(uiActive: false, quit: true);
       } catch (_) {}
     }
     try {

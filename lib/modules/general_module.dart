@@ -63,7 +63,7 @@ class GeneralModule extends FeatureModule {
             icon: Icons.memory_outlined,
             group: '桌面端',
             subtitle: '关窗后主程序退出，托盘与飞传交给轻量守护进程（约 10MB）；重启应用后生效',
-            type: SettingType.bool,
+            type: SettingType.boolean,
             defaultValue: true,
             visible: () => _isDesktop && Platform.isWindows,
           ),
