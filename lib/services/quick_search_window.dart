@@ -29,6 +29,12 @@ class WindowModeService {
     return q;
   }
 
+  /// 守护进程浮窗会话：UI 由守护进程在双击 Ctrl 时冷启拉起（--page=popup）。
+  /// 浮窗收起（Esc/失焦/双击 Ctrl）后 UI 没必要继续占内存，
+  /// 通过 [onPopupDismissed] 回调交接回守护进程并退出。
+  static bool daemonPopupSession = false;
+  static Future<void> Function()? onPopupDismissed;
+
   Size? _savedSize;
   Offset? _savedPosition;
   bool _switching = false;
@@ -52,17 +58,17 @@ class WindowModeService {
   }
 
   /// 呼出浮窗：先切内容（窗口以浮窗形态显示，不闪主界面），
-  /// 再保存主窗口几何 → 窄条居中置顶（只显示搜索框，输入后展开）。
+  /// 再保存主窗口几何 → 居中置顶展开（空态显示常用软件/网址网格）。
   Future<void> showPopup() async {
     popupMode.value = true;
-    _popupExpanded = false;
+    _popupExpanded = true;
     try {
       if (_savedSize == null) {
         _savedSize = await windowManager.getSize();
         _savedPosition = await windowManager.getPosition();
       }
       await windowManager.setAlwaysOnTop(true);
-      await windowManager.setSize(popupCollapsedSize);
+      await windowManager.setSize(popupExpandedSize);
       await windowManager.center();
       await windowManager.show();
       await windowManager.focus();
@@ -88,7 +94,7 @@ class WindowModeService {
 
   /// 收起浮窗。
   /// [openMain] = true 时恢复并显示主界面（浮窗内「打开主界面」入口）；
-  /// false 时仅隐藏窗口（失焦/Esc）。
+  /// false 时仅隐藏窗口（失焦/Esc）。守护进程浮窗会话下隐藏即交接退出。
   Future<void> hidePopup({bool openMain = false}) async {
     if (!isPopup) {
       if (openMain) await _restoreNormal();
@@ -96,11 +102,23 @@ class WindowModeService {
     }
     popupMode.value = false;
     if (openMain) {
+      daemonPopupSession = false; // 留在主界面，会话结束
       await _restoreNormal();
-    } else {
-      try {
-        await windowManager.hide();
-      } catch (_) {}
+      return;
+    }
+    try {
+      await windowManager.hide();
+    } catch (_) {}
+    final session = daemonPopupSession;
+    daemonPopupSession = false;
+    if (session) {
+      final cb = onPopupDismissed;
+      if (cb != null) {
+        await Future<void>.delayed(const Duration(milliseconds: 150));
+        try {
+          await cb();
+        } catch (_) {}
+      }
     }
   }
 

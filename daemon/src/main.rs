@@ -96,6 +96,7 @@ const NIIF_INFO: u32 = 0x1;
 const WM_USER_TRAYCB: u32 = 0x500; // WM_USER-based custom callback id
 const WM_RBUTTONUP: u32 = 0x0205;
 const WM_LBUTTONDBLCLK: u32 = 0x0203;
+const NIN_BALLOONUSERCLICK: u32 = 0x405; // user clicked the notification balloon
 const WM_COMMAND: u32 = 0x0111;
 const WM_CLOSE: u32 = 0x0010;
 const WM_DESTROY: u32 = 0x0002;
@@ -244,6 +245,8 @@ extern "system" {
         flags: u32,
     ) -> HANDLE;
     fn RegisterWindowMessageW(text: *const u16) -> u32;
+    fn FindWindowW(cls: *const u16, title: *const u16) -> HWND;
+    fn GetAsyncKeyState(vk: i32) -> i16;
     fn GetModuleHandleW(name: *const u16) -> HINSTANCE;
     fn SetTimer(hwnd: HWND, id: usize, ms: u32, proc_: usize) -> usize;
 }
@@ -262,6 +265,7 @@ extern "system" {
 
 #[link(name = "kernel32")]
 extern "system" {
+    fn Sleep(ms: u32);
     fn CreateMutexW(attr: *const core::ffi::c_void, initial: i32, name: *const u16) -> HANDLE;
     fn WaitForSingleObject(h: HANDLE, ms: u32) -> u32;
     fn CreateProcessW(
@@ -473,7 +477,7 @@ fn tray_menu(hwnd: HWND) {
     }
 }
 
-fn launch_ui() {
+fn launch_ui(page: Option<&str>) {
     let exe = {
         let cfg = CONFIG.lock().unwrap();
         cfg.as_ref()
@@ -485,9 +489,21 @@ fn launch_ui() {
         balloon("微密文件", "尚未配置主程序路径");
         return;
     }
+    // 主界面已在跑：不再重复拉起（UI 只有一个实例）
+    unsafe {
+        let cls = to_wide("FLUTTER_RUNNER_WIN32_WINDOW");
+        if !FindWindowW(cls.as_ptr(), std::ptr::null()).is_null() {
+            log("launch_ui: main window already open");
+            return;
+        }
+    }
     unsafe {
         let w = to_wide(&exe);
-        let mut cmd = to_wide(&format!("\"{}\"", exe));
+        let cmdline = match page {
+            Some(p) => format!("\"{}\" --page={}", exe, p),
+            None => format!("\"{}\"", exe),
+        };
+        let mut cmd = to_wide(&cmdline);
         let mut si: [u8; 104] = [0; 104]; // STARTUPINFOW x64
         let mut pi: [u8; 24] = [0; 24]; // PROCESS_INFORMATION x64
         si[0] = 104;
@@ -510,8 +526,52 @@ fn launch_ui() {
     }
 }
 
-fn tray_update_icon(new_icon: HICON) {
-    if let Ok(mut g) = TRAY.lock() {
+/// 双击 Ctrl 呼出快捷搜索浮窗（UI 进程不在时由守护进程代听）。
+/// 与 Dart HotkeyService 同参数：80ms 采样、350ms 窗口、按下沿判定。
+/// UI 在跑时（主窗口存在）守护进程不介入，由 UI 自己处理。
+fn hotkey_thread() {
+    std::thread::spawn(|| {
+        const VK_LCTRL: i32 = 0xA2;
+        const VK_RCTRL: i32 = 0xA3;
+        const WINDOW_MS: u128 = 350;
+        let mut was_down = false;
+        let mut last_press: Option<std::time::Instant> = None;
+        loop {
+            unsafe { Sleep(80) };
+            // 主窗口存在 → UI 自己监听，守护进程静默
+            unsafe {
+                let cls = to_wide("FLUTTER_RUNNER_WIN32_WINDOW");
+                if !FindWindowW(cls.as_ptr(), std::ptr::null()).is_null() {
+                    was_down = false;
+                    last_press = None;
+                    continue;
+                }
+            }
+            let down = unsafe {
+                (GetAsyncKeyState(VK_LCTRL) as u16 & 0x8000) != 0
+                    || (GetAsyncKeyState(VK_RCTRL) as u16 & 0x8000) != 0
+            };
+            if down {
+                if !was_down {
+                    let now = std::time::Instant::now();
+                    match last_press {
+                        Some(t) if now.duration_since(t).as_millis() <= WINDOW_MS => {
+                            last_press = None;
+                            was_down = true;
+                            log("double ctrl: launching ui popup");
+                            launch_ui(Some("popup"));
+                        }
+                        _ => last_press = Some(now),
+                    }
+                }
+            } else {
+                was_down = false;
+            }
+        }
+    });
+}
+
+fn tray_update_icon(new_icon: HICON) {    if let Ok(mut g) = TRAY.lock() {
         if let Some(t) = g.as_mut() {
             t.icon = new_icon as isize;
             unsafe {
@@ -544,13 +604,16 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wp: usize, lp: isize) -
             if m == WM_RBUTTONUP {
                 tray_menu(hwnd);
             } else if m == WM_LBUTTONDBLCLK {
-                launch_ui();
+                launch_ui(None);
+            } else if m == NIN_BALLOONUSERCLICK {
+                // 点通知气泡：直达传输记录页
+                launch_ui(Some("transfer"));
             }
             0
         }
         WM_COMMAND => match wp & 0xFFFF {
             MENU_OPEN => {
-                launch_ui();
+                launch_ui(None);
                 0
             }
             MENU_QUIT => {
@@ -641,7 +704,15 @@ fn resolve_save_path(dir: &str, name: &str) -> Option<PathBuf> {
     Some(cand)
 }
 
-fn record_history(kind: &str, name: &str, size: u64, peer: &str, ok: bool, text: Option<&str>) {
+fn record_history(
+    kind: &str,
+    name: &str,
+    size: u64,
+    peer: &str,
+    ok: bool,
+    text: Option<&str>,
+    path: Option<&str>,
+) {
     let docs = {
         let cfg = CONFIG.lock().unwrap();
         cfg.as_ref()
@@ -657,6 +728,7 @@ fn record_history(kind: &str, name: &str, size: u64, peer: &str, ok: bool, text:
         "direction": "in",
         "name": name,
         "text": text,
+        "path": path,
         "size": size,
         "peerName": peer,
         "time": now_ms(),
@@ -1090,7 +1162,15 @@ fn handle_client(mut stream: TcpStream) {
                         "微密飞传",
                         &format!("收到网页文件：{}\n来自 {}", name, from),
                     );
-                    record_history("file", &name, n, &from, true, None);
+                    record_history(
+                        "file",
+                        &name,
+                        n,
+                        &from,
+                        true,
+                        None,
+                        Some(&save.to_string_lossy()),
+                    );
                 }
                 Err(e) => {
                     let _ = std::fs::remove_file(&save);
@@ -1099,7 +1179,7 @@ fn handle_client(mut stream: TcpStream) {
                         500,
                         &serde_json::json!({"ok": false, "error": e.to_string()}),
                     );
-                    record_history("file", &name, 0, &from, false, None);
+                    record_history("file", &name, 0, &from, false, None, None);
                 }
             }
         }
@@ -1127,6 +1207,7 @@ fn handle_client(mut stream: TcpStream) {
                 &from,
                 true,
                 Some(&text),
+                None,
             );
         }
         ("POST", "/weimi/send") | ("POST", "/weimi/text") => {
@@ -1167,7 +1248,7 @@ fn handle_client(mut stream: TcpStream) {
                         sender_name
                     ),
                 );
-                record_history("text", "（已拒收）", 0, &sender_name, false, None);
+                record_history("text", "（已拒收）", 0, &sender_name, false, None, None);
                 return;
             }
             if is_text {
@@ -1185,6 +1266,7 @@ fn handle_client(mut stream: TcpStream) {
                     &sender_name,
                     true,
                     Some(&text),
+                    None,
                 );
             } else {
                 let fname = {
@@ -1215,7 +1297,15 @@ fn handle_client(mut stream: TcpStream) {
                             "微密飞传",
                             &format!("收到文件：{}\n来自 {}", name, sender_name),
                         );
-                        record_history("file", &name, n, &sender_name, true, None);
+                        record_history(
+                            "file",
+                            &name,
+                            n,
+                            &sender_name,
+                            true,
+                            None,
+                            Some(&save.to_string_lossy()),
+                        );
                     }
                     Err(e) => {
                         let _ = std::fs::remove_file(&save);
@@ -1224,7 +1314,7 @@ fn handle_client(mut stream: TcpStream) {
                             500,
                             &serde_json::json!({"ok": false, "error": e.to_string()}),
                         );
-                        record_history("file", &name, 0, &sender_name, false, None);
+                        record_history("file", &name, 0, &sender_name, false, None, None);
                     }
                 }
             }
@@ -1599,6 +1689,7 @@ fn main() {
 
     std::thread::spawn(config_server);
     std::thread::spawn(transfer_loop);
+    hotkey_thread();
 
     unsafe {
         let inst = GetModuleHandleW(std::ptr::null());

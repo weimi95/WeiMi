@@ -1,8 +1,12 @@
 import 'dart:async';
+import 'dart:io';
 
+import 'package:desktop_drop/desktop_drop.dart';
+import 'package:file_picker/file_picker.dart' as fp;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:path/path.dart' as p;
+import 'package:path_provider/path_provider.dart';
 
 import '../framework/module_registry.dart';
 import '../framework/setting_store.dart';
@@ -54,17 +58,24 @@ class _QuickSearchPopupState extends State<QuickSearchPopup> {
   int _page = 0;
   bool _searching = false;
   bool _indexReady = false;
-  bool _focused = true;
-  bool _showHistory = false; // 主动点搜索框/按方向键后才展示历史（呼出时保持窄条）
+  bool _focused = false; // 点击搜索框后进搜索视图；呼出默认显示常用网格
+  bool _showHistory = false; // 搜索视图里聚焦且无输入时展示搜索历史
   List<String> _history = [];
   List<QuickLaunchItem> _quickLaunch = [];
   Timer? _debounce;
+  Directory? _iconDir; // 快捷项图标缓存目录
+  final Map<String, Future<String?>> _iconFuts = {}; // target → 图标解析
 
   int get _guideIndex => _hits.length; // 引导位紧跟最后一条结果
   int get _totalItems => _hits.isEmpty ? 0 : _hits.length + 1;
   int get _maxPage => _totalItems <= 0 ? 0 : (_totalItems - 1) ~/ _rowsPerPage;
-  bool get _expanded =>
-      _controller.text.trim().isNotEmpty || (_focused && _showHistory);
+
+  /// 搜索视图：点了搜索框或有输入词；否则显示常用软件/网址网格
+  bool get _searchMode =>
+      _focused || _controller.text.trim().isNotEmpty;
+
+  /// 浮窗固定展开（空态显示常用网格，需要完整高度；不再有窄条态）
+  bool get _expanded => true;
 
   @override
   void initState() {
@@ -79,6 +90,15 @@ class _QuickSearchPopupState extends State<QuickSearchPopup> {
     _inputFocus.addListener(_onFocusChanged);
     unawaited(_reloadHistory());
     unawaited(_reloadQuickLaunch());
+    unawaited(() async {
+      try {
+        final base = await getApplicationSupportDirectory();
+        final dir =
+            Directory('${base.path}${Platform.pathSeparator}quick_launch_icons');
+        if (!dir.existsSync()) dir.createSync(recursive: true);
+        if (mounted) setState(() => _iconDir = dir);
+      } catch (_) {}
+    }());
   }
 
   @override
@@ -187,9 +207,25 @@ class _QuickSearchPopupState extends State<QuickSearchPopup> {
               ),
               TextFormField(
                 controller: targetCtrl,
-                decoration: const InputDecoration(
+                decoration: InputDecoration(
                   labelText: '路径或网址',
                   hintText: r'如 C:\Windows\notepad.exe 或 https://…',
+                  suffixIcon: IconButton(
+                    tooltip: '浏览文件',
+                    icon: const Icon(Icons.folder_open, size: 20),
+                    onPressed: () async {
+                      try {
+                        final res = await fp.FilePicker.platform
+                            .pickFiles(type: fp.FileType.any);
+                        final path = res?.files.single.path;
+                        if (path == null || path.isEmpty) return;
+                        targetCtrl.text = path;
+                        if (nameCtrl.text.trim().isEmpty) {
+                          nameCtrl.text = p.basenameWithoutExtension(path);
+                        }
+                      } catch (_) {}
+                    },
+                  ),
                 ),
                 validator: (v) =>
                     (v == null || v.trim().isEmpty) ? '请输入路径或网址' : null,
@@ -216,94 +252,165 @@ class _QuickSearchPopupState extends State<QuickSearchPopup> {
         name: nameCtrl.text.trim(), target: targetCtrl.text.trim());
   }
 
-  Widget _buildQuickLaunchStrip(ThemeData theme) {
-    return Container(
-      width: double.infinity,
-      padding: const EdgeInsets.fromLTRB(8, 5, 8, 5),
-      decoration: BoxDecoration(
-        border: Border(
-          bottom: BorderSide(color: theme.dividerColor, width: 0.5),
+  /// 空态主体：常用软件 / 常用网址网格（点击搜索框或输入后切搜索视图）。
+  /// 支持把 .lnk/.exe 等文件直接拖进来添加；右键条目编辑/删除，右键空白/末尾「添加」格新增。
+  Widget _buildLaunchGrid(ThemeData theme) {
+    final items = _quickLaunch;
+    if (items.isEmpty) {
+      return Center(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(Icons.launch_rounded, size: 40, color: theme.hintColor),
+            const SizedBox(height: 12),
+            Text('把常用软件的快捷方式拖到这里\n或点击下方按钮添加',
+                textAlign: TextAlign.center,
+                style: TextStyle(fontSize: 13, color: theme.hintColor)),
+            const SizedBox(height: 12),
+            OutlinedButton.icon(
+              onPressed: () => _addQuickLaunchByDialog(),
+              icon: const Icon(Icons.add, size: 18),
+              label: const Text('添加常用'),
+            ),
+          ],
+        ),
+      );
+    }
+    return SingleChildScrollView(
+      child: GestureDetector(
+        behavior: HitTestBehavior.translucent,
+        onSecondaryTapUp: (d) => _showQuickLaunchMenu(null, null, d),
+        child: Padding(
+          padding: const EdgeInsets.all(10),
+          child: Wrap(
+            spacing: 6,
+            runSpacing: 6,
+            children: [
+              for (var i = 0; i < items.length; i++)
+                _buildLaunchTile(theme, items[i], i),
+              _buildLaunchAddTile(theme),
+            ],
+          ),
         ),
       ),
-      child: SizedBox(
-        height: 58,
-        child: Row(
+    );
+  }
+
+  Widget _buildLaunchTile(ThemeData theme, QuickLaunchItem it, int index) {
+    return GestureDetector(
+      onSecondaryTapUp: (d) => _showQuickLaunchMenu(it, index, d),
+      child: InkWell(
+        borderRadius: BorderRadius.circular(8),
+        onTap: () => _openQuickLaunch(it),
+        child: Container(
+          width: 88,
+          padding: const EdgeInsets.symmetric(vertical: 8),
+          decoration: BoxDecoration(
+            borderRadius: BorderRadius.circular(8),
+            border: Border.all(color: theme.dividerColor, width: 0.5),
+          ),
+          child: Column(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              SizedBox(
+                width: 32,
+                height: 32,
+                child: _launchIcon(theme, it),
+              ),
+              const SizedBox(height: 4),
+              Text(
+                it.name,
+                style: const TextStyle(fontSize: 11),
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildLaunchAddTile(ThemeData theme) {
+    return InkWell(
+      borderRadius: BorderRadius.circular(8),
+      onTap: () => _addQuickLaunchByDialog(),
+      child: Container(
+        width: 88,
+        padding: const EdgeInsets.symmetric(vertical: 8),
+        decoration: BoxDecoration(
+          borderRadius: BorderRadius.circular(8),
+          border: Border.all(
+              color: theme.dividerColor, width: 0.5),
+        ),
+        child: Column(
+          mainAxisAlignment: MainAxisAlignment.center,
           children: [
-            Expanded(
-              child: GestureDetector(
-                behavior: HitTestBehavior.translucent,
-                onSecondaryTapUp: (d) => _showQuickLaunchMenu(null, null, d),
-                child: ListView.separated(
-                  scrollDirection: Axis.horizontal,
-                  padding: EdgeInsets.zero,
-                  itemCount: _quickLaunch.length,
-                  separatorBuilder: (_, __) => const SizedBox(width: 2),
-                  itemBuilder: (ctx, i) {
-                    final it = _quickLaunch[i];
-                    return GestureDetector(
-                      onSecondaryTapUp: (d) => _showQuickLaunchMenu(it, i, d),
-                      child: InkWell(
-                        borderRadius: BorderRadius.circular(8),
-                        onTap: () => _openQuickLaunch(it),
-                        child: SizedBox(
-                          width: 66,
-                          child: Column(
-                            mainAxisAlignment: MainAxisAlignment.center,
-                            children: [
-                              Icon(
-                                it.url ? Icons.public : Icons.apps,
-                                size: 26,
-                                color: it.url
-                                    ? theme.colorScheme.primary
-                                    : theme.colorScheme.onSurfaceVariant,
-                              ),
-                              const SizedBox(height: 2),
-                              Text(
-                                it.name,
-                                style: const TextStyle(fontSize: 10),
-                                maxLines: 1,
-                                overflow: TextOverflow.ellipsis,
-                              ),
-                            ],
-                          ),
-                        ),
-                      ),
-                    );
-                  },
-                ),
-              ),
-            ),
-            const SizedBox(width: 2),
-            InkWell(
-              borderRadius: BorderRadius.circular(8),
-              onTap: () async {
-                final created = await _editQuickLaunchDialog(null);
-                if (created != null) {
-                  await QuickLaunchService.add(created);
-                  await _reloadQuickLaunch();
-                }
-              },
-              child: SizedBox(
-                width: 44,
-                child: Column(
-                  mainAxisAlignment: MainAxisAlignment.center,
-                  children: [
-                    Icon(Icons.add,
-                        size: 26, color: theme.colorScheme.primary),
-                    const SizedBox(height: 2),
-                    Text('添加',
-                        style: TextStyle(
-                            fontSize: 10, color: theme.hintColor)),
-                  ],
-                ),
-              ),
-            ),
+            Icon(Icons.add,
+                size: 30, color: theme.colorScheme.primary),
+            const SizedBox(height: 6),
+            Text('添加',
+                style: TextStyle(
+                    fontSize: 11, color: theme.hintColor)),
           ],
         ),
       ),
     );
   }
 
+  /// 条目图标：网址 favicon / 本地程序系统图标（均落盘缓存），失败用兜底。
+  Widget _launchIcon(ThemeData theme, QuickLaunchItem it) {
+    final dir = _iconDir;
+    Widget fallback() => Icon(
+          it.url ? Icons.public : Icons.apps,
+          size: 26,
+          color: it.url
+              ? theme.colorScheme.primary
+              : theme.colorScheme.onSurfaceVariant,
+        );
+    if (dir == null) return fallback();
+    final fut = _iconFuts.putIfAbsent(
+      it.target,
+      () => QuickLaunchService.resolveIcon(it, dir.path),
+    );
+    return FutureBuilder<String?>(
+      future: fut,
+      builder: (ctx, snap) {
+        final path = snap.data;
+        if (path == null || !File(path).existsSync()) return fallback();
+        return Image.file(File(path),
+            width: 30, height: 30, fit: BoxFit.contain,
+            errorBuilder: (_, __, ___) => fallback());
+      },
+    );
+  }
+
+  /// 对话框添加（带浏览按钮选文件/快捷方式）
+  Future<void> _addQuickLaunchByDialog() async {
+    final created = await _editQuickLaunchDialog(null);
+    if (created != null) {
+      await QuickLaunchService.add(created);
+      await _reloadQuickLaunch();
+    }
+  }
+
+  /// 拖文件进来 → 逐个加入常用（文件名去后缀作名称）
+  Future<void> _addDroppedForLaunch(List<dynamic> files) async {
+    var added = 0;
+    for (final f in files) {
+      try {
+        final path = (f.path as String?) ?? '';
+        if (path.isEmpty) continue;
+        final item = QuickLaunchItem(
+          name: p.basenameWithoutExtension(path),
+          target: path,
+        );
+        await QuickLaunchService.add(item);
+        added++;
+      } catch (_) {}
+    }
+    if (added > 0) await _reloadQuickLaunch();
+  }
   void _onFocusChanged() {
     if (!mounted) return;
     setState(() => _focused = _inputFocus.hasFocus);
@@ -513,7 +620,6 @@ class _QuickSearchPopupState extends State<QuickSearchPopup> {
                     child: TextField(
                       controller: _controller,
                       focusNode: _inputFocus,
-                      autofocus: true,
                       onTap: () {
                         if (!_showHistory) {
                           setState(() => _showHistory = true);
@@ -544,11 +650,12 @@ class _QuickSearchPopupState extends State<QuickSearchPopup> {
                 ],
               ),
             ),
-            // 快捷方式区（常驻：呼出即见，右键可添加/编辑/删除）
-            _buildQuickLaunchStrip(theme),
-            // 主体：窄条时不渲染（窗口本身只有 64 高）
-            if (_expanded)
-              Expanded(
+            // 主体：搜索视图（历史/结果）或常用软件/网址网格（空态）
+            Expanded(
+              child: DropTarget(
+                onDragDone: (details) {
+                  if (!_searchMode) _addDroppedForLaunch(details.files);
+                },
                 child: Listener(
                   onPointerSignal: (event) {
                     // 兼容各 Flutter 版本：滚轮事件基类为 PointerSignalEvent，
@@ -562,9 +669,12 @@ class _QuickSearchPopupState extends State<QuickSearchPopup> {
                     }
                     if (dy != 0) _onWheel(dy);
                   },
-                  child: _buildBody(theme),
+                  child: _searchMode
+                      ? _buildBody(theme)
+                      : _buildLaunchGrid(theme),
                 ),
               ),
+            ),
             // 底部动作条 + 状态（仅展开态）
             if (_expanded) ...[
               if (showActions && selectedHit != null && actions.isNotEmpty)

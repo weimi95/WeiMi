@@ -32,6 +32,8 @@ import 'services/lan_transfer_service.dart';
 import 'services/view_prefs_service.dart';
 import 'services/share_receive_service.dart';
 import 'services/receive_notify_service.dart';
+import 'services/daemon_service.dart';
+import 'screens/transfer_history_screen.dart';
 import 'widgets/file_thumbnail.dart';
 import 'package:path_provider/path_provider.dart';
 
@@ -45,7 +47,7 @@ const String kLastOutputDirKey = 'last_output_dir';
 // 桌面端单进程常驻托盘：窗口关闭 = 收托盘（见 tray_service.dart），由 TrayService 管理。
 
 
-void main() async {
+void main(List<String> args) async {
   WidgetsFlutterBinding.ensureInitialized();
 
   // Initialize localization service before running the app
@@ -110,6 +112,42 @@ void main() async {
   }
 
   runApp(const MyApp());
+
+  // ===== 守护进程深链（weimi_daemon.exe 拉起 UI 时带参）=====
+  // --page=transfer：点收包通知 → 打开传输记录页
+  // --page=popup  ：双击 Ctrl → 直接进快捷搜索浮窗（守护进程浮窗会话）
+  final deepTransfer = args.contains('--page=transfer');
+  final deepPopup = args.contains('--page=popup');
+  if (deepPopup) {
+    WindowModeService.instance.popupMode.value = true;
+    WindowModeService.daemonPopupSession = true;
+    WindowModeService.instance.onPopupDismissed = () =>
+        TrayService.instance.handOffToDaemon();
+  }
+  if (deepTransfer) {
+    unawaited(() async {
+      await WidgetsBinding.instance.endOfFrame;
+      try {
+        final ctx = ShareReceiveService.navigatorKey.currentContext;
+        if (ctx != null) {
+          Navigator.of(ctx).push(MaterialPageRoute(
+              builder: (_) => const TransferHistoryScreen()));
+        }
+      } catch (_) {}
+    }());
+  }
+  if (deepPopup) {
+    unawaited(() async {
+      await WidgetsBinding.instance.endOfFrame;
+      try {
+        await WindowModeService.instance.showPopup();
+      } catch (_) {}
+    }());
+  }
+  // 合并守护进程期间的收包记录进传输历史（按偏移增量，幂等）
+  if (Platform.isWindows) {
+    unawaited(DaemonService.mergeDaemonHistory());
+  }
 }
 
 class MyApp extends StatefulWidget {

@@ -6,6 +6,7 @@ import 'package:path_provider/path_provider.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import 'lan_transfer_service.dart';
+import 'transfer_history_service.dart';
 
 /// 原生守护进程（weimi_daemon.exe，Windows）桥接。
 ///
@@ -20,6 +21,7 @@ class DaemonService {
 
   static const int _configPort = 52349;
   static const String _kEnabled = 'daemon_enabled';
+  static const String _kHistOffset = 'daemon_hist_offset';
 
   /// 是否启用守护进程模式（默认开，仅桌面端生效）。
   static Future<bool> enabled() async {
@@ -109,5 +111,60 @@ class DaemonService {
     } catch (_) {
       return false;
     }
+  }
+
+  /// 把守护进程期间收到的文件/文本记录（daemon_transfers.jsonl）合并进
+  /// UI 传输历史。按字节偏移增量读取（prefs 存已读偏移），不会重复入账。
+  static Future<void> mergeDaemonHistory() async {
+    try {
+      if (!Platform.isWindows) return;
+      final docs = await getApplicationDocumentsDirectory();
+      final f = File(
+          '${docs.path}${Platform.pathSeparator}daemon_transfers.jsonl');
+      if (!f.existsSync()) return;
+      final prefs = await SharedPreferences.getInstance();
+      var offset = prefs.getInt(_kHistOffset) ?? 0;
+      final size = f.lengthSync();
+      if (size < offset) offset = 0; // 文件被清空过，从头读
+      if (size == offset) return;
+      final raf = await f.open();
+      try {
+        await raf.setPosition(offset);
+        final bytes = await raf.read(size - offset);
+        final text = utf8.decode(bytes, allowMalformed: true);
+        var lines = text.split('\n');
+        var consumed = bytes.length;
+        if (!text.endsWith('\n') && lines.isNotEmpty) {
+          // 末尾半行（守护进程还在写）：留到下轮
+          consumed -= utf8.encode(lines.last).length;
+          lines = lines.sublist(0, lines.length - 1);
+        }
+        for (final raw in lines) {
+          final line = raw.trim();
+          if (line.isEmpty) continue;
+          try {
+            final j = json.decode(line) as Map<String, dynamic>;
+            final ms = (j['time'] as num?)?.toInt() ?? 0;
+            await TransferHistoryService.instance.add(TransferRecord(
+              id: 'dm-$ms-${j['name'] ?? ''}',
+              kind: (j['kind'] as String?) ?? 'file',
+              direction: 'in',
+              name: (j['name'] as String?) ?? '',
+              path: j['path'] as String?,
+              text: j['text'] as String?,
+              size: (j['size'] as num?)?.toInt() ?? 0,
+              peerName: (j['peerName'] as String?) ?? '',
+              time: ms > 0
+                  ? DateTime.fromMillisecondsSinceEpoch(ms)
+                  : DateTime.now(),
+              ok: (j['ok'] as bool?) ?? true,
+            ));
+          } catch (_) {}
+        }
+        if (consumed > 0) await prefs.setInt(_kHistOffset, offset + consumed);
+      } finally {
+        await raf.close();
+      }
+    } catch (_) {}
   }
 }
