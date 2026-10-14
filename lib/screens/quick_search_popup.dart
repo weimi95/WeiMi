@@ -215,6 +215,9 @@ class _QuickSearchPopupState extends State<QuickSearchPopup> {
                     icon: const Icon(Icons.folder_open, size: 20),
                     onPressed: () async {
                       try {
+                        // 系统文件选择器会抢走焦点：抑制浮窗「失焦即收」，
+                        // 否则浮窗连同上层的添加对话框一起被收掉、选择结果丢失
+                        WindowModeService.suppressBlurHide = true;
                         final res = await fp.FilePicker.platform
                             .pickFiles(type: fp.FileType.any);
                         final path = res?.files.single.path;
@@ -223,7 +226,12 @@ class _QuickSearchPopupState extends State<QuickSearchPopup> {
                         if (nameCtrl.text.trim().isEmpty) {
                           nameCtrl.text = p.basenameWithoutExtension(path);
                         }
-                      } catch (_) {}
+                      } catch (_) {} finally {
+                        // 留一点余量，等失焦事件走完再恢复
+                        Future.delayed(const Duration(milliseconds: 400), () {
+                          WindowModeService.suppressBlurHide = false;
+                        });
+                      }
                     },
                   ),
                 ),

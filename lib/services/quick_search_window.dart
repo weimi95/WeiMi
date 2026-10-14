@@ -35,6 +35,10 @@ class WindowModeService {
   static bool daemonPopupSession = false;
   static Future<void> Function()? onPopupDismissed;
 
+  /// 置为 true 时浮窗失焦不自动收起（打开系统文件选择器等原生子对话框期间，
+  /// 否则选择器一抢焦点浮窗连带上层的添加对话框一起被收掉）。
+  static bool suppressBlurHide = false;
+
   Size? _savedSize;
   Offset? _savedPosition;
   bool _switching = false;
@@ -67,7 +71,7 @@ class WindowModeService {
         _savedSize = await windowManager.getSize();
         _savedPosition = await windowManager.getPosition();
       }
-      await windowManager.setAlwaysOnTop(true);
+      // 不置顶：与普通窗口一致（前台时在上，弹系统文件对话框等不被挡）。
       await windowManager.setSize(popupExpandedSize);
       await windowManager.center();
       await windowManager.show();
@@ -142,6 +146,7 @@ class WindowModeService {
   /// 失焦处理：浮窗态且设置允许时自动收起（由 _WindowListener 调用）。
   void onWindowBlur() {
     if (!isPopup) return;
+    if (suppressBlurHide) return;
     if (SettingStore.get<bool>('qs_hide_on_blur', true)) {
       unawaited(hidePopup());
     }
