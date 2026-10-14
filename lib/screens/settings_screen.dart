@@ -60,9 +60,6 @@ class SettingsScreen extends StatelessWidget {
       ],
     ];
   }
-            ),
-    );
-  }
 
   Widget _buildTile(BuildContext context, SettingDef def) {
     switch (def.type) {
