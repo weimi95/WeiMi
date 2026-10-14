@@ -5,6 +5,7 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 import 'package:path/path.dart' as p;
 import 'package:shared_preferences/shared_preferences.dart';
+import '../framework/setting_store.dart';
 import 'trusted_devices_service.dart';
 import 'transfer_history_service.dart';
 import 'receive_notify_service.dart';
@@ -496,13 +497,29 @@ class LanTransferService {
     }
   }
 
-  /// 接收决策：信任设备免确认直收；后台模式无法弹窗（非信任拒收）；
-  /// 前台未信任走 confirmHandler 弹窗；无 UI 可弹时拒收。
+  /// 未信任请求的确认等待秒数（设置可调，下限 5 秒防误设 0）。
+  static int confirmTimeoutSecs() {
+    final v = SettingStore.get<int>('lan_untrusted_timeout', 30);
+    return v < 5 ? 5 : v;
+  }
+
+  /// 接收决策：信任设备免确认直收；
+  /// 未信任设备按设置 lan_untrusted_mode：
+  /// - confirm（默认）：弹确认框等待 lan_untrusted_timeout 秒，超时自动拒收
+  /// - reject：直接拒收
   Future<bool> _decideAccept(
       {required String senderId,
       required Future<bool> Function() ask}) async {
     if (TrustedDevices.instance.isTrustedSync(senderId)) return true;
-    return ask();
+    final mode = SettingStore.get<String>('lan_untrusted_mode', 'confirm');
+    if (mode == 'reject') return false;
+    try {
+      return await ask()
+          .timeout(Duration(seconds: confirmTimeoutSecs()),
+              onTimeout: () => false);
+    } catch (_) {
+      return false;
+    }
   }
 
   Future<void> _handleIncomingFile(HttpRequest req) async {
@@ -533,6 +550,19 @@ class LanTransferService {
           name: request.fileName,
           from: request.senderName,
           trusted: TrustedDevices.instance.isTrustedSync(request.senderId)));
+      // 拒收也要留痕：通知 + 传输记录（点开传输记录能看到谁想发什么）
+      ReceiveNotifyService.instance.rejected(request.fileName, request.senderName);
+      await TransferHistoryService.instance.add(TransferRecord(
+        id: '${DateTime.now().microsecondsSinceEpoch}_inr',
+        kind: 'file',
+        direction: 'in',
+        name: request.fileName,
+        size: request.fileSize,
+        peerName: request.senderName,
+        time: DateTime.now(),
+        ok: false,
+        note: '未信任，已拒收',
+      ));
       return;
     }
 
@@ -617,6 +647,18 @@ class LanTransferService {
       req.response.statusCode = HttpStatus.forbidden;
       req.response.write(json.encode({'ok': false, 'error': 'rejected'}));
       await req.response.close();
+      ReceiveNotifyService.instance.rejected('一条文本消息', senderName);
+      await TransferHistoryService.instance.add(TransferRecord(
+        id: '${DateTime.now().microsecondsSinceEpoch}_intr',
+        kind: 'text',
+        direction: 'in',
+        name: '（已拒收）来自 $senderName 的文本',
+        size: req.contentLength,
+        peerName: senderName,
+        time: DateTime.now(),
+        ok: false,
+        note: '未信任，已拒收',
+      ));
       return;
     }
 

@@ -71,6 +71,12 @@ class ReceiveNotifyService {
     _fire('收到 $from 的文本：$preview');
   }
 
+  /// 未信任设备的请求被拒收（自动拒收/超时/直接拒绝模式），也要让机主知道
+  void rejected(String name, String from) {
+    _fire('已拒收来自 $from 的「$name」（未信任设备）。'
+        '可在 设置-微密飞传-信任设备 添加后请对方重发');
+  }
+
   void _fire(String body, {String? revealPath}) {
     if (!_enabled) return;
     if (isDesktop) {

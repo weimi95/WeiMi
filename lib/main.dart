@@ -77,6 +77,21 @@ void main(List<String> args) async {
         LanTransferService.instance.applyDiscoverSetting();
       }
     } catch (_) {}
+    // Android 全局接收确认：未信任设备发来弹窗（带超时倒计时）。
+    // 桌面端在 initDesktop 挂同款；App 在后台时对话框等回到前台再渲染，
+    // 超时由 _decideAccept 的 timeout 兜底自动拒收。
+    LanTransferService.instance.confirmHandler = (req) async {
+      final ctx = ShareReceiveService.navigatorKey.currentContext;
+      if (ctx == null) return false;
+      return showIncomingConfirmDialog(
+        ctx,
+        senderName: req.senderName,
+        content: req.fileName,
+        sizeBytes: req.fileSize,
+        isText: req.fileName == '一条文本消息',
+        countdownSec: LanTransferService.confirmTimeoutSecs(),
+      );
+    };
   }
 
   // 系统分享接收（Android SEND/SEND_MULTIPLE → 飞传页）

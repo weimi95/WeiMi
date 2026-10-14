@@ -7,6 +7,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 
 import 'lan_transfer_service.dart';
 import 'transfer_history_service.dart';
+import '../framework/setting_store.dart';
 
 /// 原生守护进程（weimi_daemon.exe，Windows）桥接。
 ///
@@ -93,6 +94,14 @@ class DaemonService {
         'docs_dir': docs.path,
         'exe_path': Platform.resolvedExecutable,
         'ui_active': uiActive,
+        // 未信任请求策略同步给守护进程（confirm=等待确认 / reject=直接拒绝）
+        'untrusted_confirm':
+            SettingStore.get<String>('lan_untrusted_mode', 'confirm') !=
+                'reject',
+        'untrusted_confirm_secs': () {
+          final v = SettingStore.get<int>('lan_untrusted_timeout', 30);
+          return v < 5 ? 5 : v;
+        }(),
       };
       return _sendLine(jsonEncode(cfg));
     } catch (_) {
@@ -111,6 +120,49 @@ class DaemonService {
     } catch (_) {
       return false;
     }
+  }
+
+  /// 写一行并等守护进程回一行 JSON（confirm/get_pending 用）。
+  static Future<Map<String, dynamic>?> _sendRecv(String line) async {
+    Socket? sock;
+    try {
+      sock = await Socket.connect('127.0.0.1', _configPort,
+          timeout: const Duration(milliseconds: 1500));
+      sock.add('$line\n'.codeUnits);
+      await sock.flush();
+      final txt = await utf8.decoder
+          .bind(sock)
+          .transform(const LineSplitter())
+          .first
+          .timeout(const Duration(seconds: 5));
+      return json.decode(txt) as Map<String, dynamic>;
+    } catch (_) {
+      return null;
+    } finally {
+      sock?.destroy();
+    }
+  }
+
+  /// 取走守护进程挂着的未信任请求（取走即弹出确认框，由 UI 决定）。
+  static Future<List<Map<String, dynamic>>> fetchPending() async {
+    try {
+      final res = await _sendRecv('{"cmd":"get_pending"}');
+      if (res == null) return const [];
+      final list = res['pending'];
+      if (list is! List) return const [];
+      return list.whereType<Map>().map((e) {
+        return e.map((k, v) => MapEntry(k as String, v));
+      }).toList();
+    } catch (_) {
+      return const [];
+    }
+  }
+
+  /// 回传确认结果。返回 false = 该请求已被守护进程超时清理。
+  static Future<bool> sendConfirm(String token, bool accept) async {
+    final res = await _sendRecv(
+        jsonEncode({'cmd': 'confirm', 'token': token, 'accept': accept}));
+    return res != null && res['found'] == true;
   }
 
   /// 把守护进程期间收到的文件/文本记录（daemon_transfers.jsonl）合并进

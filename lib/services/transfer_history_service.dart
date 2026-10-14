@@ -206,6 +206,7 @@ class TransferRecord {
   final String peerName;
   final DateTime time;
   final bool ok;
+  final String? note; // 失败/拒收原因（如「未信任，已拒收」），ok=false 时显示
 
   TransferRecord({
     required this.id,
@@ -218,6 +219,7 @@ class TransferRecord {
     required this.peerName,
     required this.time,
     required this.ok,
+    this.note,
   });
 
   factory TransferRecord.fromJson(Map<String, dynamic> j) => TransferRecord(
@@ -232,6 +234,7 @@ class TransferRecord {
         time:
             DateTime.tryParse((j['time'] as String?) ?? '') ?? DateTime.now(),
         ok: (j['ok'] as bool?) ?? true,
+        note: j['note'] as String?,
       );
 
   Map<String, dynamic> toJson() => {
@@ -245,6 +248,7 @@ class TransferRecord {
         'peerName': peerName,
         'time': time.toIso8601String(),
         'ok': ok,
+        if (note != null) 'note': note,
       };
 
   TransferRecord copyWith({String? path, String? text}) => TransferRecord(
@@ -258,5 +262,6 @@ class TransferRecord {
         peerName: peerName,
         time: time,
         ok: ok,
+        note: note,
       );
 }

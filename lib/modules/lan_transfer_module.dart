@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:io';
 
 import 'package:file_picker/file_picker.dart';
@@ -5,6 +6,7 @@ import 'package:flutter/material.dart';
 
 import '../framework/module_registry.dart';
 import '../framework/setting_store.dart';
+import '../services/daemon_service.dart';
 import '../services/lan_transfer_service.dart';
 import '../services/receive_notify_service.dart';
 import '../services/trusted_devices_service.dart';
@@ -53,6 +55,49 @@ class LanTransferModule extends FeatureModule {
                     : '已关闭：其他设备搜索不到本机（网页快传仍可用）'),
                 duration: const Duration(seconds: 2),
               ));
+            }
+          },
+        ),
+        SettingDef(
+          key: 'lan_untrusted_mode',
+          title: '未信任设备请求',
+          icon: Icons.front_hand_outlined,
+          subtitle: '等待确认：弹窗询问，超时自动拒收（时限可调，默认 30 秒）；'
+              '直接拒绝：不询问立即拒收。拒收在传输记录里留痕',
+          type: SettingType.choice,
+          defaultValue: 'confirm',
+          options: ['confirm', 'reject'],
+          optionLabels: {'confirm': '等待用户确认', 'reject': '直接拒绝'},
+          group: '未信任设备请求',
+          onChanged: (ctx, v) {
+            // 同步策略给守护进程（Windows 守护进程模式下由它负责接收）
+            if (Platform.isWindows) {
+              unawaited(DaemonService.pushConfig(uiActive: true));
+            }
+            if (ctx.mounted) {
+              ScaffoldMessenger.of(ctx).showSnackBar(SnackBar(
+                content: Text(v == 'reject'
+                    ? '已设为直接拒绝：未信任设备的请求立即拒收（传输记录留痕）'
+                    : '已设为等待确认：未信任设备请求弹窗询问，30 秒未确认自动拒收'),
+                duration: const Duration(seconds: 2),
+              ));
+            }
+          },
+        ),
+        SettingDef(
+          key: 'lan_untrusted_timeout',
+          title: '等待确认时限',
+          icon: Icons.timer_outlined,
+          subtitle: '未信任请求弹窗等待的秒数，超时自动拒收（选「直接拒绝」时无效）',
+          type: SettingType.integer,
+          defaultValue: 30,
+          min: 10,
+          max: 120,
+          divisions: 22,
+          group: '未信任设备请求',
+          onChanged: (ctx, v) {
+            if (Platform.isWindows) {
+              unawaited(DaemonService.pushConfig(uiActive: true));
             }
           },
         ),

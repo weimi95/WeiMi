@@ -5,6 +5,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:path/path.dart' as p;
 
+import '../services/file_viewer_service.dart';
 import '../services/transfer_history_service.dart';
 
 /// 传输记录页：飞传收发的文件/文本列表。
@@ -177,6 +178,26 @@ class _TransferHistoryScreenState extends State<TransferHistoryScreen> {
     );
   }
 
+  /// 单击打开：支持的格式（图片/视频/音频/文本/PDF）进内置查看器，
+  /// 不支持的（安装包等）调系统「打开方式」；拒收/无文件给提示。
+  Future<void> _openRecord(TransferRecord r) async {
+    final path = r.path;
+    if (path == null || path.isEmpty) {
+      _snack(r.ok ? '该记录没有可打开的文件' : '该内容已被拒收，未传输',
+          r.ok ? Colors.orange : Colors.red);
+      return;
+    }
+    if (!File(path).existsSync()) {
+      _snack('文件已不存在（可能被移动或删除）', Colors.orange);
+      return;
+    }
+    try {
+      await FileViewerService.openFile(context, path);
+    } catch (e) {
+      _snack('打开失败：$e', Colors.red);
+    }
+  }
+
   void _snack(String msg, Color color) {
     ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(content: Text(msg), backgroundColor: color));
@@ -247,7 +268,10 @@ class _TransferHistoryScreenState extends State<TransferHistoryScreen> {
                               ? '${r.text!.substring(0, 50)}…'
                               : r.text!)
                           : r.name;
-                      return ListTile(
+                      // 右击（桌面）与长按（手机）同义：进入多选
+                      return GestureDetector(
+                        onSecondaryTapUp: (_) => _toggle(r.id),
+                        child: ListTile(
                         leading: Checkbox(
                           value: checked,
                           onChanged: (_) => _toggle(r.id),
@@ -265,7 +289,7 @@ class _TransferHistoryScreenState extends State<TransferHistoryScreen> {
                         subtitle: Text(
                           '${r.direction == 'in' ? '收' : '发'} · ${r.peerName} · '
                           '${isText ? '${r.size} 字' : _fmtSize(r.size)} · '
-                          '${_fmtTime(r.time)}${r.ok ? '' : ' · 失败'}',
+                          '${_fmtTime(r.time)}${r.ok ? '' : ' · ${r.note ?? '失败'}'}',
                           style: const TextStyle(fontSize: 12),
                         ),
                         trailing: isText
@@ -301,8 +325,9 @@ class _TransferHistoryScreenState extends State<TransferHistoryScreen> {
                               ),
                         onTap: isText
                             ? () => _showTextDetail(r)
-                            : () => _toggle(r.id),
+                            : () => _openRecord(r),
                         onLongPress: () => _toggle(r.id),
+                        ),
                       );
                     },
                   ),

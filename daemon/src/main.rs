@@ -8,22 +8,26 @@
 //!   (sender closes the connection after writing):
 //!     {"cmd":"apply","device_id":..,"device_name":..,"discover_enabled":..,
 //!      "web_share_enabled":..,"receive_dir":..,"docs_dir":..,"exe_path":..,
-//!      "ui_active":bool}
+//!      "ui_active":bool,"untrusted_confirm":bool}
 //!     {"cmd":"quit"}
+//!     {"cmd":"get_pending"}             -> {"ok":true,"pending":[...]}  (reply)
+//!     {"cmd":"confirm","token":..,"accept":bool} -> {"ok":true,"found":bool} (reply)
 //! - ui_active=true  -> daemon releases UDP/HTTP ports (UI hosts transfer)
 //! - ui_active=false -> daemon starts announce + HTTP receive (tray mode)
 //! - Tray menu: open UI (CreateProcess exe_path) / quit daemon
 //! - Trust policy in tray mode: trusted devices (docs_dir/trusted_devices.json)
-//!   auto-accept; untrusted -> reject 403 + balloon notice.
+//!   auto-accept; untrusted -> ask user via UI (launch + pending map, 30s
+//!   timeout auto-reject) when untrusted_confirm, else reject 403 directly.
 
 #![cfg(windows)]
 #![allow(non_snake_case)]
 
+use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream, UdpSocket};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU16, AtomicU32, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde::Deserialize;
@@ -46,6 +50,8 @@ struct Config {
     docs_dir: String,
     exe_path: String,
     ui_active: bool,
+    untrusted_confirm: bool,
+    untrusted_confirm_secs: u32,
 }
 
 static CONFIG: Mutex<Option<Config>> = Mutex::new(None);
@@ -680,6 +686,93 @@ fn trusted_ids(docs_dir: &str) -> Vec<String> {
     out
 }
 
+// ==================== untrusted confirm (30s countdown) ====================
+
+/// One pending untrusted request: decision cell + describe info for UI.
+struct PendingReq {
+    cell: Arc<(Mutex<Option<bool>>, Condvar)>,
+    from: String,
+    name: String,
+    size: u64,
+    is_text: bool,
+}
+
+static PENDING: std::sync::OnceLock<Mutex<HashMap<String, PendingReq>>> =
+    std::sync::OnceLock::new();
+static PENDING_SEQ: AtomicU32 = AtomicU32::new(0);
+
+fn pending_map() -> &'static Mutex<HashMap<String, PendingReq>> {
+    PENDING.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// Wait for the user's decision on an untrusted request (via UI confirm
+/// dialog + config channel). True = accept. Timeout/no-UI = reject.
+fn wait_untrusted_confirm(
+    sender_name: &str,
+    name: &str,
+    size: u64,
+    is_text: bool,
+    timeout_secs: u32,
+) -> bool {
+    let timeout_secs: u64 = if timeout_secs < 5 { 5 } else { timeout_secs as u64 };
+    let token = format!("p{}-{}", now_ms(), PENDING_SEQ.fetch_add(1, Ordering::Relaxed));
+    let entry = PendingReq {
+        cell: Arc::new((Mutex::new(None), Condvar::new())),
+        from: sender_name.to_string(),
+        name: name.to_string(),
+        size,
+        is_text,
+    };
+    pending_map()
+        .lock()
+        .unwrap()
+        .insert(token.clone(), entry);
+
+    balloon(
+        "微密飞传",
+        &format!(
+            "{} 请求发送：{}\n已拉起微密文件，{}秒内未确认将自动拒收",
+            sender_name, name, timeout_secs
+        ),
+    );
+    launch_ui(None);
+
+    let deadline = std::time::Instant::now() + Duration::from_secs(timeout_secs);
+    let mut decision = false;
+    {
+        let entry = pending_map()
+        .lock()
+        .unwrap()
+        .get(&token)
+        .map(|e| e.cell.clone());
+        if let Some(cell) = entry {
+            let (m, cv) = &*cell;
+            loop {
+                let guard = m.lock().unwrap();
+                if let Some(v) = *guard {
+                    decision = v;
+                    break;
+                }
+                let now = std::time::Instant::now();
+                if now >= deadline {
+                    break;
+                }
+                let (g, _) = cv.wait_timeout(guard, deadline - now).unwrap();
+                if let Some(v) = *g {
+                    decision = v;
+                    break;
+                }
+            }
+        }
+    }
+    pending_map().lock().unwrap().remove(&token);
+    log(&format!(
+        "untrusted request from {} ({}): decision={}",
+        sender_name, name, decision
+    ));
+    decision
+}
+
 // ==================== save path / history ====================
 
 fn safe_file_name(name: &str) -> String {
@@ -1259,22 +1352,71 @@ fn handle_client(mut stream: TcpStream) {
                 }
             };
             let trusted = trusted_ids(&docs).contains(&sender_id);
+            let mut accepted = trusted;
             if !trusted {
-                // tray mode: no UI to confirm -> reject untrusted
-                write_json(
-                    &mut stream,
-                    403,
-                    &serde_json::json!({"ok": false, "error": "rejected"}),
-                );
-                balloon(
-                    "微密飞传",
-                    &format!(
-                        "已拒收：{} 未在信任列表\n（打开微密文件后可确认接收）",
-                        sender_name
-                    ),
-                );
-                record_history("text", "（已拒收）", 0, &sender_name, false, None, None);
-                return;
+                // 内容描述（确认框与拒收记录都要用）
+                let (hint, fsize) = if is_text {
+                    ("一条文本消息".to_string(), content_length.unwrap_or(0))
+                } else {
+                    let n = url_decode_pct(&header_get(&head.headers, "x-file-name"));
+                    let n = if n.is_empty() { "unnamed".to_string() } else { n };
+                    (
+                        safe_file_name(&n),
+                        header_get(&head.headers, "x-file-size")
+                            .parse::<u64>()
+                            .unwrap_or(0),
+                    )
+                };
+                let confirm = CONFIG
+                    .lock()
+                    .unwrap()
+                    .as_ref()
+                    .map(|c| (c.untrusted_confirm, c.untrusted_confirm_secs))
+                    .unwrap_or((true, 30));
+                if confirm.0 {
+                    // 等 UI 确认（daemon 会拉起主界面），超时自动拒
+                    accepted = wait_untrusted_confirm(
+                        &sender_name,
+                        &hint,
+                        fsize,
+                        is_text,
+                        confirm.1,
+                    );
+                }
+                if !accepted {
+                    write_json(
+                        &mut stream,
+                        403,
+                        &serde_json::json!({"ok": false, "error": "rejected"}),
+                    );
+                    balloon(
+                        "微密飞传",
+                        &format!(
+                            "已拒收：{} 未在信任列表\n（{}）",
+                            sender_name,
+                            if confirm.0 {
+                                format!("{}秒未确认，自动拒收", confirm.1.max(5))
+                            } else {
+                                "策略为直接拒绝".to_string()
+                            }
+                        ),
+                    );
+                    // 拒收留痕：真实内容名/大小进传输记录
+                    if is_text {
+                        record_history(
+                            "text",
+                            "（已拒收）一条文本",
+                            fsize,
+                            &sender_name,
+                            false,
+                            None,
+                            None,
+                        );
+                    } else {
+                        record_history("file", &hint, fsize, &sender_name, false, None, None);
+                    }
+                    return;
+                }
             }
             if is_text {
                 let body = read_body_all(&mut stream, leftover, content_length, chunked);
@@ -1649,6 +1791,10 @@ struct PushMsg {
     discover_enabled: bool,
     #[serde(default = "default_true")]
     web_share_enabled: bool,
+    #[serde(default = "default_true")]
+    untrusted_confirm: bool,
+    #[serde(default = "default_confirm_secs")]
+    untrusted_confirm_secs: u32,
     #[serde(default)]
     receive_dir: String,
     #[serde(default)]
@@ -1657,10 +1803,18 @@ struct PushMsg {
     exe_path: String,
     #[serde(default)]
     ui_active: bool,
+    #[serde(default)]
+    token: String,
+    #[serde(default)]
+    accept: bool,
 }
 
 fn default_true() -> bool {
     true
+}
+
+fn default_confirm_secs() -> u32 {
+    30
 }
 
 fn config_server() {
@@ -1676,7 +1830,109 @@ fn config_server() {
         let _ = s.set_read_timeout(Some(Duration::from_secs(5)));
         let mut raw = Vec::new();
         let mut tmp = [0u8; 4096];
-        loop {
+        // 逐行边收边处理：confirm/get_pending 需要在同一连接上应答
+        'outer: loop {
+            // 处理缓冲里已完整的行
+            while let Some(pos) = raw.iter().position(|&b| b == b'\n') {
+                let line = String::from_utf8_lossy(&raw[..pos]).to_string();
+                raw.drain(..=pos);
+                if line.trim().is_empty() {
+                    continue;
+                }
+                let Ok(msg) = serde_json::from_str::<PushMsg>(&line) else {
+                    log(&format!(
+                        "bad config line: {}",
+                        &line[..line.len().min(120)]
+                    ));
+                    continue;
+                };
+                match msg.cmd.as_str() {
+                    "quit" => {
+                        log("quit command received");
+                        tray_delete();
+                        std::process::exit(0);
+                    }
+                    "get_pending" => {
+                        let map = pending_map().lock().unwrap();
+                        let items: Vec<serde_json::Value> = map
+                            .iter()
+                            .map(|(token, e)| {
+                                serde_json::json!({
+                                    "token": token,
+                                    "from": e.from,
+                                    "name": e.name,
+                                    "size": e.size,
+                                    "isText": e.is_text,
+                                })
+                            })
+                            .collect();
+                        drop(map);
+                        let resp = serde_json::json!({"ok": true, "pending": items});
+                        let _ = s.write_all(format!("{}\n", resp).as_bytes());
+                        let _ = s.flush();
+                        break 'outer;
+                    }
+                    "confirm" => {
+                        let map = pending_map().lock().unwrap();
+                        let mut found = false;
+                        if let Some(e) = map.get(&msg.token) {
+                            let (m, cv) = &*e.cell;
+                            *m.lock().unwrap() = Some(msg.accept);
+                            cv.notify_all();
+                            found = true;
+                        }
+                        drop(map);
+                        let resp = serde_json::json!({"ok": true, "found": found});
+                        let _ = s.write_all(format!("{}\n", resp).as_bytes());
+                        let _ = s.flush();
+                        log(&format!(
+                            "confirm token={} accept={} found={}",
+                            msg.token, msg.accept, found
+                        ));
+                        break 'outer;
+                    }
+                    "apply" => {
+                        let mut cfg = CONFIG.lock().unwrap();
+                        let mut c = cfg.take().unwrap_or_default();
+                        if !msg.device_id.is_empty() {
+                            c.device_id = msg.device_id;
+                        }
+                        if !msg.device_name.is_empty() {
+                            c.device_name = msg.device_name;
+                        }
+                        c.discover_enabled = msg.discover_enabled;
+                        c.web_share_enabled = msg.web_share_enabled;
+                        c.untrusted_confirm = msg.untrusted_confirm;
+                        c.untrusted_confirm_secs = msg.untrusted_confirm_secs;
+                        if !msg.receive_dir.is_empty() {
+                            c.receive_dir = msg.receive_dir;
+                        }
+                        if !msg.docs_dir.is_empty() {
+                            c.docs_dir = msg.docs_dir;
+                        }
+                        if !msg.exe_path.is_empty() {
+                            let icon_changed = c.exe_path != msg.exe_path;
+                            c.exe_path = msg.exe_path;
+                            if icon_changed {
+                                // UI 推来主程序路径：换成真应用图标
+                                let icon = load_app_icon(&c.exe_path);
+                                tray_update_icon(icon);
+                            }
+                        }
+                        c.ui_active = msg.ui_active;
+                        log(&format!(
+                            "apply: ui_active={} discover={} web={} confirm={} recv_dir={}",
+                            c.ui_active,
+                            c.discover_enabled,
+                            c.web_share_enabled,
+                            c.untrusted_confirm,
+                            c.receive_dir
+                        ));
+                        *cfg = Some(c);
+                    }
+                    _ => {}
+                }
+            }
             match s.read(&mut tmp) {
                 Ok(0) | Err(_) => break,
                 Ok(n) => raw.extend_from_slice(&tmp[..n]),
@@ -1685,60 +1941,8 @@ fn config_server() {
                 break;
             }
         }
-        let text = String::from_utf8_lossy(&raw).to_string();
-        for line in text.lines().filter(|l| !l.trim().is_empty()) {
-            let Ok(msg) = serde_json::from_str::<PushMsg>(line) else {
-                log(&format!(
-                    "bad config line: {}",
-                    &line[..line.len().min(120)]
-                ));
-                continue;
-            };
-            match msg.cmd.as_str() {
-                "quit" => {
-                    log("quit command received");
-                    tray_delete();
-                    std::process::exit(0);
-                }
-                "apply" => {
-                    let mut cfg = CONFIG.lock().unwrap();
-                    let mut c = cfg.take().unwrap_or_default();
-                    if !msg.device_id.is_empty() {
-                        c.device_id = msg.device_id;
-                    }
-                    if !msg.device_name.is_empty() {
-                        c.device_name = msg.device_name;
-                    }
-                    c.discover_enabled = msg.discover_enabled;
-                    c.web_share_enabled = msg.web_share_enabled;
-                    if !msg.receive_dir.is_empty() {
-                        c.receive_dir = msg.receive_dir;
-                    }
-                    if !msg.docs_dir.is_empty() {
-                        c.docs_dir = msg.docs_dir;
-                    }
-                    if !msg.exe_path.is_empty() {
-                        let icon_changed = c.exe_path != msg.exe_path;
-                        c.exe_path = msg.exe_path;
-                        if icon_changed {
-                            // UI 推来主程序路径：换成真应用图标
-                            let icon = load_app_icon(&c.exe_path);
-                            tray_update_icon(icon);
-                        }
-                    }
-                    c.ui_active = msg.ui_active;
-                    log(&format!(
-                        "apply: ui_active={} discover={} web={} recv_dir={}",
-                        c.ui_active, c.discover_enabled, c.web_share_enabled, c.receive_dir
-                    ));
-                    *cfg = Some(c);
-                }
-                _ => {}
-            }
-        }
     }
 }
-
 // ==================== main ====================
 
 fn main() {

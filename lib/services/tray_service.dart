@@ -85,6 +85,10 @@ class TrayService {
       _daemonMode = await DaemonService.ensureRunning();
       if (_daemonMode) {
         await DaemonService.pushConfig(uiActive: true);
+        // 守护进程可能正挂着未信任设备的待确认请求（它为此拉起了主界面）：
+        // 等窗口就绪后拉取并逐个弹确认框
+        unawaited(Future.delayed(
+            const Duration(milliseconds: 2500), _checkDaemonPending));
       }
     }
 
@@ -320,30 +324,164 @@ Future<bool> _globalConfirmRequest(IncomingRequest req) async {
   await TrayService.instance.openMainWindow();
   final ctx = ShareReceiveService.navigatorKey.currentContext;
   if (ctx == null) return false;
+  return showIncomingConfirmDialog(
+    ctx,
+    senderName: req.senderName,
+    content: req.fileName,
+    sizeBytes: req.fileSize,
+    isText: req.fileName == '一条文本消息',
+    countdownSec: LanTransferService.confirmTimeoutSecs(),
+  );
+}
+
+/// 未信任设备请求确认框（PC UI 态 / 手机端 / 守护进程拉起 UI 三路共用）。
+/// 带 30 秒倒计时，超时自动按「拒收」处理。
+Future<bool> showIncomingConfirmDialog(
+  BuildContext ctx, {
+  required String senderName,
+  required String content,
+  required int sizeBytes,
+  bool isText = false,
+  int countdownSec = 30,
+}) async {
   final accepted = await showDialog<bool>(
     context: ctx,
     barrierDismissible: false,
-    builder: (c) => AlertDialog(
-      title: const Text('收到传输请求'),
+    builder: (c) => _ConfirmCountdownDialog(
+      senderName: senderName,
+      content: content,
+      sizeBytes: sizeBytes,
+      isText: isText,
+      countdownSec: countdownSec,
+    ),
+  );
+  return accepted == true;
+}
+
+class _ConfirmCountdownDialog extends StatefulWidget {
+  final String senderName;
+  final String content;
+  final int sizeBytes;
+  final bool isText;
+  final int countdownSec;
+
+  const _ConfirmCountdownDialog({
+    required this.senderName,
+    required this.content,
+    required this.sizeBytes,
+    required this.isText,
+    required this.countdownSec,
+  });
+
+  @override
+  State<_ConfirmCountdownDialog> createState() =>
+      _ConfirmCountdownDialogState();
+}
+
+class _ConfirmCountdownDialogState extends State<_ConfirmCountdownDialog> {
+  late int _remain;
+  Timer? _timer;
+
+  @override
+  void initState() {
+    super.initState();
+    _remain = widget.countdownSec;
+    _timer = Timer.periodic(const Duration(seconds: 1), (_) {
+      if (!mounted) return;
+      setState(() => _remain--);
+      if (_remain <= 0) {
+        Navigator.pop(context, false); // 超时 = 拒收
+      }
+    });
+  }
+
+  @override
+  void dispose() {
+    _timer?.cancel();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return AlertDialog(
+      title: const Text('未信任设备的传输请求'),
       content: Column(
         mainAxisSize: MainAxisSize.min,
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Text('设备：${req.senderName}',
+          Text('设备：${widget.senderName}',
               style: const TextStyle(fontWeight: FontWeight.w500)),
           const SizedBox(height: 6),
-          Text('内容：${req.fileName}'),
+          Text('内容：${widget.content}'),
           const SizedBox(height: 2),
-          Text('大小：${_fmtSize(req.fileSize)}'),
+          Text(widget.isText
+              ? '大小：${_fmtSize(widget.sizeBytes)}（约）'
+              : '大小：${_fmtSize(widget.sizeBytes)}'),
+          const SizedBox(height: 10),
+          Row(
+            children: [
+              Icon(Icons.timer_outlined,
+                  size: 16, color: Colors.orange.shade700),
+              const SizedBox(width: 4),
+              Text(
+                '$_remain 秒内未确认将自动拒收',
+                style: TextStyle(
+                    fontSize: 12, color: Colors.orange.shade800),
+              ),
+            ],
+          ),
+          const SizedBox(height: 6),
+          ClipRRect(
+            borderRadius: BorderRadius.circular(4),
+            child: LinearProgressIndicator(
+              value: _remain / widget.countdownSec,
+              minHeight: 4,
+            ),
+          ),
         ],
       ),
       actions: [
         TextButton(
-            onPressed: () => Navigator.pop(c, false), child: const Text('拒收')),
+            onPressed: () => Navigator.pop(context, false),
+            child: const Text('拒收')),
         TextButton(
-            onPressed: () => Navigator.pop(c, true), child: const Text('接收')),
+            onPressed: () => Navigator.pop(context, true),
+            child: const Text('接收')),
       ],
-    ),
-  );
-  return accepted == true;
+    );
+  }
+}
+
+/// 守护进程态：守护进程收到未信任请求后会拉起主界面并把待确认请求挂在
+/// PENDING 里，UI 起来后到这里取走并弹确认框，决定经配置通道回传。
+Future<void> _checkDaemonPending() async {
+  try {
+    final pending = await DaemonService.fetchPending();
+    if (pending.isEmpty) return;
+    final ctx = ShareReceiveService.navigatorKey.currentContext;
+    if (ctx == null) return;
+    for (final j in pending) {
+      final token = j['token'] as String?;
+      if (token == null || token.isEmpty) continue;
+      final ok = await showIncomingConfirmDialog(
+        ctx,
+        senderName: (j['from'] as String?) ?? '未知设备',
+        content: (j['name'] as String?) ?? '',
+        sizeBytes: (j['size'] as num?)?.toInt() ?? 0,
+        isText: j['isText'] == true,
+        countdownSec: LanTransferService.confirmTimeoutSecs(),
+      );
+      final found = await DaemonService.sendConfirm(token, ok);
+      if (!found) {
+        final sctx = ShareReceiveService.navigatorKey.currentContext;
+        if (sctx != null && sctx.mounted) {
+          ScaffoldMessenger.of(sctx).showSnackBar(const SnackBar(
+            content: Text('该请求已超时自动拒收，请让对方重新发送'),
+            backgroundColor: Colors.orange,
+          ));
+        }
+      }
+      if (!ok) break; // 拒了一个，剩下的（同一设备连发）不再逐个打扰
+    }
+  } catch (_) {}
 }
