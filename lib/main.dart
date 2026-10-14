@@ -121,7 +121,7 @@ void main(List<String> args) async {
   if (deepPopup) {
     WindowModeService.instance.popupMode.value = true;
     WindowModeService.daemonPopupSession = true;
-    WindowModeService.instance.onPopupDismissed = () =>
+    WindowModeService.onPopupDismissed = () =>
         TrayService.instance.handOffToDaemon();
   }
   if (deepTransfer) {
