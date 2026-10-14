@@ -26,10 +26,13 @@ class SettingsScreen extends StatelessWidget {
           : ListView.builder(
               padding: const EdgeInsets.only(bottom: 24),
               itemCount: mods.length,
-              itemBuilder: (context, i) => _moduleSection(
-                context,
-                mods[i],
-                showDivider: i > 0,
+              itemBuilder: (context, i) => Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: _moduleSection(
+                  context,
+                  mods[i],
+                  showDivider: i > 0,
+                ),
               ),
             ),
     );
