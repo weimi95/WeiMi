@@ -3,203 +3,64 @@ import 'package:flutter/material.dart';
 import '../framework/module_registry.dart';
 import '../framework/setting_store.dart';
 
-/// 设置中心：分类导航 + 注册表渲染。
+/// 设置中心：单页渲染 + 分类分隔。
 ///
-/// 左侧（宽屏）或顶部（窄屏）的分类来自各功能模块的注册
-/// （见 framework/module_registry.dart），设置项由模块通过
-/// SettingDef 贡献，本页只负责渲染与读写（统一走 SettingStore）。
+/// 所有功能模块的设置项纵向排在同一页，模块之间用分隔线 +
+/// 分类标题区分（模块来自 framework/module_registry.dart 注册，
+/// 设置项由模块通过 SettingDef 贡献，本页只负责渲染与读写，
+/// 统一走 SettingStore）。
 /// 新增功能的设置 = 模块里加一条 SettingDef，无需改本页。
-class SettingsScreen extends StatefulWidget {
+class SettingsScreen extends StatelessWidget {
   const SettingsScreen({super.key});
 
   @override
-  State<SettingsScreen> createState() => _SettingsScreenState();
-}
-
-class _SettingsScreenState extends State<SettingsScreen> {
-  String? _selectedId;
-
-  @override
-  void initState() {
-    super.initState();
-    final mods = ModuleRegistry.modules;
-    if (mods.isNotEmpty) _selectedId = mods.first.id;
-  }
-
-  FeatureModule? get _current {
-    final id = _selectedId;
-    if (id == null) return null;
-    return ModuleRegistry.module(id);
-  }
-
-  @override
   Widget build(BuildContext context) {
-    final mods = ModuleRegistry.modules;
-    final wide = MediaQuery.of(context).size.width >= 860;
+    final mods = ModuleRegistry.modules
+        .where((m) => m.settings.any((d) => d.isVisibleNow))
+        .toList();
 
     return Scaffold(
       appBar: AppBar(title: const Text('设置')),
       body: mods.isEmpty
           ? const Center(child: Text('暂无设置项'))
-          : wide
-              ? Row(
-                  children: [
-                    SizedBox(
-                      width: 220,
-                      child: _CategoryNav(
-                        modules: mods,
-                        selectedId: _selectedId,
-                        onSelect: (id) => setState(() => _selectedId = id),
-                      ),
-                    ),
-                    const VerticalDivider(width: 1),
-                    Expanded(child: _SettingsPanel(module: _current)),
-                  ],
-                )
-              : Column(
-                  children: [
-                    _CategoryTabs(
-                      modules: mods,
-                      selectedId: _selectedId,
-                      onSelect: (id) => setState(() => _selectedId = id),
-                    ),
-                    const Divider(height: 1),
-                    Expanded(child: _SettingsPanel(module: _current)),
-                  ],
-                ),
-    );
-  }
-}
-
-/// 宽屏左侧分类导航。
-class _CategoryNav extends StatelessWidget {
-  const _CategoryNav({
-    required this.modules,
-    required this.selectedId,
-    required this.onSelect,
-  });
-
-  final List<FeatureModule> modules;
-  final String? selectedId;
-  final ValueChanged<String> onSelect;
-
-  @override
-  Widget build(BuildContext context) {
-    return ListView(
-      padding: const EdgeInsets.symmetric(vertical: 8, horizontal: 8),
-      children: [
-        for (final m in modules)
-          Container(
-            margin: const EdgeInsets.only(bottom: 2),
-            decoration: BoxDecoration(
-              color: m.id == selectedId
-                  ? Theme.of(context).colorScheme.primaryContainer
-                  : null,
-              borderRadius: BorderRadius.circular(10),
-            ),
-            child: ListTile(
-              dense: true,
-              shape: RoundedRectangleBorder(
-                  borderRadius: BorderRadius.circular(10)),
-              leading: Icon(m.icon, size: 20),
-              title: Text(m.name,
-                  style: const TextStyle(
-                      fontSize: 14, fontWeight: FontWeight.w500)),
-              selected: m.id == selectedId,
-              onTap: () => onSelect(m.id),
-            ),
-          ),
-      ],
-    );
-  }
-}
-
-/// 窄屏顶部分类横滑标签。
-class _CategoryTabs extends StatelessWidget {
-  const _CategoryTabs({
-    required this.modules,
-    required this.selectedId,
-    required this.onSelect,
-  });
-
-  final List<FeatureModule> modules;
-  final String? selectedId;
-  final ValueChanged<String> onSelect;
-
-  @override
-  Widget build(BuildContext context) {
-    return SizedBox(
-      height: 52,
-      child: ListView(
-        scrollDirection: Axis.horizontal,
-        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 8),
-        children: [
-          for (final m in modules)
-            Padding(
-              padding: const EdgeInsets.only(right: 8),
-              child: ChoiceChip(
-                avatar: Icon(m.icon, size: 16),
-                label: Text(m.name),
-                selected: m.id == selectedId,
-                onSelected: (_) => onSelect(m.id),
+          : ListView.builder(
+              padding: const EdgeInsets.only(bottom: 24),
+              itemCount: mods.length,
+              itemBuilder: (context, i) => _moduleSection(
+                context,
+                mods[i],
+                showDivider: i > 0,
               ),
             ),
-        ],
-      ),
     );
   }
-}
 
-/// 右侧/下方设置面板：渲染选中模块的全部设置项。
-class _SettingsPanel extends StatelessWidget {
-  const _SettingsPanel({required this.module});
-
-  final FeatureModule? module;
-
-  @override
-  Widget build(BuildContext context) {
-    if (module == null) {
-      return const SizedBox.shrink();
+  /// 单个模块的分节：分类标题 + 小节标题 + 设置项列表。
+  List<Widget> _moduleSection(
+    BuildContext context,
+    FeatureModule m, {
+    required bool showDivider,
+  }) {
+    final children = <Widget>[];
+    String? lastGroup;
+    for (final d in m.settings) {
+      if (!d.isVisibleNow) continue;
+      if (d.group != lastGroup) {
+        if (d.group != null) children.add(_GroupHeader(title: d.group!));
+        lastGroup = d.group;
+      }
+      children.add(_buildTile(context, d));
     }
-    final defs = module!.settings.where((d) => d.isVisibleNow).toList();
-    if (defs.isEmpty) {
-      return Center(
-        child: Text('「${module!.name}」暂无设置项',
-            style: TextStyle(color: Theme.of(context).hintColor)),
-      );
-    }
-
-    // 按 group 分小节（group 为空的归入无标题首节）
-    final groups = <String?, List<SettingDef>>{};
-    for (final d in defs) {
-      groups.putIfAbsent(d.group, () => []).add(d);
-    }
-
-    return ListView(
-      padding: const EdgeInsets.only(bottom: 24),
-      children: [
-        for (final entry in groups.entries) ...[
-          if (entry.key != null)
-            _groupHeader(context, entry.key!)
-          else
-            const SizedBox(height: 8),
-          for (final d in entry.value) _buildTile(context, d),
-        ],
+    return <Widget>[
+      if (children.isNotEmpty) ...[
+        if (showDivider)
+          const Divider(height: 1, indent: 16, endIndent: 16),
+        _CategoryHeader(module: m),
+        ...children,
       ],
-    );
+    ];
   }
-
-  Widget _groupHeader(BuildContext context, String title) {
-    return Padding(
-      padding: const EdgeInsets.fromLTRB(16, 16, 16, 4),
-      child: Text(
-        title,
-        style: TextStyle(
-          fontSize: 13,
-          fontWeight: FontWeight.w500,
-          color: Theme.of(context).colorScheme.primary,
-        ),
-      ),
+            ),
     );
   }
 
@@ -217,6 +78,57 @@ class _SettingsPanel extends StatelessWidget {
       case SettingType.custom:
         return def.customTile?.call(context) ?? const SizedBox.shrink();
     }
+  }
+}
+
+/// 模块内小节标题（如「未信任设备请求」「浮窗行为」）。
+class _GroupHeader extends StatelessWidget {
+  const _GroupHeader({required this.title});
+
+  final String title;
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(16, 12, 16, 2),
+      child: Text(
+        title,
+        style: TextStyle(
+          fontSize: 12,
+          fontWeight: FontWeight.w500,
+          color: Theme.of(context).hintColor,
+        ),
+      ),
+    );
+  }
+}
+
+/// 分类标题（模块名 + 图标）。
+class _CategoryHeader extends StatelessWidget {
+  const _CategoryHeader({required this.module});
+
+  final FeatureModule module;
+
+  @override
+  Widget build(BuildContext context) {
+    final cs = Theme.of(context).colorScheme;
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(16, 14, 16, 2),
+      child: Row(
+        children: [
+          Icon(module.icon, size: 16, color: cs.primary),
+          const SizedBox(width: 6),
+          Text(
+            module.name,
+            style: TextStyle(
+              fontSize: 13,
+              fontWeight: FontWeight.w600,
+              color: cs.primary,
+            ),
+          ),
+        ],
+      ),
+    );
   }
 }
 
