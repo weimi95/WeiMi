@@ -24,6 +24,19 @@ class QuickLaunchService {
     return t.startsWith('http://') || t.startsWith('https://');
   }
 
+  /// 目标规整：无协议但像网址（含点、无反斜杠、非盘符）补 https://，
+  /// 否则按本地路径原样返回。
+  static String normalizeTarget(String target) {
+    final s = target.trim();
+    if (s.isEmpty) return s;
+    if (RegExp(r'^[a-zA-Z][a-zA-Z0-9+.-]*://').hasMatch(s)) return s;
+    final looksUrl = !s.contains('\\') &&
+        !RegExp(r'^[a-zA-Z]:').hasMatch(s) &&
+        s.contains('.') &&
+        !s.contains(' ');
+    return looksUrl ? 'https://$s' : s;
+  }
+
   static Future<List<QuickLaunchItem>> load() async {
     final prefs = await SharedPreferences.getInstance();
     final raw = prefs.getString(_key);
@@ -60,21 +73,22 @@ class QuickLaunchService {
   }
 
   static Future<void> add(QuickLaunchItem item) async {
-    final items = await load();
+    // load() 空列表返回 const []（不可变），必须拷贝成可变列表再改
+    final items = [...await load()];
     if (items.any((e) => e.target == item.target)) return; // 去重
     items.add(item);
     await save(items);
   }
 
   static Future<void> update(int index, QuickLaunchItem item) async {
-    final items = await load();
+    final items = [...await load()];
     if (index < 0 || index >= items.length) return;
     items[index] = item;
     await save(items);
   }
 
   static Future<void> remove(int index) async {
-    final items = await load();
+    final items = [...await load()];
     if (index < 0 || index >= items.length) return;
     items.removeAt(index);
     await save(items);

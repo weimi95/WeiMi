@@ -244,12 +244,15 @@ class WeiMiVaultScreenState extends State<WeiMiVaultScreen> {
               itemCount: _searchHistory.length,
               itemBuilder: (context, i) {
                 final q = _searchHistory[i];
-                return ListTile(
-                  dense: true,
-                  visualDensity: VisualDensity.compact,
-                  leading: const Icon(Icons.north_west, size: 16),
-                  title: Text(q, maxLines: 1, overflow: TextOverflow.ellipsis),
-                  onTap: () => _applyHistoryQuery(q),
+                // pointer-down 即填词：tap-up 前失焦监听会摘掉面板，onTap 被吞
+                return Listener(
+                  onPointerDown: (_) => _applyHistoryQuery(q),
+                  child: ListTile(
+                    dense: true,
+                    visualDensity: VisualDensity.compact,
+                    leading: const Icon(Icons.north_west, size: 16),
+                    title: Text(q, maxLines: 1, overflow: TextOverflow.ellipsis),
+                  ),
                 );
               },
             ),

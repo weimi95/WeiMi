@@ -272,7 +272,10 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
 
   Future<void> _checkInitialFile() async {
     final filePath = await FileAssociationService.getInitialFile();
-    if (filePath != null && filePath.isNotEmpty) {
+    // 跳过命令行旗标（--page=transfer / --page=popup 等深链参数）
+    if (filePath != null &&
+        filePath.isNotEmpty &&
+        !filePath.startsWith('-')) {
       await Future.delayed(const Duration(milliseconds: 500));
       if (mounted) {
         _openFile(filePath);

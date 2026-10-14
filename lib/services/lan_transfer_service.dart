@@ -226,14 +226,41 @@ class LanTransferService {
     await _ensureIdentity();
 
     if (_udpSocket == null) {
-      final socket = await RawDatagramSocket.bind(
-        InternetAddress.anyIPv4,
-        discoveryPort,
-        reuseAddress: true,
-      );
-      socket.broadcastEnabled = true;
-      socket.listen(_onUdpDatagram);
-      _udpSocket = socket;
+      if (Platform.isWindows) {
+        // Windows：不复用地址，绑定归属确定（daemon 让出端口需要零点几秒，
+        // 失败重试等待）。reuseAddress:true 会与 daemon 静默"劫持"同端口，
+        // 发现应答可能被 daemon 收走 → UI 永远看不到对端。
+        RawDatagramSocket? socket;
+        Object? lastErr;
+        for (var i = 0; i < 20 && socket == null; i++) {
+          try {
+            socket = await RawDatagramSocket.bind(
+              InternetAddress.anyIPv4,
+              discoveryPort,
+              reuseAddress: false,
+            );
+          } on SocketException catch (e) {
+            lastErr = e;
+            await Future<void>.delayed(const Duration(milliseconds: 250));
+          }
+        }
+        if (socket == null) {
+          throw lastErr ??
+              SocketException('UDP 发现端口 $discoveryPort 绑定失败');
+        }
+        socket.broadcastEnabled = true;
+        socket.listen(_onUdpDatagram);
+        _udpSocket = socket;
+      } else {
+        final socket = await RawDatagramSocket.bind(
+          InternetAddress.anyIPv4,
+          discoveryPort,
+          reuseAddress: true,
+        );
+        socket.broadcastEnabled = true;
+        socket.listen(_onUdpDatagram);
+        _udpSocket = socket;
+      }
     }
 
     if (_httpServer == null) {
@@ -248,14 +275,30 @@ class LanTransferService {
     _startAndroidForeground();
   }
 
-  /// HTTP 端口被占用时自动 +1（最多试到 52365），announce 带实际端口
+  /// HTTP 端口被占用时自动 +1（最多试到 52365），announce 带实际端口。
+  /// Windows 先等 52345 空出来（daemon 交接），绑不上再扫备用端口。
   Future<void> _bindHttpServer() async {
+    final isWin = Platform.isWindows;
+    if (isWin) {
+      for (var i = 0; i < 20; i++) {
+        try {
+          _httpServer = await HttpServer.bind(
+              InternetAddress.anyIPv4, defaultHttpPort,
+              shared: false);
+          _httpPort = defaultHttpPort;
+          _httpServer!.listen(_onHttpRequest, onError: (_) {});
+          return;
+        } on SocketException {
+          await Future<void>.delayed(const Duration(milliseconds: 250));
+        }
+      }
+    }
     SocketException? lastErr;
     for (int port = defaultHttpPort; port <= maxHttpPort; port++) {
       try {
         _httpServer = await HttpServer.bind(
             InternetAddress.anyIPv4, port,
-            shared: true);
+            shared: !isWin);
         _httpPort = port;
         if (port != defaultHttpPort) {
           debugPrint('微密飞传：端口 $defaultHttpPort 被占用，改用 $port');

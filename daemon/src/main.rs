@@ -534,16 +534,20 @@ fn hotkey_thread() {
         const VK_LCTRL: i32 = 0xA2;
         const VK_RCTRL: i32 = 0xA3;
         const WINDOW_MS: u128 = 350;
+        // 两次按下之间必须的真实释放间隔：小于此值视为长按中途的按键抖动
+        const MIN_RELEASE_GAP_MS: u128 = 60;
         let mut was_down = false;
         let mut last_press: Option<std::time::Instant> = None;
+        let mut released_at: Option<std::time::Instant> = None;
         loop {
-            unsafe { Sleep(80) };
+            unsafe { Sleep(30) };
             // 主窗口存在 → UI 自己监听，守护进程静默
             unsafe {
                 let cls = to_wide("FLUTTER_RUNNER_WIN32_WINDOW");
                 if !FindWindowW(cls.as_ptr(), std::ptr::null()).is_null() {
                     was_down = false;
                     last_press = None;
+                    released_at = None;
                     continue;
                 }
             }
@@ -554,18 +558,39 @@ fn hotkey_thread() {
             if down {
                 if !was_down {
                     let now = std::time::Instant::now();
-                    match last_press {
-                        Some(t) if now.duration_since(t).as_millis() <= WINDOW_MS => {
-                            last_press = None;
-                            was_down = true;
-                            log("double ctrl: launching ui popup");
-                            launch_ui(Some("popup"));
+                    match (last_press, released_at) {
+                        (Some(t), Some(rel))
+                            if now.duration_since(t).as_millis() <= WINDOW_MS =>
+                        {
+                            if now.duration_since(rel).as_millis()
+                                >= MIN_RELEASE_GAP_MS
+                            {
+                                // 真实双击：两次按下间有足够长的释放间隔
+                                last_press = None;
+                                released_at = None;
+                                log("double ctrl: launching ui popup");
+                                launch_ui(Some("popup"));
+                            }
+                            // 释放间隔太短：按点弹跳，视作同一次按压延续
                         }
-                        _ => last_press = Some(now),
+                        _ => {
+                            last_press = Some(now);
+                            released_at = None;
+                        }
                     }
                 }
+                was_down = true;
             } else {
+                if last_press.is_some() && released_at.is_none() {
+                    released_at = Some(std::time::Instant::now());
+                }
                 was_down = false;
+                if let Some(t) = last_press {
+                    if t.elapsed().as_millis() > WINDOW_MS {
+                        last_press = None;
+                        released_at = None;
+                    }
+                }
             }
         }
     });
@@ -1412,6 +1437,7 @@ fn transfer_loop() {
                 drop(cfg);
                 if TRANSFER_ON.swap(false, Ordering::Relaxed) {
                     log("transfer released (ui active or discover off)");
+                    kick_release();
                 }
                 std::thread::sleep(Duration::from_millis(800));
                 continue;
@@ -1445,9 +1471,23 @@ fn transfer_loop() {
                         }
                     }
                 });
-                // announce loop; exits when flag clears
+                // announce loop; exits when flag clears.
+                // FIX: re-check CONFIG every tick -- previously ui_active=true
+                // could never stop this loop (flag was only cleared by this
+                // same thread), so the daemon held UDP/TCP ports forever and
+                // the UI never received discovery replies.
                 let mut tick: u64 = 0;
                 loop {
+                    {
+                        let cfg = CONFIG.lock().unwrap();
+                        let on = cfg
+                            .as_ref()
+                            .map(|c| !c.ui_active && c.discover_enabled)
+                            .unwrap_or(false);
+                        if !on {
+                            TRANSFER_ON.store(false, Ordering::Relaxed);
+                        }
+                    }
                     if !TRANSFER_ON.load(Ordering::Relaxed) {
                         break;
                     }
@@ -1470,7 +1510,35 @@ fn transfer_loop() {
                 std::thread::sleep(Duration::from_secs(5));
             }
         }
+        // 释放后踢醒阻塞在 recv_from / incoming() 的线程，否则 socket
+        // 被卡住的线程握着，端口在 OS 层一直不放
+        kick_release();
         std::thread::sleep(Duration::from_millis(500));
+    }
+}
+
+/// 踢一下本机的发现/接收端口：让阻塞在 recv_from / incoming() 的线程
+/// 醒来检查 TRANSFER_ON 后退出，从而 drop socket、释放端口。
+fn kick_release() {
+    // UDP 52346：loopback 发个无效包唤醒 recv_from
+    if let Ok(s) = UdpSocket::bind(("127.0.0.1", 0)) {
+        let _ = s.send_to(b"kick", ("127.0.0.1", DISCOVERY_PORT));
+    }
+    // TCP：连一下 HTTP 监听端口唤醒 accept 线程（连接会被 flag 检查丢弃）
+    let http_port = HTTP_PORT.load(Ordering::Relaxed);
+    let ports: [u16; 2] = [
+        if (HTTP_PORT_BASE..=HTTP_PORT_MAX).contains(&http_port) {
+            http_port
+        } else {
+            HTTP_PORT_BASE
+        },
+        HTTP_PORT_BASE,
+    ];
+    for p in ports {
+        if let Ok(c) = std::net::TcpStream::connect(("127.0.0.1", p)) {
+            drop(c);
+            break;
+        }
     }
 }
 

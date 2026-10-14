@@ -249,7 +249,8 @@ class _QuickSearchPopupState extends State<QuickSearchPopup> {
     );
     if (ok != true) return null;
     return QuickLaunchItem(
-        name: nameCtrl.text.trim(), target: targetCtrl.text.trim());
+        name: nameCtrl.text.trim(),
+        target: QuickLaunchService.normalizeTarget(targetCtrl.text));
   }
 
   /// 空态主体：常用软件 / 常用网址网格（点击搜索框或输入后切搜索视图）。
@@ -807,11 +808,14 @@ class _QuickSearchPopupState extends State<QuickSearchPopup> {
             ),
           ),
           for (final h in _history)
-            ListTile(
-              dense: true,
-              leading: Icon(Icons.history, size: 18, color: theme.hintColor),
-              title: Text(h, style: const TextStyle(fontSize: 13)),
-              onTap: () => _useHistory(h),
+            // pointer-down 即填词：tap-up 前失焦会摘掉列表导致 onTap 被吞
+            Listener(
+              onPointerDown: (_) => _useHistory(h),
+              child: ListTile(
+                dense: true,
+                leading: Icon(Icons.history, size: 18, color: theme.hintColor),
+                title: Text(h, style: const TextStyle(fontSize: 13)),
+              ),
             ),
         ],
       );

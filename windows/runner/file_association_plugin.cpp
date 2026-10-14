@@ -133,15 +133,20 @@ static void RegisterFileAssociation() {
 static std::string GetInitialFile() {
   int argc;
   LPWSTR* argv = CommandLineToArgvW(GetCommandLineW(), &argc);
-  
+
   std::string filePath;
-  if (argc > 1) {
-    std::wstring wFilePath(argv[1]);
-    
+  // Skip command line flags (e.g. --page=transfer / --page=popup from daemon);
+  // return the first non-flag argument as the file to open.
+  for (int i = 1; i < argc; i++) {
+    std::wstring wFilePath(argv[i]);
+    if (wFilePath.empty() || wFilePath[0] == L'-') {
+      continue;
+    }
+
     if (wFilePath.length() >= 2 && wFilePath.front() == L'"' && wFilePath.back() == L'"') {
       wFilePath = wFilePath.substr(1, wFilePath.length() - 2);
     }
-    
+
     int size_needed = WideCharToMultiByte(CP_UTF8, 0, wFilePath.c_str(),
                                           -1, NULL, 0, NULL, NULL);
     if (size_needed > 0) {
@@ -149,8 +154,9 @@ static std::string GetInitialFile() {
       WideCharToMultiByte(CP_UTF8, 0, wFilePath.c_str(), -1,
                           &filePath[0], size_needed, NULL, NULL);
     }
+    break;
   }
-  
+
   LocalFree(argv);
   return filePath;
 }
