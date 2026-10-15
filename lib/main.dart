@@ -1099,18 +1099,6 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
             style: const TextStyle(fontWeight: FontWeight.bold)),
         backgroundColor: Theme.of(context).colorScheme.inversePrimary,
         actions: [
-          // 微密保险箱（锁定/宫格/导入）
-          IconButton(
-            icon: const Icon(Icons.lock_outline),
-            tooltip: '保险箱',
-            onPressed: () {
-              Navigator.push(
-                context,
-                MaterialPageRoute(
-                    builder: (context) => const VaultBrowserScreen()),
-              );
-            },
-          ),
           // 加解密历史（与飞传页右上角「传输记录」同款入口）
           IconButton(
             icon: const Icon(Icons.history),
@@ -1166,6 +1154,13 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                             )),
                   );
                   break;
+                case 'vault':
+                  Navigator.push(
+                    context,
+                    MaterialPageRoute(
+                        builder: (context) => const VaultBrowserScreen()),
+                  );
+                  break;
                 case 'about':
                   Navigator.push(
                     context,
@@ -1216,6 +1211,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                 const PopupMenuDivider(),
                 item('settings', Icons.settings_outlined, '设置'),
                 item('language', Icons.language, t('language')),
+                item('vault', Icons.lock_outline, '微密保险箱'),
                 item('about', Icons.info_outline, t('about')),
               ];
             },

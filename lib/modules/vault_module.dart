@@ -38,6 +38,14 @@ class VaultModule extends FeatureModule {
           customTile: (ctx) => const _VaultDirTile(),
         ),
         SettingDef(
+          key: VaultService.showInDirsPrefKey,
+          title: '在我的目录显示保险箱入口',
+          icon: Icons.bookmarks_outlined,
+          subtitle: '关闭后，文件页「我的目录」列表不再显示保险箱入口（右上角菜单仍可进入）',
+          type: SettingType.boolean,
+          defaultValue: true,
+        ),
+        SettingDef(
           key: VaultService.idleMinPrefKey,
           title: '闲置自动上锁（分钟）',
           icon: Icons.timer_outlined,

@@ -18,10 +18,12 @@ import '../services/quick_search_window.dart';
 import '../services/search_history_service.dart';
 import '../services/system_open_service.dart';
 import '../services/view_prefs_service.dart';
+import '../services/vault_service.dart';
 import '../widgets/file_selection_bar.dart';
 import '../widgets/file_thumbnail.dart';
 import 'file_filter_sheet.dart';
 import 'lan_transfer_screen.dart';
+import 'vault_browser_screen.dart';
 
 /// 缩略图档位 → 宫格单元格最大宽度（手机默认「中」，与 PC 一致降认知负担）
 double _gridExtentFor(ThumbSize s) {
@@ -113,6 +115,7 @@ class WeiMiVaultScreenState extends State<WeiMiVaultScreen> {
   final Set<String> _expandedDirs = {}; // 展开中的目录
   bool _commonOpen = true; // 「常用目录」分组展开
   bool _mineOpen = true; // 「我的目录」分组展开
+  bool _showVaultEntry = true; // 「我的目录」里的保险箱入口（设置页可开关）
   final Map<String, List<FileItem>> _dirChildren = {}; // 展开后的子项缓存
   final Map<String, bool> _dirLoading = {};
   List<String> _customDirs = []; // 用户添加的目录
@@ -379,6 +382,9 @@ class WeiMiVaultScreenState extends State<WeiMiVaultScreen> {
       _vaultDir = prefs.getString(_kVaultDirKey);
       _commonOpen = prefs.getBool(_kCommonOpenKey) ?? true;
       _mineOpen = prefs.getBool(_kMineOpenKey) ?? true;
+      // 「我的目录」里的保险箱入口（设置页可显示/隐藏）
+      _showVaultEntry =
+          prefs.getBool(VaultService.showInDirsPrefKey) ?? true;
       // 目录展开状态不再持久化/恢复：启动一律折叠，
       // 避免恢复的展开目录没有触发子项加载而无限转圈
     } catch (_) {}
@@ -1611,6 +1617,25 @@ class WeiMiVaultScreenState extends State<WeiMiVaultScreen> {
             open: _mineOpen,
             onToggle: (v) => _setSectionOpen(mine: true, open: v),
             children: [
+              // 微密保险箱入口（设置页「在我的目录显示保险箱入口」可隐藏）
+              if (_showVaultEntry)
+                ListTile(
+                  leading: const Icon(Icons.lock_outline,
+                      color: Colors.deepOrange),
+                  title: const Text('微密保险箱',
+                      style: TextStyle(fontWeight: FontWeight.w600)),
+                  subtitle: const Text('主密码门禁 + 文件密码库 + 缩略图',
+                      style: TextStyle(fontSize: 11)),
+                  trailing:
+                      const Icon(Icons.chevron_right, color: Colors.grey),
+                  onTap: () {
+                    Navigator.push(
+                      context,
+                      MaterialPageRoute(
+                          builder: (context) => const VaultBrowserScreen()),
+                    );
+                  },
+                ),
               // 加密文件存放目录（未设置时引导设置，置顶）
               if (_vaultDir == null)
                 ListTile(

@@ -49,6 +49,7 @@ class VaultService {
   static const String idleMinPrefKey = 'vault_idle_lock_min';
   static const String lockOnExitPrefKey = 'vault_lock_on_exit';
   static const String biometricPrefKey = 'vault_biometric_enabled';
+  static const String showInDirsPrefKey = 'vault_show_in_dirs';
 
   static const String keysName = '.weimi_keys';
   static const String lockName = '.weimi_lock';
