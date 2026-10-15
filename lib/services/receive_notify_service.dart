@@ -4,7 +4,9 @@ import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:local_notifier/local_notifier.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import 'package:window_manager/window_manager.dart';
 import 'share_receive_service.dart';
+import 'transfer_history_screen.dart';
 
 /// 接收完成通知服务：
 /// - PC（Win/mac/Linux）：系统通知（local_notifier），点击打开文件所在目录
@@ -64,37 +66,58 @@ class ReceiveNotifyService {
     }
   }
 
-  /// 收到文本
+  /// 收到文本（点击通知 → 飞传传输记录页）
   void textDone(String from, String text) {
     final t = text.replaceAll('\n', ' ');
     final preview = t.length > 40 ? '${t.substring(0, 40)}…' : t;
-    _fire('收到 $from 的文本：$preview');
+    _fire('收到 $from 的文本：$preview', openHistory: true);
   }
 
   /// 未信任设备的请求被拒收（自动拒收/超时/直接拒绝模式），也要让机主知道
   void rejected(String name, String from) {
     _fire('已拒收来自 $from 的「$name」（未信任设备）。'
-        '可在 设置-微密飞传-信任设备 添加后请对方重发');
+        '可在 设置-微密飞传-信任设备 添加后请对方重发',
+        openHistory: true);
   }
 
-  void _fire(String body, {String? revealPath}) {
+  void _fire(String body, {String? revealPath, bool openHistory = false}) {
     if (!_enabled) return;
     if (isDesktop) {
-      _desktopNotify(body, revealPath);
+      _desktopNotify(body, revealPath, openHistory);
     } else {
       _androidBanner(body);
     }
   }
 
-  void _desktopNotify(String body, String? revealPath) {
+  void _desktopNotify(String body, String? revealPath, bool openHistory) {
     if (!_desktopReady) return;
     try {
       final n = LocalNotification(title: '微密飞传', body: body);
       if (revealPath != null) {
         n.onClick = () => _revealInFileManager(revealPath);
+      } else if (openHistory) {
+        n.onClick = _openTransferHistory;
       }
       n.show();
     } catch (_) {}
+  }
+
+  /// 点击通知 → 唤起主窗口并打开飞传传输记录页
+  void _openTransferHistory() {
+    unawaited(() async {
+      try {
+        if (isDesktop) {
+          await windowManager.show();
+          await windowManager.focus();
+        }
+      } catch (_) {}
+      final ctx = ShareReceiveService.navigatorKey.currentContext;
+      if (ctx == null) return;
+      try {
+        Navigator.of(ctx).push(MaterialPageRoute(
+            builder: (_) => const TransferHistoryScreen()));
+      } catch (_) {}
+    }());
   }
 
   void _androidBanner(String body) {
