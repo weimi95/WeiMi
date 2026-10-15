@@ -6,7 +6,7 @@ import 'package:local_notifier/local_notifier.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:window_manager/window_manager.dart';
 import 'share_receive_service.dart';
-import 'transfer_history_screen.dart';
+import '../screens/transfer_history_screen.dart';
 
 /// 接收完成通知服务：
 /// - PC（Win/mac/Linux）：系统通知（local_notifier），点击打开文件所在目录
