@@ -10,7 +10,7 @@ import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
-import 'file_thumbnail.dart';
+import '../widgets/file_thumbnail.dart';
 import 'rust_crypto.dart';
 import 'windows_thumbnail_provider.dart';
 
