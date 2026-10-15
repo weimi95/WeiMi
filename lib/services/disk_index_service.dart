@@ -42,9 +42,72 @@ class DiskIndexService {
     try {
       final prefs = await SharedPreferences.getInstance();
       _includeRemovable = prefs.getBool(prefsKeyRemovable) ?? false;
+      final roots = prefs.getStringList(prefsKeyRoots);
+      if (roots != null && roots.isNotEmpty) {
+        _customRoots = roots
+            .map(normalizeRoot)
+            .where((r) => r.isNotEmpty)
+            .toList(growable: false);
+      }
     } catch (_) {
       _includeRemovable = false;
     }
+  }
+
+  /// 用户指定的索引根（索引文件夹白名单）。非空时只索引这些根，
+  /// 空则索引所有固定磁盘（默认行为）。支持盘符、子目录与 UNC 局域网共享。
+  static List<String>? _customRoots;
+  static const String prefsKeyRoots = 'index_roots';
+
+  static bool get hasCustomRoots =>
+      _customRoots != null && _customRoots!.isNotEmpty;
+
+  /// 规整一个索引根：去首尾空白；盘符统一大写并补 \`:\`；UNC/路径去尾部分隔符。
+  /// 返回空串表示无效。例：'d' → 'D:\'，'\\Cs07\f\' → '\\Cs07\f'。
+  static String normalizeRoot(String raw) {
+    var s = raw.trim();
+    if (s.isEmpty) return '';
+    if (s.startsWith('\\\\')) {
+      while (s.length > 2 && (s.endsWith('\\') || s.endsWith('/'))) {
+        s = s.substring(0, s.length - 1);
+      }
+      return s;
+    }
+    final c = s.codeUnitAt(0);
+    final isLetter = (c >= 65 && c <= 90) || (c >= 97 && c <= 122);
+    final colon = s.length > 1 && s.codeUnitAt(1) == 58; // ':'
+    final bare = s.length == 1; // 只给了一个盘符字母
+    if (isLetter && (colon || bare)) {
+      s = s[0].toUpperCase() + (bare ? ':' : s.substring(1));
+      while (s.endsWith('\\') || s.endsWith('/')) {
+        s = s.substring(0, s.length - 1);
+      }
+      if (!s.contains('\\')) s = '$s:\\';
+      return s;
+    }
+    while (s.endsWith('\\') || s.endsWith('/')) {
+      s = s.substring(0, s.length - 1);
+    }
+    return s;
+  }
+
+  /// 仅保存「索引文件夹」设置并更新内存态（不触发重建；重建由调用方在
+  /// 离开设置页等合适时机做，避免每加一条就全量重建一次）。
+  static Future<void> saveRootsSetting(List<String> roots) async {
+    final normalized = <String>[];
+    for (final r in roots) {
+      final n = normalizeRoot(r);
+      if (n.isNotEmpty && !normalized.contains(n)) normalized.add(n);
+    }
+    _customRoots = normalized.isEmpty ? null : normalized;
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      if (normalized.isEmpty) {
+        await prefs.remove(prefsKeyRoots);
+      } else {
+        await prefs.setStringList(prefsKeyRoots, normalized);
+      }
+    } catch (_) {}
   }
 
   /// 应用「扫描索引移动设备」设置变更：保存 + 立即全量重建 + 监视器按新根重拉
@@ -157,9 +220,13 @@ class DiskIndexService {
     }
   }
 
-  /// 默认索引根：Windows 枚举所有存在的盘符（可按设置排除移动设备），
+  /// 默认索引根：用户在「索引文件夹」里配置的白名单优先（非空即只索引这些根）；
+  /// 否则 Windows 枚举所有存在的盘符（可按设置排除移动设备），
   /// macOS /Users，Linux 常见挂载点，安卓内置存储
   static List<String> defaultRoots() {
+    if (hasCustomRoots) {
+      return List<String>.of(_customRoots!);
+    }
     if (Platform.isWindows) {
       final roots = <String>[];
       final allowRemovable = includeRemovable;
@@ -230,6 +297,11 @@ class DiskIndexService {
         }
       }
       if (missing / sample.length > 0.05) {
+        // 含 UNC 局域网根时禁用自动重建：共享掉线会让抽样大量「缺失」，
+        // 触发反复重建把整个索引清空；恢复在线后由周期刷新自然补回
+        if (hasCustomRoots && _customRoots!.any((r) => r.startsWith('\\\\'))) {
+          return;
+        }
         await buildIndex(defaultRoots(), persist: true);
       }
     } catch (_) {
