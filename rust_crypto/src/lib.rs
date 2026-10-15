@@ -18,6 +18,8 @@ mod usn;
 // 目录变更实时监视（ReadDirectoryChangesW，Everything 式增量；仅 Windows）
 #[cfg(windows)]
 mod watcher;
+// 微密保险箱：密码库（钥匙环）+ v3 文件格式 + 缩略图（全平台）
+mod vault;
 
 const NONCE_SIZE: usize = 12;
 const TAG_SIZE: usize = 16;
@@ -276,6 +278,19 @@ fn decrypt_file_internal(
     let mut version_bytes = [0u8; 4];
     input_file.read_exact(&mut version_bytes)?;
     let version = u32::from_le_bytes(version_bytes);
+    if version == vault::FILE_VERSION_V3 {
+        // v3（保险箱）：头带 salt + 可选加密缩略图节，内容密钥 = Argon2id，
+        // 交给 vault 模块从头完整解析（此处已消费 magic+version，重开文件）。
+        drop(input_file);
+        return vault::decrypt_file_v3_internal(
+            input_path,
+            output_path,
+            password,
+            is_mobile,
+            cpu_cores,
+        )
+        .map_err(std::convert::Into::into);
+    }
     if version != VERSION {
         return Err("Unsupported version".into());
     }
@@ -465,6 +480,12 @@ fn decrypt_file_to_memory_internal(
     let mut version_bytes = [0u8; 4];
     input_file.read_exact(&mut version_bytes)?;
     let version = u32::from_le_bytes(version_bytes);
+    if version == vault::FILE_VERSION_V3 {
+        // v3（保险箱）：salt + Argon2id + 可选缩略图节，交给 vault 模块
+        drop(input_file);
+        return vault::decrypt_file_v3_to_memory_internal(input_path, password, is_mobile, _cpu_cores)
+            .map_err(std::convert::Into::into);
+    }
     if version != VERSION {
         return Err("Unsupported version".into());
     }
@@ -588,7 +609,28 @@ fn get_hint_from_file_internal(input_path: &str) -> Result<Vec<u8>, Box<dyn std:
     
     let mut version_bytes = [0u8; 4];
     input_file.read_exact(&mut version_bytes)?;
-    
+    let version = u32::from_le_bytes(version_bytes);
+
+    if version == vault::FILE_VERSION_V3 {
+        // v3：flags u32 + salt 16B +（flags&1 时）thumb_nonce 12B + thumb_len u32 + blob
+        let mut flags_bytes = [0u8; 4];
+        input_file.read_exact(&mut flags_bytes)?;
+        let flags = u32::from_le_bytes(flags_bytes);
+        let mut salt = [0u8; 16];
+        input_file.read_exact(&mut salt)?;
+        if flags & 1 != 0 {
+            let mut thumb_nonce = [0u8; 12];
+            input_file.read_exact(&mut thumb_nonce)?;
+            let mut thumb_len_bytes = [0u8; 4];
+            input_file.read_exact(&mut thumb_len_bytes)?;
+            let thumb_len = u32::from_le_bytes(thumb_len_bytes) as u64;
+            use std::io::Seek;
+            input_file.seek(std::io::SeekFrom::Current(thumb_len as i64))?;
+        }
+    } else if version != VERSION {
+        return Err("Unsupported version".into());
+    }
+
     let mut hint_len_bytes = [0u8; 1];
     input_file.read_exact(&mut hint_len_bytes)?;
     let hint_len = hint_len_bytes[0] as usize;
