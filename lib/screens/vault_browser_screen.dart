@@ -127,9 +127,15 @@ class _VaultBrowserScreenState extends State<VaultBrowserScreen>
 
   @override
   Widget build(BuildContext context) {
-    if (_loading) {
-      return const Center(child: CircularProgressIndicator());
-    }
+    return Scaffold(
+      appBar: AppBar(title: const Text('微密保险箱')),
+      body: _loading
+          ? const Center(child: CircularProgressIndicator())
+          : _body(),
+    );
+  }
+
+  Widget _body() {
     if (_setupMode) return _buildSetup();
     if (!VaultService.instance.isUnlocked) return _buildLocked();
     return _buildBrowser();
@@ -157,10 +163,19 @@ class _VaultBrowserScreenState extends State<VaultBrowserScreen>
                   textAlign: TextAlign.center,
                   style: Theme.of(context).textTheme.titleLarge),
               const SizedBox(height: 8),
-              const Text(
-                '箱内文件加密保存并隐藏内容，进入需要主密码。'
-                '\n主密码一旦忘记将无法找回，请务必牢记。',
-                textAlign: TextAlign.center,
+              Row(
+                children: [
+                  Icon(Icons.info_outline,
+                      size: 15, color: Colors.grey.shade600),
+                  const SizedBox(width: 6),
+                  Expanded(
+                    child: Text(
+                      '箱内文件加密保存，进入需主密码；主密码一旦忘记无法找回。',
+                      style: TextStyle(
+                          fontSize: 12, color: Colors.grey.shade600),
+                    ),
+                  ),
+                ],
               ),
               const SizedBox(height: 24),
               OutlinedButton.icon(
@@ -209,10 +224,24 @@ class _VaultBrowserScreenState extends State<VaultBrowserScreen>
               ),
               const SizedBox(height: 20),
               FilledButton.icon(
-                icon: const Icon(Icons.create_new_folder_outlined),
-                label: const Text('创建保险箱'),
-                onPressed: valid ? _createVault : null,
+                icon: _busy
+                    ? const SizedBox(
+                        width: 16,
+                        height: 16,
+                        child: CircularProgressIndicator(strokeWidth: 2))
+                    : const Icon(Icons.create_new_folder_outlined),
+                label: Text(_busy ? '创建中…' : '创建保险箱'),
+                onPressed: (!_busy && valid) ? _createVault : null,
               ),
+              if (!valid && !_busy) ...[
+                const SizedBox(height: 8),
+                Text(
+                  _setupInvalidReason(),
+                  textAlign: TextAlign.center,
+                  style: TextStyle(
+                      fontSize: 12, color: Colors.grey.shade600),
+                ),
+              ],
             ],
           ),
         ),
@@ -229,6 +258,14 @@ class _VaultBrowserScreenState extends State<VaultBrowserScreen>
       if (res == null || res.isEmpty) return;
       setState(() => _chosenDir = res);
     } catch (_) {}
+  }
+
+  /// 创建按钮不可用时的具体原因（直接告诉用户差在哪，而不是点了没反应）
+  String _setupInvalidReason() {
+    if (_chosenDir.isEmpty) return '请先选择保险箱目录';
+    if (_pw1Ctrl.text.length < 8) return '主密码至少 8 位';
+    if (_pw1Ctrl.text != _pw2Ctrl.text) return '两次输入的主密码不一致';
+    return '';
   }
 
   Future<void> _createVault() async {
