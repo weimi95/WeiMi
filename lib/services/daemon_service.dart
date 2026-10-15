@@ -113,7 +113,9 @@ class DaemonService {
     try {
       final sock = await Socket.connect('127.0.0.1', _configPort,
           timeout: const Duration(milliseconds: 1500));
-      sock.add('$line\n'.codeUnits);
+      // 必须显式 UTF-8 编码：codeUnits 是 UTF-16 码元，Socket.add 逐字节截断，
+      // 中文路径（receive_dir 等）会被守护进程 lossy 解码成 U+FFFD 乱码目录
+      sock.add(utf8.encode('$line\n'));
       await sock.flush();
       sock.destroy();
       return true;

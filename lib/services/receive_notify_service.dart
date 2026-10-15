@@ -58,11 +58,20 @@ class ReceiveNotifyService {
     } catch (_) {}
   }
 
+  /// 同批次去重：一批多个文件落到同一目录时只自动打开一次
+  /// （手机共享多文件逐个回调 fileDone，10 秒内同目录视为同一批）
+  final Map<String, DateTime> _lastFolderOpenAt = {};
+
   /// 收到文件（App / 网页 / WS 三条管线共用）
   void fileDone(String name, String from, String path) {
     _fire('已接收文件「$name」（来自 $from）', revealPath: path);
     if (isDesktop && _openDir) {
-      unawaited(_openContainingFolder(path));
+      final now = DateTime.now();
+      final last = _lastFolderOpenAt[path];
+      if (last == null || now.difference(last).inSeconds > 10) {
+        _lastFolderOpenAt[path] = now;
+        unawaited(_openContainingFolder(path));
+      }
     }
   }
 

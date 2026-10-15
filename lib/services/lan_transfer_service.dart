@@ -507,19 +507,35 @@ class LanTransferService {
   /// 未信任设备按设置 lan_untrusted_mode：
   /// - confirm（默认）：弹确认框等待 lan_untrusted_timeout 秒，超时自动拒收
   /// - reject：直接拒收
+  /// 未信任批次豁免：同一设备确认通过后 2 分钟内的后续文件免再确认
+  /// （手机一次共享多文件 = 逐个 POST，同批只该确认一次）
+  final Map<String, DateTime> _batchGrantedUntil = {};
+
   Future<bool> _decideAccept(
       {required String senderId,
       required Future<bool> Function() ask}) async {
     if (TrustedDevices.instance.isTrustedSync(senderId)) return true;
+    final granted = _batchGrantedUntil[senderId];
+    if (granted != null && DateTime.now().isBefore(granted)) return true;
     final mode = SettingStore.get<String>('lan_untrusted_mode', 'confirm');
     if (mode == 'reject') return false;
+    bool accepted = false;
     try {
-      return await ask()
+      accepted = await ask()
           .timeout(Duration(seconds: confirmTimeoutSecs()),
               onTimeout: () => false);
     } catch (_) {
-      return false;
+      accepted = false;
     }
+    if (accepted) {
+      _batchGrantedUntil[senderId] =
+          DateTime.now().add(const Duration(minutes: 2));
+      // 顺手清过期项，防长期膨胀
+      final now = DateTime.now();
+      _batchGrantedUntil
+          .removeWhere((_, v) => now.isAfter(v));
+    }
+    return accepted;
   }
 
   Future<void> _handleIncomingFile(HttpRequest req) async {

@@ -28,10 +28,13 @@ import 'vault_browser_screen.dart';
 /// 缩略图档位 → 宫格单元格最大宽度（手机默认「中」，与 PC 一致降认知负担）
 double _gridExtentFor(ThumbSize s) {
   final desktop = !Platform.isAndroid && !Platform.isIOS;
+  // 手机 432dp 宽：小 90→4 列 / 中 110→3 列 / 大 210→2 列；
+  // SliverGridDelegateWithMaxCrossAxisExtent 本身按可用宽度算列数，
+  // 平板/宽屏自动加列（小≈每 100dp 一列、大≈每 220dp 一列），无需平台特判
   return switch (s) {
     ThumbSize.small => desktop ? 100 : 90,
     ThumbSize.medium => desktop ? 130 : 110,
-    ThumbSize.large => desktop ? 170 : 150,
+    ThumbSize.large => desktop ? 170 : 210,
   };
 }
 
@@ -2326,11 +2329,19 @@ class _FileListItem extends StatelessWidget {
     } else if (item.isDirectory) {
       leading = const Icon(Icons.folder, color: Colors.amber);
     } else {
-      leading = FileThumbnail(
-        path: item.fullPath,
-        name: item.name,
-        size: _listThumbFor(ViewPrefsService.instance.thumbSize),
-        fit: BoxFit.contain,
+      // SizedBox 必须给：FileThumbnail 的 contain 分支本身无边界
+      // （宫格/瀑布流由父容器约束），放进 ListTile leading 会把行撑爆，
+      // 文件名被挤成单字符竖排——只在纯图片文件夹的列表视图出现
+      final ts = _listThumbFor(ViewPrefsService.instance.thumbSize);
+      leading = SizedBox(
+        width: ts,
+        height: ts,
+        child: FileThumbnail(
+          path: item.fullPath,
+          name: item.name,
+          size: ts,
+          fit: BoxFit.contain,
+        ),
       );
     }
     return GestureDetector(
