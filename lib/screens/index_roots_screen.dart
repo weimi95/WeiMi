@@ -100,7 +100,7 @@ class _IndexRootsScreenState extends State<IndexRootsScreen> {
                     borderRadius: BorderRadius.circular(10),
                     border: Border.all(color: Colors.blue.shade200),
                   ),
-                  Text(
+                  child: Text(
                     empty
                         ? '未配置：索引所有固定磁盘（默认）。'
                             '添加后只索引列表里的磁盘 / 文件夹 / 局域网共享，其余不扫描。'
