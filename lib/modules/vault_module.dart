@@ -278,6 +278,8 @@ class _ChangeMasterTile extends StatelessWidget {
     try {
       await VaultService.instance
           .changeMasterPassword(oldCtrl.text, newCtrl.text);
+      // 生物识别密文是旧主密码加密的，改密后必须清除重录
+      await VaultBiometricService.removeMaster();
       if (!context.mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
           content: Text('主密码已修改'), backgroundColor: Colors.green));

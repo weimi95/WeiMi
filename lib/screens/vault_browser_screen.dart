@@ -45,6 +45,9 @@ class _VaultBrowserScreenState extends State<VaultBrowserScreen>
   // 锁定屏输入
   final _unlockCtrl = TextEditingController();
   bool _canBiometric = false;
+  bool _bioCan = false; // 设备支持且已录入指纹
+  bool _bioEnabled = false; // 设置开关
+  bool _bioHas = false; // 已保存主密码密文
   int _countdownSec = 0;
 
   @override
@@ -103,7 +106,12 @@ class _VaultBrowserScreenState extends State<VaultBrowserScreen>
       final enabled = await VaultBiometricService.isEnabled();
       final has = await VaultBiometricService.hasSavedMaster();
       if (mounted) {
-        setState(() => _canBiometric = canBio && enabled && has);
+        setState(() {
+          _bioCan = canBio;
+          _bioEnabled = enabled;
+          _bioHas = has;
+          _canBiometric = canBio && enabled && has;
+        });
       }
     }
   }
@@ -348,6 +356,15 @@ class _VaultBrowserScreenState extends State<VaultBrowserScreen>
                       ? null
                       : _tryBiometricUnlock,
                 ),
+              ] else if (_bioEnabled && _bioCan && !_bioHas) ...[
+                const SizedBox(height: 12),
+                Text(
+                  '生物识别待录入：输入主密码解锁一次并完成指纹验证，'
+                  '之后即可用指纹解锁',
+                  textAlign: TextAlign.center,
+                  style: TextStyle(
+                      fontSize: 12, color: Colors.grey.shade600),
+                ),
               ],
             ],
           ),
@@ -367,7 +384,12 @@ class _VaultBrowserScreenState extends State<VaultBrowserScreen>
       final bioEnabled = await VaultBiometricService.isEnabled();
       final bioHas = await VaultBiometricService.hasSavedMaster();
       if (bioEnabled && !bioHas && await VaultBiometricService.canAuth()) {
-        await VaultBiometricService.saveMaster(pw);
+        final ok = await VaultBiometricService.saveMaster(pw);
+        if (!ok && mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+              content: Text('生物识别录入未完成（已取消或失败），'
+                  '下次用主密码解锁时会再次尝试')));
+        }
       }
       _unlockCtrl.clear();
       if (!mounted) return;
