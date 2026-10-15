@@ -84,14 +84,12 @@ class _DirEntry {
   final String title;
   final String dirPath;
   final IconData icon;
-  final bool isVault; // 加密文件存放目录
   final bool isCustom; // 用户手动添加的目录
 
   const _DirEntry(
     this.title,
     this.dirPath,
     this.icon, {
-    this.isVault = false,
     this.isCustom = false,
   });
 }
@@ -565,36 +563,6 @@ class WeiMiVaultScreenState extends State<WeiMiVaultScreen> {
       final prefs = await SharedPreferences.getInstance();
       await prefs.setStringList(_kCustomDirsKey, _customDirs);
     } catch (_) {}
-  }
-
-  // ============ 加密文件存放目录：设置 / 更改 ============
-
-  /// 首次设置或更改「加密文件存放目录」。加密完成的文件默认存这里，
-  /// 局域网收到的文件也落在这里。
-  Future<void> _setupVaultDir() async {
-    final picked = await FilePicker.platform
-        .getDirectoryPath(dialogTitle: '选择加密文件的存放目录');
-    if (picked == null || !mounted) return;
-    final dir = _normalizeAndroidDir(picked);
-
-    final exists = await Directory(dir).exists();
-    if (!exists) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('目录不存在或无法访问: $dir')),
-      );
-      return;
-    }
-
-    setState(() => _vaultDir = dir);
-    try {
-      final prefs = await SharedPreferences.getInstance();
-      await prefs.setString(_kVaultDirKey, dir);
-    } catch (_) {}
-    if (mounted) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('已设置，之后加密/接收的文件默认存入: $dir')),
-      );
-    }
   }
 
   // ============ 目录展开 / 折叠 ============
@@ -1494,7 +1462,7 @@ class WeiMiVaultScreenState extends State<WeiMiVaultScreen> {
   /// 根视图：搜索框 + 快捷操作卡 + 常用目录（含全部文件）+ 我的目录（加密目录 + 添加目录）
   Widget _buildRootView() {
     final entries = _buildRootEntries();
-    final builtin = entries.where((e) => !e.isCustom && !e.isVault).toList();
+    final builtin = entries.where((e) => !e.isCustom).toList();
     final customs = entries.where((e) => e.isCustom).toList();
 
     // 搜索过滤：有查询词时，只显示匹配的展开子项
@@ -1636,28 +1604,6 @@ class WeiMiVaultScreenState extends State<WeiMiVaultScreen> {
                     );
                   },
                 ),
-              // 加密文件存放目录（未设置时引导设置，置顶）
-              if (_vaultDir == null)
-                ListTile(
-                  leading:
-                      Icon(Icons.shield_outlined, color: Colors.blue.shade700),
-                  title: const Text('加密文件存放目录',
-                      style: TextStyle(fontWeight: FontWeight.w600)),
-                  subtitle: const Text('尚未设置，点击选择一个文件夹\n之后加密/接收的文件默认存入',
-                      style: TextStyle(fontSize: 11)),
-                  trailing: TextButton(
-                    onPressed: _setupVaultDir,
-                    child: const Text('设置'),
-                  ),
-                  onTap: _setupVaultDir,
-                )
-              else
-                _buildDirTile(
-                  _DirEntry(
-                      '加密文件存放目录', _vaultDir!, Icons.shield_outlined,
-                      isVault: true),
-                  filterQuery: q,
-                ),
               for (final d in customs) _buildDirTile(d, filterQuery: q),
               ListTile(
                 leading: Icon(Icons.add_circle_outline,
@@ -1778,9 +1724,7 @@ class WeiMiVaultScreenState extends State<WeiMiVaultScreen> {
         ListTile(
           leading: Icon(
             d.icon,
-            color: d.isVault
-                ? Colors.blue
-                : (d.isCustom ? Colors.teal : Colors.amber.shade700),
+            color: d.isCustom ? Colors.teal : Colors.amber.shade700,
           ),
           title: Text(d.title, style: const TextStyle(fontWeight: FontWeight.w500)),
           subtitle: Text(
@@ -1812,7 +1756,6 @@ class WeiMiVaultScreenState extends State<WeiMiVaultScreen> {
             ],
           ),
           onTap: () => _toggleDir(d.dirPath),
-          onLongPress: d.isVault ? _setupVaultDir : null, // 长按更改加密目录
         ),
         if (expanded) ..._buildExpandedContent(children, filterQuery),
       ],

@@ -58,7 +58,9 @@ class TrayService {
   }
 
   /// 桌面端初始化：窗口管理 + 托盘 + 启动常驻飞传（仅调用一次）。
-  Future<void> initDesktop() async {
+  /// [startHidden] = 守护进程冷启浮窗深链（--page=popup）：窗口创建即隐藏，
+  /// 由 showPopup 等首帧渲染后统一 show，避免空白主窗口先上屏。
+  Future<void> initDesktop({bool startHidden = false}) async {
     if (_initialized) return;
     _initialized = true;
 
@@ -74,7 +76,12 @@ class TrayService {
       title: '微密文件',
     );
     await windowManager.waitUntilReadyToShow(opts, () async {
-      await windowManager.show();
+      if (startHidden) {
+        // 冷启浮窗：不 show，等浮窗内容渲染完由 showPopup() 统一上屏
+        await windowManager.hide();
+      } else {
+        await windowManager.show();
+      }
       // 关窗不退出，由 _WindowListener 收进托盘
       await windowManager.setPreventClose(true);
     });

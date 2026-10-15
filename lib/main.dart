@@ -52,6 +52,10 @@ const String kLastOutputDirKey = 'last_output_dir';
 void main(List<String> args) async {
   WidgetsFlutterBinding.ensureInitialized();
 
+  // 深链必须在窗口创建前检测：initDesktop 的 waitUntilReadyToShow 会决定
+  // 窗口要不要 show——冷启浮窗若先 show 再 hide，就会闪一下空白大窗。
+  final deepPopupStart = args.contains('--page=popup');
+
   // Initialize localization service before running the app
   await LocalizationService.getInstance();
 
@@ -109,7 +113,8 @@ void main(List<String> args) async {
   // 桌面端：单进程常驻托盘，主程序自身跑飞传 + 托盘（见 tray_service.dart）
   if (!Platform.isAndroid && !Platform.isIOS) {
     try {
-      await TrayService.instance.initDesktop();
+      await TrayService.instance
+          .initDesktop(startHidden: deepPopupStart);
     } catch (e) {
       debugPrint('desktop init failed: $e');
     }
