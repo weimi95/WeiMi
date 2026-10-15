@@ -68,13 +68,16 @@ class _IndexRootsScreenState extends State<IndexRootsScreen> {
     await _persist();
   }
 
+  /// 浏览只填充输入框，不直接添加——统一由「添加」按钮提交，
+  /// 与浮窗「浏览=填充、按钮=提交」模式一致（否则按钮形同虚设）。
   Future<void> _browse() async {
     try {
       final res = await fp.FilePicker.platform.getDirectoryPath(
         dialogTitle: '选择要索引的文件夹',
       );
-      if (res == null || res.isEmpty) return;
-      await _add(res);
+      if (res == null || res.isEmpty || !mounted) return;
+      _inputCtrl.text = res;
+      _inputCtrl.selection = TextSelection.collapsed(offset: res.length);
     } catch (_) {}
   }
 

@@ -66,6 +66,12 @@ class WindowModeService {
   Future<void> showPopup() async {
     popupMode.value = true;
     _popupExpanded = true;
+    // 关键：等浮窗内容先渲染出一帧，再动窗口。
+    // 否则 show() 时窗口还是旧缓冲/空白上屏，新帧随后才到
+    // = 用户看到「闪一下空白主窗口再出小窗」。
+    // 超时兜底：隐藏态下万一引擎不产帧，也不能把浮窗卡死。
+    await SchedulerBinding.instance.endOfFrame
+        .timeout(const Duration(milliseconds: 500), onTimeout: () {});
     try {
       if (_savedSize == null) {
         _savedSize = await windowManager.getSize();

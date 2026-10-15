@@ -7,6 +7,7 @@ import 'package:file_picker/file_picker.dart';
 import 'package:desktop_drop/desktop_drop.dart';
 import 'package:cross_file/cross_file.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import 'package:window_manager/window_manager.dart';
 import 'framework/bootstrap.dart';
 import 'framework/module_registry.dart';
 import 'framework/setting_store.dart';
@@ -138,6 +139,11 @@ void main(List<String> args) async {
     WindowModeService.daemonPopupSession = true;
     WindowModeService.onPopupDismissed = () =>
         TrayService.instance.handOffToDaemon();
+    // 冷启路径：窗口一起动就上屏会先露一手空白再切小窗。
+    // 先藏住，等首帧渲染完由下方 showPopup() 统一 show。
+    try {
+      await windowManager.hide();
+    } catch (_) {}
   }
   if (deepTransfer) {
     unawaited(() async {
