@@ -6,17 +6,33 @@ import android.database.Cursor
 import android.net.Uri
 import android.provider.OpenableColumns
 import android.os.Build
-import io.flutter.embedding.android.FlutterActivity
+import android.util.Base64
+import androidx.biometric.BiometricManager
+import androidx.biometric.BiometricPrompt
+import androidx.core.content.ContextCompat
+import androidx.fragment.app.FragmentActivity
+import io.flutter.embedding.android.FlutterFragmentActivity
 import io.flutter.embedding.engine.FlutterEngine
 import io.flutter.plugin.common.MethodChannel
 import java.io.File
 import java.io.FileOutputStream
+import java.security.KeyStore
+import javax.crypto.Cipher
+import javax.crypto.KeyGenerator
+import javax.crypto.SecretKey
+import javax.crypto.spec.GCMParameterSpec
+import android.security.keystore.KeyGenParameterSpec
+import android.security.keystore.KeyProperties
 
-class MainActivity : FlutterActivity() {
+// BiometricPrompt 要求 FragmentActivity（FlutterFragmentActivity 是其子类）
+class MainActivity : FlutterFragmentActivity() {
     private val CHANNEL = "com.weimi95.weimi/file_association"
     private val VIDEO_THUMB_CHANNEL = "com.weimi95.weimi/video_thumb"
     private val SHARE_CHANNEL = "com.weimi95.weimi/share"
     private val TRANSFER_CHANNEL = "com.weimi95.weimi/transfer"
+    private val BIOMETRIC_CHANNEL = "com.weimi95.weimi/biometric"
+    private val BIO_KEY_ALIAS = "weimi_vault_bio_key"
+    private val BIO_PREFS = "weimi_vault_bio"
     private var initialFilePath: String? = null
     private var sharedText: String? = null
     private val sharedPaths: MutableList<String> = mutableListOf()
@@ -106,6 +122,153 @@ class MainActivity : FlutterActivity() {
                     else -> result.notImplemented()
                 }
             }
+
+        // 保险箱生物识别快捷解锁（Keystore 门禁密钥 + BiometricPrompt）
+        MethodChannel(flutterEngine.dartExecutor.binaryMessenger, BIOMETRIC_CHANNEL)
+            .setMethodCallHandler { call, result ->
+                when (call.method) {
+                    "canAuth" -> result.success(biometricCanAuth())
+                    "hasSavedMaster" -> result.success(getBioPrefs().contains("master_ct"))
+                    "saveMaster" -> {
+                        val master = call.argument<String>("master") ?: ""
+                        if (master.isEmpty()) result.success(false)
+                        else bioSaveMaster(master, result)
+                    }
+                    "loadMaster" -> bioLoadMaster(result)
+                    "removeMaster" -> {
+                        getBioPrefs().edit().clear().apply()
+                        result.success(true)
+                    }
+                    else -> result.notImplemented()
+                }
+            }
+    }
+
+    // ==================== 保险箱生物识别 ====================
+
+    private fun getBioPrefs() =
+        getSharedPreferences(BIO_PREFS, Context.MODE_PRIVATE)
+
+    private fun biometricCanAuth(): Boolean {
+        val bm = BiometricManager.from(this)
+        return if (Build.VERSION.SDK_INT >= 30) {
+            bm.canAuthenticate(BiometricManager.Authenticators.BIOMETRIC_STRONG) ==
+                BiometricManager.BIOMETRIC_SUCCESS
+        } else {
+            bm.canAuthenticate() == BiometricManager.BIOMETRIC_SUCCESS
+        }
+    }
+
+    /// Keystore 门禁密钥：每次使用都要求生物识别验证（CryptoObject）
+    private fun getOrCreateBioKey(): SecretKey? {
+        return try {
+            val ks = KeyStore.getInstance("AndroidKeyStore")
+            ks.load(null)
+            (ks.getEntry(BIO_KEY_ALIAS, null) as? KeyStore.SecretKeyEntry)?.let {
+                return it.secretKey
+            }
+            val kg = KeyGenerator.getInstance(KeyProperties.KEY_ALGORITHM_AES, "AndroidKeyStore")
+            kg.init(
+                KeyGenParameterSpec.Builder(
+                    BIO_KEY_ALIAS,
+                    KeyProperties.PURPOSE_ENCRYPT or KeyProperties.PURPOSE_DECRYPT
+                )
+                    .setBlockModes(KeyProperties.BLOCK_MODE_GCM)
+                    .setEncryptionPaddings(KeyProperties.ENCRYPTION_PADDING_NONE)
+                    .setUserAuthenticationRequired(true)
+                    .setUserAuthenticationValidityDurationSeconds(-1)
+                    .build()
+            )
+            kg.generateKey()
+        } catch (e: Exception) {
+            null
+        }
+    }
+
+    private fun bioPrompt(
+        onOk: (BiometricPrompt.AuthenticationResult) -> Unit,
+        onError: () -> Unit = {}
+    ): Pair<BiometricPrompt, BiometricPrompt.PromptInfo> {
+        val info = BiometricPrompt.PromptInfo.Builder()
+            .setTitle("微密保险箱")
+            .setSubtitle("验证指纹或人脸")
+            .setAllowedAuthenticators(BiometricManager.Authenticators.BIOMETRIC_STRONG)
+            .build()
+        val prompt = BiometricPrompt(
+            this as FragmentActivity,
+            ContextCompat.getMainExecutor(this),
+            object : BiometricPrompt.AuthenticationCallback() {
+                override fun onAuthenticationSucceeded(r: BiometricPrompt.AuthenticationResult) {
+                    onOk(r)
+                }
+                override fun onAuthenticationError(code: Int, msg: CharSequence) {
+                    onError()
+                }
+            }
+        )
+        return Pair(prompt, info)
+    }
+
+    private fun bioSaveMaster(master: String, result: MethodChannel.Result) {
+        try {
+            val key = getOrCreateBioKey()
+            if (key == null) {
+                result.success(false)
+                return
+            }
+            val cipher = Cipher.getInstance("AES/GCM/NoPadding")
+            cipher.init(Cipher.ENCRYPT_MODE, key)
+            val iv = cipher.iv
+            val (prompt, info) = bioPrompt({ r ->
+                try {
+                    val ct = r.cryptoObject?.cipher?.doFinal(master.toByteArray(Charsets.UTF_8))
+                    if (ct == null) {
+                        result.success(false)
+                    } else {
+                        getBioPrefs().edit()
+                            .putString("master_ct", Base64.encodeToString(ct, Base64.NO_WRAP))
+                            .putString("master_iv", Base64.encodeToString(iv, Base64.NO_WRAP))
+                            .apply()
+                        result.success(true)
+                    }
+                } catch (e: Exception) {
+                    result.success(false)
+                }
+            }, onError = { result.success(false) })
+            prompt.authenticate(info, BiometricPrompt.CryptoObject(cipher))
+        } catch (e: Exception) {
+            result.success(false)
+        }
+    }
+
+    private fun bioLoadMaster(result: MethodChannel.Result) {
+        try {
+            val ctB64 = getBioPrefs().getString("master_ct", null)
+            val ivB64 = getBioPrefs().getString("master_iv", null)
+            if (ctB64 == null || ivB64 == null) {
+                result.success(null)
+                return
+            }
+            val key = getOrCreateBioKey()
+            if (key == null) {
+                result.success(null)
+                return
+            }
+            val iv = Base64.decode(ivB64, Base64.NO_WRAP)
+            val cipher = Cipher.getInstance("AES/GCM/NoPadding")
+            cipher.init(Cipher.DECRYPT_MODE, key, GCMParameterSpec(128, iv))
+            val (prompt, info) = bioPrompt({ r ->
+                try {
+                    val pt = r.cryptoObject?.cipher?.doFinal(Base64.decode(ctB64, Base64.NO_WRAP))
+                    result.success(pt?.toString(Charsets.UTF_8))
+                } catch (e: Exception) {
+                    result.success(null)
+                }
+            }, onError = { result.success(null) })
+            prompt.authenticate(info, BiometricPrompt.CryptoObject(cipher))
+        } catch (e: Exception) {
+            result.success(null)
+        }
     }
 
     private fun sharePayload(): Map<String, Any> {

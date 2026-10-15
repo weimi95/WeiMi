@@ -67,3 +67,8 @@ android {
 flutter {
     source = "../.."
 }
+
+dependencies {
+    // 保险箱生物识别快捷解锁（BiometricPrompt + Keystore 门禁密钥）
+    implementation("androidx.biometric:biometric:1.1.0")
+}

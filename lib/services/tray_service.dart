@@ -12,6 +12,7 @@ import 'daemon_service.dart';
 import 'lan_transfer_service.dart';
 import 'quick_search_window.dart';
 import 'share_receive_service.dart';
+import 'vault_service.dart';
 
 /// 托盘策略（v1.0.47 起双模式）：
 /// - 守护进程模式（Windows 默认开）：weimi_daemon.exe 托管托盘+飞传（约 10MB），
@@ -193,6 +194,10 @@ class TrayService {
     } catch (e) {
       debugPrint('tray: destroy failed: $e');
     }
+    // 保险箱受管临时明文先清掉再退进程
+    try {
+      await VaultService.instance.clearTempFiles();
+    } catch (_) {}
     exit(0);
   }
 
@@ -203,6 +208,10 @@ class TrayService {
     try {
       final ok = await DaemonService.pushConfig(uiActive: false);
       if (ok) {
+        // 保险箱受管临时明文先清掉再退进程
+        try {
+          await VaultService.instance.clearTempFiles();
+        } catch (_) {}
         await _tray.destroy().catchError((_) {});
         exit(0);
       }

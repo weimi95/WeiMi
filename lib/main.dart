@@ -26,6 +26,7 @@ import 'widgets/progress_dialog.dart';
 import 'screens/about_screen.dart';
 import 'screens/language_screen.dart';
 import 'screens/wei_mi_vault_screen.dart';
+import 'screens/vault_browser_screen.dart';
 import 'screens/operation_history_screen.dart';
 import 'screens/settings_screen.dart';
 import 'screens/quick_search_popup.dart';
@@ -1098,6 +1099,18 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
             style: const TextStyle(fontWeight: FontWeight.bold)),
         backgroundColor: Theme.of(context).colorScheme.inversePrimary,
         actions: [
+          // 微密保险箱（锁定/宫格/导入）
+          IconButton(
+            icon: const Icon(Icons.lock_outline),
+            tooltip: '保险箱',
+            onPressed: () {
+              Navigator.push(
+                context,
+                MaterialPageRoute(
+                    builder: (context) => const VaultBrowserScreen()),
+              );
+            },
+          ),
           // 加解密历史（与飞传页右上角「传输记录」同款入口）
           IconButton(
             icon: const Icon(Icons.history),

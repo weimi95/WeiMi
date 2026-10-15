@@ -6,6 +6,7 @@ import '../modules/lan_transfer_module.dart';
 import '../modules/disk_index_module.dart';
 import '../modules/general_module.dart';
 import '../modules/quick_search_module.dart';
+import '../modules/vault_module.dart';
 
 /// 注册全部内置模块。main.dart 启动时调用一次。
 ///
@@ -20,6 +21,7 @@ void bootstrapModules() {
   ModuleRegistry.register(DiskIndexModule());
   ModuleRegistry.register(GeneralModule());
   ModuleRegistry.register(QuickSearchModule());
+  ModuleRegistry.register(VaultModule());
 
   ModuleRegistry.markBootstrapped();
 }
