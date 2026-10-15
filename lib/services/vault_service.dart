@@ -338,7 +338,7 @@ class VaultService {
       }
       if (_videoExt.contains(ext)) {
         if (Platform.isAndroid) {
-          return await FileThumbnail.videoFrame(srcPath);
+          return await FileThumbs.videoFrame(srcPath);
         }
         if (Platform.isWindows) {
           final cachePath = await WindowsThumbnailProvider.getThumbnailFile(srcPath);
