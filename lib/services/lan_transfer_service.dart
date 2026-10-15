@@ -1310,6 +1310,11 @@ function closeDialog() { document.getElementById('sendPanel').hidden = true; }
 function doSendText() {
   var ta = document.getElementById('txt');
   if (!ta.value.trim() || !targetPeer) return;
+  if (!ws || ws.readyState !== 1) {
+    li('连接已断开，请刷新页面重试', 'err');
+    closeDialog();
+    return;
+  }
   ws.send(JSON.stringify({t:'text', to:targetPeer.id, text:ta.value}));
   li('文本已发送给「' + targetPeer.name + '」', 'ok');
   closeDialog();
@@ -1400,12 +1405,21 @@ function li(text, cls) {
   var el = document.createElement('li');
   el.textContent = text;
   if (cls) el.className = cls;
+  var t = document.createElement('span');
+  var d = new Date();
+  var hh = ('0'+d.getHours()).slice(-2), mm = ('0'+d.getMinutes()).slice(-2);
+  var ss = ('0'+d.getSeconds()).slice(-2);
+  t.textContent = ' ' + hh + ':' + mm + ':' + ss;
+  t.style.cssText = 'color:#999;font-size:11px;margin-left:6px';
+  el._time = t;
+  el.appendChild(t);
   list.appendChild(el);
   return el;
 }
 function done(el, text, ok) {
   el.textContent = text;
   el.className = ok ? 'ok' : 'err';
+  if (el._time) el.appendChild(el._time);
   var bar = el.querySelector('.bar');
   if (bar) bar.remove();
 }

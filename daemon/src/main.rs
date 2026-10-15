@@ -1516,6 +1516,11 @@ button{margin-top:12px;width:100%;background:#2f6fed;border:none;border-radius:8
  padding:10px;font-size:14px;cursor:pointer}
 button:disabled{opacity:.5}
 #msg{margin-top:12px;font-size:13px;color:#9aa4b0;min-height:18px;white-space:pre-wrap}
+#log{list-style:none;margin:12px 0 0;padding:0;font-size:13px}
+#log li{padding:6px 8px;border-radius:6px;margin-bottom:6px;background:#141a21;
+ color:#9fd39f;word-break:break-all}
+#log li.err{color:#e08c8c}
+#log li .t{color:#69737f;font-size:11px;margin-left:6px}
 .logo{font-size:34px;text-align:center;margin-bottom:4px}
 </style>
 </head>
@@ -1528,11 +1533,28 @@ button:disabled{opacity:.5}
   <input id="file" type="file" multiple>
   <textarea id="txt" placeholder="或粘贴一段文本…"></textarea>
   <button id="send">发送文本</button>
-  <div id="msg"></div>
+  <ul id="log"></ul>
 </div>
 <script>
 const drop=document.getElementById('drop'),file=document.getElementById('file'),
- msg=document.getElementById('msg'),btn=document.getElementById('send'),txt=document.getElementById('txt');
+ log=document.getElementById('log'),btn=document.getElementById('send'),txt=document.getElementById('txt');
+function li(text,cls){
+  var el=document.createElement('li');
+  el.textContent=text;
+  if(cls)el.className=cls;
+  var d=new Date();
+  var t=document.createElement('span');
+  t.className='t';
+  t.textContent=('0'+d.getHours()).slice(-2)+':'+('0'+d.getMinutes()).slice(-2)+':'+('0'+d.getSeconds()).slice(-2);
+  el._time=t;el.appendChild(t);
+  log.appendChild(el);
+  return el;
+}
+function done(el,text,ok){
+  el.textContent=text;
+  el.className=ok?'':'err';
+  if(el._time)el.appendChild(el._time);
+}
 drop.onclick=()=>file.click();
 drop.ondragover=e=>{e.preventDefault();drop.classList.add('hover')};
 drop.ondragleave=()=>drop.classList.remove('hover');
@@ -1540,24 +1562,24 @@ drop.ondrop=e=>{e.preventDefault();drop.classList.remove('hover');sendFiles(e.da
 file.onchange=()=>sendFiles(file.files);
 async function sendFiles(files){
   for(const f of files){
-    msg.textContent='正在发送 '+f.name+' …';
+    const el=li('正在发送 '+f.name+' …');
     try{
       const r=await fetch('/web/upload?name='+encodeURIComponent(f.name),{method:'POST',body:f});
       const j=await r.json();
-      msg.textContent=j.ok?('已发送 '+f.name):('失败：'+(j.error||r.status));
-    }catch(e){msg.textContent='失败：'+e}
+      done(el, j.ok?('已发送 '+f.name):('失败：'+(j.error||r.status)), !!j.ok);
+    }catch(e){done(el,'失败：'+e,false)}
   }
   file.value='';
 }
 btn.onclick=async()=>{
   const t=txt.value.trim();if(!t)return;
-  msg.textContent='正在发送文本 …';
+  const el=li('正在发送文本 …');
   try{
     const r=await fetch('/web/text',{method:'POST',body:t});
     const j=await r.json();
-    msg.textContent=j.ok?'文本已发送':'失败：'+(j.error||r.status);
     if(j.ok)txt.value='';
-  }catch(e){msg.textContent='失败：'+e}
+    done(el, j.ok?'文本已发送':('失败：'+(j.error||r.status)), !!j.ok);
+  }catch(e){done(el,'失败：'+e,false)}
 };
 </script>
 </body>
