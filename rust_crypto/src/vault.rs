@@ -724,7 +724,9 @@ fn emit(out_ptr: *mut u8, out_len: *mut usize, data: &[u8]) {
     }
 }
 
-/// 密码库封装：entries_json = [{"file":"a.wemi","password":"..."},...]
+/// 密码库封装：entries_json = 完整 Keyring JSON（{"ver":1,"entries":[...],"thumb_key":"hex"}）。
+/// thumb_key 由 Dart 侧生成并全程复用（改主密码/日常保存都不变），
+/// 缺失或非法时才兜底补随机。
 #[no_mangle]
 pub extern "C" fn vault_seal_keyring(
     master_ptr: *const u8,
@@ -737,12 +739,19 @@ pub extern "C" fn vault_seal_keyring(
     unsafe {
         let master = std::slice::from_raw_parts(master_ptr, master_len);
         let json = std::slice::from_raw_parts(entries_json_ptr, entries_json_len);
-        let entries: Vec<KeyringEntry> = match serde_json::from_slice(json) {
-            Ok(e) => e,
+        let mut kr: Keyring = match serde_json::from_slice(json) {
+            Ok(k) => k,
             Err(_) => return -1,
         };
-        let mut kr = Keyring::new();
-        kr.entries = entries;
+        let tk_ok = kr.thumb_key.len() == KEY_SIZE * 2
+            && kr
+                .thumb_key
+                .bytes()
+                .all(|b| b.is_ascii_hexdigit());
+        if !tk_ok {
+            let fresh = Keyring::new();
+            kr.thumb_key = fresh.thumb_key;
+        }
         match seal_keyring(master, &kr) {
             Ok(data) => {
                 emit(out_ptr, out_len, &data);
@@ -1265,6 +1274,76 @@ mod tests {
         assert_eq!(kr.password_of("a.wemi"), None);
         assert_eq!(kr.entries.len(), 0);
         let _ = kr.thumb_key_bytes().unwrap();
+    }
+
+    #[test]
+    fn test_seal_ffi_full_keyring_thumb_stable() {
+        // FFI 层语义：收完整 Keyring JSON（Dart 形状），thumb_key 原样保留；
+        // 同一库反复封装（模拟日常 _persist）thumb_key 不得变，否则旧缩略图全废
+        let master = b"ffi-master-1234";
+        let tk = "ab".repeat(32);
+        let mk = |entries: &str| {
+            format!(
+                r#"{{"ver":1,"entries":[{}],"thumb_key":"{}"}}"#,
+                entries, tk
+            )
+        };
+        let seal = |json: &[u8]| -> Vec<u8> {
+            let mut ln = 0usize;
+            let rc = vault_seal_keyring(
+                master.as_ptr(), master.len(),
+                json.as_ptr(), json.len(),
+                std::ptr::null_mut(), &mut ln,
+            );
+            assert_eq!(rc, 0, "seal rc={rc}");
+            let mut buf = vec![0u8; ln];
+            let rc = vault_seal_keyring(
+                master.as_ptr(), master.len(),
+                json.as_ptr(), json.len(),
+                buf.as_mut_ptr(), &mut ln,
+            );
+            assert_eq!(rc, 0);
+            buf.truncate(ln);
+            buf
+        };
+        let open = |data: &[u8]| -> String {
+            let mut ln = 0usize;
+            let rc = vault_open_keyring(
+                master.as_ptr(), master.len(),
+                data.as_ptr(), data.len(),
+                std::ptr::null_mut(), &mut ln,
+            );
+            assert_eq!(rc, 0, "open rc={rc}");
+            let mut buf = vec![0u8; ln];
+            let rc = vault_open_keyring(
+                master.as_ptr(), master.len(),
+                data.as_ptr(), data.len(),
+                buf.as_mut_ptr(), &mut ln,
+            );
+            assert_eq!(rc, 0);
+            String::from_utf8(buf[..ln].to_vec()).unwrap()
+        };
+
+        let sealed = seal(mk("").as_bytes());
+        let j1 = open(&sealed);
+        assert!(j1.contains(&format!(r#""thumb_key":"{}""#, tk)));
+        assert!(j1.contains(r#""entries":[]"#));
+
+        // 二次封装带 entry：thumb_key 必须仍是同一个
+        let sealed2 = seal(mk(r#"{"file":"a.wemi","password":"p"}"#).as_bytes());
+        let j2 = open(&sealed2);
+        assert!(j2.contains(&format!(r#""thumb_key":"{}""#, tk)));
+        assert!(j2.contains(r#""password":"p""#));
+
+        // Dart 形状之外的坏输入仍报 -1
+        let mut ln = 0usize;
+        let bad = b"[]";
+        let rc = vault_seal_keyring(
+            master.as_ptr(), master.len(),
+            bad.as_ptr(), bad.len(),
+            std::ptr::null_mut(), &mut ln,
+        );
+        assert_eq!(rc, -1);
     }
 
     #[test]
