@@ -188,7 +188,7 @@ class _BiometricTileState extends State<_BiometricTile> {
 
   Future<void> _toggle(bool v) async {
     if (v) {
-      // 开启时先验证一次，确保可用
+      // 开启时先确认设备支持且已录入生物识别
       final ok = await VaultBiometricService.canAuth();
       if (!ok) {
         if (!mounted) return;
@@ -197,6 +197,31 @@ class _BiometricTileState extends State<_BiometricTile> {
             backgroundColor: Colors.red));
         return;
       }
+      // 保险箱已解锁：当场录一次指纹，不用再锁一次等下次
+      final master = VaultService.instance.masterPassword;
+      if (master != null) {
+        final r = await VaultBiometricService.saveMaster(master);
+        if (!mounted) return;
+        if (r.ok) {
+          await VaultBiometricService.setEnabled(true);
+          if (!mounted) return;
+          setState(() => _enabled = true);
+          ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+              content: Text('指纹已录入，锁定后可用指纹解锁')));
+        } else {
+          ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+              content: Text('指纹录入失败：${r.error}'),
+              backgroundColor: Colors.red));
+        }
+        return;
+      }
+      // 锁定态：先开开关，下次用主密码解锁时自动完成录入
+      await VaultBiometricService.setEnabled(true);
+      if (!mounted) return;
+      setState(() => _enabled = true);
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+          content: Text('已开启：下次用主密码解锁时按提示完成指纹录入')));
+      return;
     }
     await VaultBiometricService.setEnabled(v);
     if (!mounted) return;

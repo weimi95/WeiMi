@@ -5,6 +5,14 @@ import 'package:shared_preferences/shared_preferences.dart';
 
 import 'vault_service.dart';
 
+/// 生物识别调用结果。失败时 [error] 为用户可读的中文原因（可直接展示）。
+class BioResult {
+  final bool ok;
+  final String? master; // loadMaster 成功时带回主密码明文
+  final String? error;
+  const BioResult({required this.ok, this.master, this.error});
+}
+
 /// 生物识别快捷解锁：
 /// - Android：Keystore 门禁密钥（setUserAuthenticationRequired）+ BiometricPrompt
 ///   加解密主密码（密文存 SharedPreferences）；指纹/人脸通过才解得开。
@@ -14,7 +22,6 @@ class VaultBiometricService {
   VaultBiometricService._();
   static const MethodChannel _channel =
       MethodChannel('com.weimi95.weimi/biometric');
-
   static bool get platformSupported =>
       Platform.isAndroid || Platform.isMacOS;
 
@@ -51,25 +58,45 @@ class VaultBiometricService {
     }
   }
 
-  /// 触发生物识别验证，通过后保存主密码。返回是否成功。
-  static Future<bool> saveMaster(String master) async {
-    if (!platformSupported) return false;
+  /// 触发生物识别验证，通过后保存主密码。失败带可读原因。
+  static Future<BioResult> saveMaster(String master) async {
+    if (!platformSupported) {
+      return const BioResult(ok: false, error: '当前平台不支持生物识别');
+    }
     try {
-      return await _channel
-              .invokeMethod<bool>('saveMaster', {'master': master}) ??
-          false;
-    } catch (_) {
-      return false;
+      final r = await _channel.invokeMethod('saveMaster', {'master': master});
+      if (r is Map) {
+        if (r['ok'] == true) return const BioResult(ok: true);
+        return BioResult(
+            ok: false, error: (r['error'] as String?) ?? '生物识别录入失败');
+      }
+      return const BioResult(ok: false, error: '生物识别服务无响应');
+    } on PlatformException catch (e) {
+      return BioResult(ok: false, error: '生物识别服务异常：${e.message}');
+    } catch (e) {
+      return BioResult(ok: false, error: '生物识别服务异常：$e');
     }
   }
 
-  /// 触发生物识别验证，通过后返回主密码；失败/取消返回 null。
-  static Future<String?> loadMaster() async {
-    if (!platformSupported) return null;
+  /// 触发生物识别验证，通过后返回主密码；失败/取消返回带原因的 BioResult。
+  static Future<BioResult> loadMaster() async {
+    if (!platformSupported) {
+      return const BioResult(ok: false, error: '当前平台不支持生物识别');
+    }
     try {
-      return await _channel.invokeMethod<String>('loadMaster');
-    } catch (_) {
-      return null;
+      final r = await _channel.invokeMethod('loadMaster');
+      if (r is Map) {
+        if (r['ok'] == true && r['master'] is String) {
+          return BioResult(ok: true, master: r['master'] as String);
+        }
+        return BioResult(
+            ok: false, error: (r['error'] as String?) ?? '生物识别验证未通过');
+      }
+      return const BioResult(ok: false, error: '生物识别服务无响应');
+    } on PlatformException catch (e) {
+      return BioResult(ok: false, error: '生物识别服务异常：${e.message}');
+    } catch (e) {
+      return BioResult(ok: false, error: '生物识别服务异常：$e');
     }
   }
 

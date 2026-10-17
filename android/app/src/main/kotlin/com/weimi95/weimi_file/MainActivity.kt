@@ -131,12 +131,13 @@ class MainActivity : FlutterFragmentActivity() {
                     "hasSavedMaster" -> result.success(getBioPrefs().contains("master_ct"))
                     "saveMaster" -> {
                         val master = call.argument<String>("master") ?: ""
-                        if (master.isEmpty()) result.success(false)
+                        if (master.isEmpty()) result.success(bioFail("主密码为空"))
                         else bioSaveMaster(master, result)
                     }
                     "loadMaster" -> bioLoadMaster(result)
                     "removeMaster" -> {
                         getBioPrefs().edit().clear().apply()
+                        deleteBioKey()
                         result.success(true)
                     }
                     else -> result.notImplemented()
@@ -185,13 +186,21 @@ class MainActivity : FlutterFragmentActivity() {
         }
     }
 
+    /// 系统指纹/人脸弹窗。
+    /// 注意：setAllowedAuthenticators(BIOMETRIC_STRONG) 不含 DEVICE_CREDENTIAL 时
+    /// **必须**调用 setNegativeButtonText，否则 PromptInfo.build() 直接抛
+    /// IllegalArgumentException，弹框压根不会出现（v1.0.64 修的坑）。
     private fun bioPrompt(
+        title: String,
+        subtitle: String,
+        negativeText: String,
         onOk: (BiometricPrompt.AuthenticationResult) -> Unit,
-        onError: () -> Unit = {}
+        onError: (Int, String) -> Unit = { _, _ -> }
     ): Pair<BiometricPrompt, BiometricPrompt.PromptInfo> {
         val info = BiometricPrompt.PromptInfo.Builder()
-            .setTitle("微密保险箱")
-            .setSubtitle("验证指纹或人脸")
+            .setTitle(title)
+            .setSubtitle(subtitle)
+            .setNegativeButtonText(negativeText)
             .setAllowedAuthenticators(BiometricManager.Authenticators.BIOMETRIC_STRONG)
             .build()
         val prompt = BiometricPrompt(
@@ -202,42 +211,80 @@ class MainActivity : FlutterFragmentActivity() {
                     onOk(r)
                 }
                 override fun onAuthenticationError(code: Int, msg: CharSequence) {
-                    onError()
+                    onError(code, msg.toString())
                 }
             }
         )
         return Pair(prompt, info)
     }
 
+    private fun bioFail(error: String) = mapOf("ok" to false, "error" to error)
+
+    private fun bioErrorText(code: Int, msg: String): String = when (code) {
+        BiometricPrompt.ERROR_NEGATIVE_BUTTON,
+        BiometricPrompt.ERROR_USER_CANCELED,
+        BiometricPrompt.ERROR_CANCELED -> "已取消"
+        BiometricPrompt.ERROR_LOCKOUT,
+        BiometricPrompt.ERROR_LOCKOUT_PERMANENT -> "尝试次数过多已锁定，请稍后再试"
+        BiometricPrompt.ERROR_NO_BIOMETRICS -> "尚未录入指纹或人脸"
+        BiometricPrompt.ERROR_HW_NOT_PRESENT,
+        BiometricPrompt.ERROR_HW_UNAVAILABLE -> "生物识别硬件不可用"
+        else -> if (msg.isNotEmpty()) msg else "验证失败（错误码 $code）"
+    }
+
+    /// 删除门禁密钥：换指纹/屏幕锁导致旧密钥永久失效，或关闭开关时用
+    private fun deleteBioKey() {
+        try {
+            val ks = KeyStore.getInstance("AndroidKeyStore")
+            ks.load(null)
+            ks.deleteEntry(BIO_KEY_ALIAS)
+        } catch (e: Exception) {}
+    }
+
     private fun bioSaveMaster(master: String, result: MethodChannel.Result) {
         try {
             val key = getOrCreateBioKey()
             if (key == null) {
-                result.success(false)
+                result.success(bioFail("生物识别密钥创建失败"))
                 return
             }
-            val cipher = Cipher.getInstance("AES/GCM/NoPadding")
-            cipher.init(Cipher.ENCRYPT_MODE, key)
+            val cipher = try {
+                Cipher.getInstance("AES/GCM/NoPadding")
+                    .also { it.init(Cipher.ENCRYPT_MODE, key) }
+            } catch (e: Exception) {
+                // 换过指纹/屏幕锁后旧密钥会永久失效：清掉旧密钥和密文，提示重新录入
+                deleteBioKey()
+                getBioPrefs().edit().clear().apply()
+                result.success(bioFail("生物识别密钥已失效（可能更换过指纹），请重新录入"))
+                return
+            }
             val iv = cipher.iv
-            val (prompt, info) = bioPrompt({ r ->
-                try {
-                    val ct = r.cryptoObject?.cipher?.doFinal(master.toByteArray(Charsets.UTF_8))
-                    if (ct == null) {
-                        result.success(false)
-                    } else {
-                        getBioPrefs().edit()
-                            .putString("master_ct", Base64.encodeToString(ct, Base64.NO_WRAP))
-                            .putString("master_iv", Base64.encodeToString(iv, Base64.NO_WRAP))
-                            .apply()
-                        result.success(true)
+            val (prompt, info) = bioPrompt(
+                title = "录入指纹",
+                subtitle = "验证指纹，之后可用指纹直接解锁保险箱",
+                negativeText = "取消",
+                onOk = { r ->
+                    try {
+                        val ct = r.cryptoObject?.cipher?.doFinal(master.toByteArray(Charsets.UTF_8))
+                        if (ct == null) {
+                            result.success(bioFail("加密失败，请重试"))
+                        } else {
+                            getBioPrefs().edit()
+                                .putString("master_ct", Base64.encodeToString(ct, Base64.NO_WRAP))
+                                .putString("master_iv", Base64.encodeToString(iv, Base64.NO_WRAP))
+                                .apply()
+                            result.success(mapOf("ok" to true))
+                        }
+                    } catch (e: Exception) {
+                        result.success(bioFail("保存失败：${e.message}"))
                     }
-                } catch (e: Exception) {
-                    result.success(false)
-                }
-            }, onError = { result.success(false) })
+                },
+                onError = { code, msg ->
+                    result.success(bioFail(bioErrorText(code, msg)))
+                })
             prompt.authenticate(info, BiometricPrompt.CryptoObject(cipher))
         } catch (e: Exception) {
-            result.success(false)
+            result.success(bioFail("生物识别不可用：${e.message}"))
         }
     }
 
@@ -246,28 +293,47 @@ class MainActivity : FlutterFragmentActivity() {
             val ctB64 = getBioPrefs().getString("master_ct", null)
             val ivB64 = getBioPrefs().getString("master_iv", null)
             if (ctB64 == null || ivB64 == null) {
-                result.success(null)
+                result.success(bioFail("尚未录入生物识别"))
                 return
             }
             val key = getOrCreateBioKey()
             if (key == null) {
-                result.success(null)
+                result.success(bioFail("生物识别密钥缺失"))
                 return
             }
-            val iv = Base64.decode(ivB64, Base64.NO_WRAP)
-            val cipher = Cipher.getInstance("AES/GCM/NoPadding")
-            cipher.init(Cipher.DECRYPT_MODE, key, GCMParameterSpec(128, iv))
-            val (prompt, info) = bioPrompt({ r ->
-                try {
-                    val pt = r.cryptoObject?.cipher?.doFinal(Base64.decode(ctB64, Base64.NO_WRAP))
-                    result.success(pt?.toString(Charsets.UTF_8))
-                } catch (e: Exception) {
-                    result.success(null)
-                }
-            }, onError = { result.success(null) })
+            val cipher = try {
+                val iv = Base64.decode(ivB64, Base64.NO_WRAP)
+                Cipher.getInstance("AES/GCM/NoPadding")
+                    .also { it.init(Cipher.DECRYPT_MODE, key, GCMParameterSpec(128, iv)) }
+            } catch (e: Exception) {
+                deleteBioKey()
+                getBioPrefs().edit().clear().apply()
+                result.success(bioFail("生物识别密钥已失效（可能更换过指纹），请用主密码解锁后重新录入"))
+                return
+            }
+            val (prompt, info) = bioPrompt(
+                title = "微密保险箱",
+                subtitle = "验证指纹解锁保险箱",
+                negativeText = "用主密码",
+                onOk = { r ->
+                    try {
+                        val pt = r.cryptoObject?.cipher?.doFinal(Base64.decode(ctB64, Base64.NO_WRAP))
+                        if (pt == null) {
+                            result.success(bioFail("解密失败"))
+                        } else {
+                            result.success(
+                                mapOf("ok" to true, "master" to pt.toString(Charsets.UTF_8)))
+                        }
+                    } catch (e: Exception) {
+                        result.success(bioFail("解密失败：${e.message}"))
+                    }
+                },
+                onError = { code, msg ->
+                    result.success(bioFail(bioErrorText(code, msg)))
+                })
             prompt.authenticate(info, BiometricPrompt.CryptoObject(cipher))
         } catch (e: Exception) {
-            result.success(null)
+            result.success(bioFail("生物识别不可用：${e.message}"))
         }
     }
 

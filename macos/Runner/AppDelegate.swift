@@ -38,13 +38,26 @@ class AppDelegate: FlutterAppDelegate {
         result(self.keychainHasMaster())
       case "saveMaster":
         let master = (call.arguments as? [String: Any])?["master"] as? String ?? ""
-        DispatchQueue.global(qos: .userInitiated).async {
-          result(self.saveMasterToKeychain(master))
+        if master.isEmpty {
+          result(["ok": false, "error": "主密码为空"])
+        } else {
+          DispatchQueue.global(qos: .userInitiated).async {
+            if let err = self.saveMasterToKeychain(master) {
+              result(["ok": false, "error": err])
+            } else {
+              result(["ok": true])
+            }
+          }
         }
       case "loadMaster":
         // 读取会触发系统 Touch ID 授权，放后台线程避免阻塞主线程
         DispatchQueue.global(qos: .userInitiated).async {
-          result(self.loadMasterFromKeychain())
+          let (master, err) = self.loadMasterFromKeychain()
+          if let master = master {
+            result(["ok": true, "master": master])
+          } else {
+            result(["ok": false, "error": err ?? "Touch ID 验证未通过"])
+          }
         }
       case "removeMaster":
         result(self.removeMasterFromKeychain())
@@ -67,7 +80,8 @@ class AppDelegate: FlutterAppDelegate {
     return SecItemCopyMatching(q as CFDictionary, nil) == errSecSuccess
   }
 
-  private func saveMasterToKeychain(_ master: String) -> Bool {
+  /// 保存主密码到钥匙串；返回 nil 成功，否则为可读错误原因
+  private func saveMasterToKeychain(_ master: String) -> String? {
     SecItemDelete(keychainQuery as CFDictionary)
     var add = keychainQuery
     add[kSecValueData as String] = master.data(using: .utf8)
@@ -81,17 +95,29 @@ class AppDelegate: FlutterAppDelegate {
         &cfError) {
       add[kSecAttrAccessControl as String] = ac
     }
-    return SecItemAdd(add as CFDictionary, nil) == errSecSuccess
+    let status = SecItemAdd(add as CFDictionary, nil)
+    return status == errSecSuccess ? nil : "保存到钥匙串失败（OSStatus \(status)）"
   }
 
-  private func loadMasterFromKeychain() -> String? {
+  /// 读取主密码；返回 (明文, nil) 或 (nil, 可读错误原因)
+  private func loadMasterFromKeychain() -> (String?, String?) {
     var q = keychainQuery
     q[kSecReturnData as String] = true
     q[kSecMatchLimit as String] = kSecMatchLimitOne
     var data: CFTypeRef?
     let status = SecItemCopyMatching(q as CFDictionary, &data)
-    guard status == errSecSuccess, let d = data as? Data else { return nil }
-    return String(data: d, encoding: .utf8)
+    if status == errSecSuccess, let d = data as? Data,
+       let s = String(data: d, encoding: .utf8) {
+      return (s, nil)
+    }
+    let reason: String
+    switch status {
+    case errSecItemNotFound: reason = "尚未录入生物识别"
+    case errSecAuthFailed, errSecUserCanceled: reason = "验证已取消"
+    case errSecInteractionNotAllowed: reason = "Touch ID 不可用"
+    default: reason = "读取失败（OSStatus \(status)）"
+    }
+    return (nil, reason)
   }
 
   private func removeMasterFromKeychain() -> Bool {

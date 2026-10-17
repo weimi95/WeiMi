@@ -385,11 +385,12 @@ class _VaultBrowserScreenState extends State<VaultBrowserScreen>
       final bioEnabled = await VaultBiometricService.isEnabled();
       final bioHas = await VaultBiometricService.hasSavedMaster();
       if (bioEnabled && !bioHas && await VaultBiometricService.canAuth()) {
-        final ok = await VaultBiometricService.saveMaster(pw);
-        if (!ok && mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
-              content: Text('生物识别录入未完成（已取消或失败），'
-                  '下次用主密码解锁时会再次尝试')));
+        final r = await VaultBiometricService.saveMaster(pw);
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+              content: Text(r.ok
+                  ? '指纹已录入，锁定后可用指纹解锁'
+                  : '指纹录入未完成：${r.error}，下次用主密码解锁时会再次尝试')));
         }
       }
       _unlockCtrl.clear();
@@ -411,9 +412,15 @@ class _VaultBrowserScreenState extends State<VaultBrowserScreen>
   Future<void> _tryBiometricUnlock() async {
     setState(() => _busy = true);
     try {
-      final master = await VaultBiometricService.loadMaster();
-      if (master == null) return;
-      await VaultService.instance.unlock(master);
+      final r = await VaultBiometricService.loadMaster();
+      if (!r.ok || r.master == null) {
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+              SnackBar(content: Text(r.error ?? '生物识别验证未通过')));
+        }
+        return;
+      }
+      await VaultService.instance.unlock(r.master!);
       if (!mounted) return;
       await _refreshAll();
     } catch (e) {
@@ -640,7 +647,7 @@ class _VaultBrowserScreenState extends State<VaultBrowserScreen>
     if (pw != null) {
       try {
         return await VaultService.instance.decryptToTemp(f.path);
-      }       on VaultException catch (e) {
+      } on VaultException catch (e) {
         if (e.code != 'wrongPassword') rethrow;
         final master = VaultService.instance.masterPassword;
         if (master != null) {
@@ -650,7 +657,7 @@ class _VaultBrowserScreenState extends State<VaultBrowserScreen>
             try {
               await VaultService.instance.saveEntry(f.path, master);
             } catch (_) {}
-            _noPwFiles.remove(f.path);
+            _markPwResolved(f.path);
             return plain;
           }
         }
@@ -664,11 +671,17 @@ class _VaultBrowserScreenState extends State<VaultBrowserScreen>
         try {
           await VaultService.instance.saveEntry(f.path, master);
         } catch (_) {}
-        _noPwFiles.remove(f.path);
+        _markPwResolved(f.path);
         return plain;
       }
     }
     return _askFilePassword(f);
+  }
+
+  /// 密码映射补齐后刷新宫格角标
+  void _markPwResolved(String path) {
+    if (!mounted) return;
+    setState(() => _noPwFiles.remove(path));
   }
 
   Future<void> _openVaultFile(FileSystemEntity f) async {
@@ -787,7 +800,7 @@ class _VaultBrowserScreenState extends State<VaultBrowserScreen>
       ScaffoldMessenger.of(context).showSnackBar(SnackBar(
           content: Text('密码正确，但保存到密码库失败：$saveError')));
     }
-    _noPwFiles.remove(f.path);
+    _markPwResolved(f.path);
     // 补密码成功：若还有别的文件缺映射，问一句要不要用同一密码批量尝试
     if (usedPw != null) await _offerBatchSamePassword(f, usedPw!);
     return plainPath;
