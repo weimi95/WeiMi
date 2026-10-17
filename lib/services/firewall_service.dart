@@ -18,13 +18,18 @@ class FirewallService {
 
   static const String _tcpRule = 'WeiMiFileLANTCP';
   static const String _udpRule = 'WeiMiFileLANUDP';
+  /// LocalSend v2 兼容层（组播发现 UDP + HTTP 53317）的入站规则
+  static const String _lsRule = 'WeiMiFileLSLAN';
 
   /// 会话内缓存：已放行就不再查（netsh 查询虽快，也不必每分钟跑）。
   static bool? _cachedOk;
+  static bool? _cachedLsOk;
 
   static bool get supported => Platform.isWindows;
 
-  /// 两条入站规则是否都在（只读查询，不需要管理员权限）。
+  /// 主飞传入站规则是否都在（只读查询，不需要管理员权限）。
+  /// 只含 UDP 52346 + TCP 52345-52365；LocalSend 规则单独查（见
+  /// lsRulesPresent）——避免没装过 LocalSend 兼容版的用户被误报缺失。
   static Future<bool> rulesPresent() async {
     if (!supported) return true;
     if (_cachedOk == true) return true;
@@ -32,6 +37,17 @@ class FirewallService {
     final udp = await _ruleExists(_udpRule);
     final ok = tcp && udp;
     if (ok) _cachedOk = true;
+    return ok;
+  }
+
+  /// LocalSend 兼容层规则是否都在（UDP 53317 组播 + TCP 53317）。
+  static Future<bool> lsRulesPresent() async {
+    if (!supported) return true;
+    if (_cachedLsOk == true) return true;
+    final udp = await _ruleExists(_lsRule);
+    final tcp = await _ruleExists('WeiMiFileLSTCP');
+    final ok = udp && tcp;
+    if (ok) _cachedLsOk = true;
     return ok;
   }
 
@@ -53,7 +69,7 @@ class FirewallService {
     }
   }
 
-  /// 触发一次 UAC 授权，添加两条入站规则。返回是否复查确认成功
+  /// 触发一次 UAC 授权，添加入站规则。返回是否复查确认成功
   /// （UAC 是用户交互，无法直接拿退出码，只能加完再查；用户点授权可能
   /// 要几十秒，轮询等待）。
   static Future<bool> addRules() async {
@@ -62,7 +78,11 @@ class FirewallService {
         'netsh advfirewall firewall add rule name=$_tcpRule dir=in action=allow '
         'protocol=TCP localport=52345-52365 profile=any; '
         'netsh advfirewall firewall add rule name=$_udpRule dir=in action=allow '
-        'protocol=UDP localport=52346 profile=any';
+        'protocol=UDP localport=52346 profile=any; '
+        'netsh advfirewall firewall add rule name=$_lsRule dir=in action=allow '
+        'protocol=UDP localport=53317 profile=any; '
+        'netsh advfirewall firewall add rule name=WeiMiFileLSTCP dir=in action=allow '
+        'protocol=TCP localport=53317 profile=any';
     try {
       await Process.run(
         'powershell',
@@ -79,8 +99,11 @@ class FirewallService {
     // Start-Process 不等子进程，UAC 框由用户掌控；轮询复查最多约 30 秒
     for (var i = 0; i < 20; i++) {
       await Future.delayed(const Duration(milliseconds: 1500));
-      if (await rulesPresent()) {
+      final ok = await rulesPresent();
+      final lsOk = await lsRulesPresent();
+      if (ok && lsOk) {
         _cachedOk = true;
+        _cachedLsOk = true;
         return true;
       }
     }
@@ -92,5 +115,9 @@ class FirewallService {
       'netsh advfirewall firewall add rule name=$_tcpRule dir=in action=allow '
       'protocol=TCP localport=52345-52365 profile=any\n'
       'netsh advfirewall firewall add rule name=$_udpRule dir=in action=allow '
-      'protocol=UDP localport=52346 profile=any';
+      'protocol=UDP localport=52346 profile=any\n'
+      'netsh advfirewall firewall add rule name=$_lsRule dir=in action=allow '
+      'protocol=UDP localport=53317 profile=any\n'
+      'netsh advfirewall firewall add rule name=WeiMiFileLSTCP dir=in action=allow '
+      'protocol=TCP localport=53317 profile=any';
 }

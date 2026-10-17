@@ -6,6 +6,7 @@ import 'package:flutter/services.dart';
 import 'package:path/path.dart' as p;
 import 'package:shared_preferences/shared_preferences.dart';
 import '../framework/setting_store.dart';
+import 'localsend_service.dart';
 import 'trusted_devices_service.dart';
 import 'transfer_history_service.dart';
 import 'receive_notify_service.dart';
@@ -225,6 +226,8 @@ class LanTransferService {
   Future<void> startReceiving() async {
     if (_receiving) return;
     await _ensureIdentity();
+    // LocalSend v2 兼容层随接收开关启停（组播 announce + 53317 server）
+    await LocalSendService.instance.start();
 
     if (_udpSocket == null) {
       if (Platform.isWindows) {
@@ -338,6 +341,7 @@ class LanTransferService {
     _receiving = false;
     _announceTimer?.cancel();
     _announceTimer = null;
+    await LocalSendService.instance.stop();
     _events.add(LanEvent(LanEventType.receivingStopped));
     _stopAndroidForeground();
   }
@@ -359,7 +363,7 @@ class LanTransferService {
         trusted: TrustedDevices.instance.isTrustedSync(msg['id'] as String),
         lastSeen: DateTime.now(),
       );
-      _addOrUpdatePeer(peer);
+      addOrUpdatePeer(peer);
       // 收到 announce：向对方来源端口单播应答，让它也知道我
       if (msg['action'] == 'announce') {
         _sendReply(dg.address.address, dg.port);
@@ -410,7 +414,8 @@ class LanTransferService {
     }
   }
 
-  void _addOrUpdatePeer(LanPeer peer) {
+  /// 新增/更新设备（LocalSend 兼容层也走这里登记设备）
+  void addOrUpdatePeer(LanPeer peer) {
     _peers[peer.id] = peer;
     _events.add(LanEvent(LanEventType.peersChanged));
     _pruneTimer ??=
@@ -503,7 +508,7 @@ class LanTransferService {
     return v < 5 ? 5 : v;
   }
 
-  /// 接收决策：信任设备免确认直收；
+  /// 接收决策（LocalSend 兼容层复用）：信任设备免确认直收；
   /// 未信任设备按设置 lan_untrusted_mode：
   /// - confirm（默认）：弹确认框等待 lan_untrusted_timeout 秒，超时自动拒收
   /// - reject：直接拒收
@@ -511,7 +516,7 @@ class LanTransferService {
   /// （手机一次共享多文件 = 逐个 POST，同批只该确认一次）
   final Map<String, DateTime> _batchGrantedUntil = {};
 
-  Future<bool> _decideAccept(
+  Future<bool> decideAccept(
       {required String senderId,
       required Future<bool> Function() ask}) async {
     if (TrustedDevices.instance.isTrustedSync(senderId)) return true;
@@ -554,7 +559,7 @@ class LanTransferService {
       fileSize: int.tryParse(_header(req, 'X-File-Size')) ?? 0,
     );
 
-    final accepted = await _decideAccept(
+    final accepted = await decideAccept(
       senderId: request.senderId,
       ask: () => handlerAsk(request),
     );
@@ -582,7 +587,7 @@ class LanTransferService {
       return;
     }
 
-    final savePath = await _resolveSavePath(request.fileName);
+    final savePath = await resolveSavePath(request.fileName);
     _events.add(LanEvent(LanEventType.incomingStarted,
         name: request.fileName, from: request.senderName));
 
@@ -646,7 +651,7 @@ class LanTransferService {
         ? '未知设备'
         : _header(req, 'X-Sender-Name');
 
-    final accepted = await _decideAccept(
+    final accepted = await decideAccept(
       senderId: senderId,
       ask: () async {
         final handler = confirmHandler;
@@ -720,7 +725,7 @@ class LanTransferService {
     final from = '网页访客(${req.connectionInfo?.remoteAddress.address ?? "未知"})';
     final name = _safeFileName(req.uri.queryParameters['name'] ?? 'unnamed');
     try {
-      final savePath = await _resolveSavePath(name);
+      final savePath = await resolveSavePath(name);
       _events.add(LanEvent(LanEventType.incomingStarted,
           name: name, from: from));
       final sink = File(savePath).openWrite();
@@ -982,7 +987,7 @@ class LanTransferService {
     final from = '网页访客(${inbound.fromName})';
     String? savePath;
     try {
-      savePath = await _resolveSavePath(inbound.name);
+      savePath = await resolveSavePath(inbound.name);
       final sink = File(savePath).openWrite();
       inbound.sink = sink;
       if (inbound.size == 0) inbound.done = true; // 空文件直接完成
@@ -1480,7 +1485,8 @@ function done(el, text, ok) {
   /// 当前生效的接收目录（设置页展示用）
   Future<String> effectiveReceiveDir() => _resolveSaveDir();
 
-  Future<String> _resolveSavePath(String fileName) async {
+  /// 解析保存路径（接收目录 + 冲突加 (n) 后缀）。LocalSend 兼容层复用。
+  Future<String> resolveSavePath(String fileName) async {
     final dirPath = await _resolveSaveDir();
     final ext = p.extension(fileName);
     final base = p.basenameWithoutExtension(fileName);
@@ -1664,6 +1670,11 @@ class LanPeer {
   final int httpPort;
   final bool trusted;
   DateTime lastSeen;
+  /// 协议：'weimi'=微密自研飞传；'localsend'=LocalSend v2 兼容设备
+  final String protocol;
+  /// LocalSend 设备的传输 scheme（App 默认 HTTPS only，自签证书）。
+  /// 微密设备用不到（恒 false）。
+  final bool https;
 
   LanPeer({
     required this.id,
@@ -1672,7 +1683,11 @@ class LanPeer {
     required this.httpPort,
     this.trusted = false,
     required this.lastSeen,
+    this.protocol = 'weimi',
+    this.https = false,
   });
+
+  bool get isLocalSend => protocol == 'localsend';
 
   LanPeer copyWith({bool? trusted}) => LanPeer(
         id: id,
@@ -1681,6 +1696,8 @@ class LanPeer {
         httpPort: httpPort,
         trusted: trusted ?? this.trusted,
         lastSeen: lastSeen,
+        protocol: protocol,
+        https: https,
       );
 }
 

@@ -7,6 +7,7 @@ import 'package:file_picker/file_picker.dart';
 import 'package:path/path.dart' as p;
 import '../services/firewall_service.dart';
 import '../services/lan_transfer_service.dart';
+import '../services/localsend_service.dart';
 import '../services/trusted_devices_service.dart';
 import '../widgets/progress_dialog.dart';
 import 'settings_screen.dart';
@@ -34,7 +35,8 @@ class _LanTransferScreenState extends State<LanTransferScreen> {
   List<String> _selfIps = const [];
   int _selfHttpPort = 0;
   bool _selfWebShare = true;
-  bool _fwMissing = false; // Windows 防火墙入站规则缺失
+  bool _fwMissing = false; // Windows 防火墙入站规则缺失（微密飞传）
+  bool _fwLsMissing = false; // LocalSend 兼容层规则缺失（UDP/TCP 53317）
   bool _fwBusy = false;
   Timer? _pollTimer;
   String? _pendingText;
@@ -51,16 +53,27 @@ class _LanTransferScreenState extends State<LanTransferScreen> {
     // 打开飞传页即确保发现/接收已启动（幂等）。v1.0.37 重写时曾删掉此调用，
     // 导致 Android 端（main() 的 lan_autostart 未开时）不监听不广播、两边都搜不到设备。
     _svc.startDiscovery().catchError((_) {});
+    // LocalSend 兼容层：打开页面强制扫一轮网段 53317（8s 节流可被 force 绕过）
+    LocalSendService.instance.scanOnce(force: true);
     _checkFirewall();
     _startPolling();
   }
 
   /// Windows：检查防火墙入站规则是否放行（热点/公用网络下默认拦入站，
   /// 会导致对端搜不到本机或发送超时）。只查一次，放行成功后不再提示。
+  /// 微密飞传规则与 LocalSend 兼容层规则分开查：老用户只装了前者，
+  /// 不应被 LocalSend 缺失误报（反之同理）。
   Future<void> _checkFirewall() async {
     if (!Platform.isWindows) return;
-    final ok = await FirewallService.rulesPresent();
-    if (mounted && !ok) setState(() => _fwMissing = true);
+    final results = await Future.wait([
+      FirewallService.rulesPresent(),
+      FirewallService.lsRulesPresent(),
+    ]);
+    if (!mounted) return;
+    setState(() {
+      _fwMissing = !results[0];
+      _fwLsMissing = !results[1];
+    });
   }
 
   Future<void> _fixFirewall() async {
@@ -70,9 +83,10 @@ class _LanTransferScreenState extends State<LanTransferScreen> {
     setState(() {
       _fwBusy = false;
       _fwMissing = !ok;
+      _fwLsMissing = !ok;
     });
     ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-      content: Text(ok ? '已放行，飞传可正常收发' : '放行未成功，请点「手动命令」以管理员身份执行'),
+      content: Text(ok ? '已放行，飞传/LocalSend 可正常收发' : '放行未成功，请点「手动命令」以管理员身份执行'),
     ));
   }
 
@@ -86,7 +100,7 @@ class _LanTransferScreenState extends State<LanTransferScreen> {
           mainAxisSize: MainAxisSize.min,
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            const Text('以管理员身份运行 CMD 后执行以下两条命令：',
+            const Text('以管理员身份运行 CMD 后执行以下命令：',
                 style: TextStyle(fontSize: 13)),
             const SizedBox(height: 8),
             SelectableText(cmds,
@@ -120,6 +134,12 @@ class _LanTransferScreenState extends State<LanTransferScreen> {
   }
 
   Widget _buildFirewallCard() {
+    final both = _fwMissing && _fwLsMissing;
+    final title = both
+        ? 'Windows 防火墙未放行飞传/LocalSend'
+        : _fwMissing
+            ? 'Windows 防火墙未放行飞传'
+            : 'Windows 防火墙未放行 LocalSend';
     return Container(
       margin: const EdgeInsets.only(bottom: 16),
       padding: const EdgeInsets.all(14),
@@ -131,12 +151,12 @@ class _LanTransferScreenState extends State<LanTransferScreen> {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          const Row(
+          Row(
             children: [
-              Icon(Icons.shield_outlined, size: 20, color: Colors.orange),
-              SizedBox(width: 8),
+              const Icon(Icons.shield_outlined, size: 20, color: Colors.orange),
+              const SizedBox(width: 8),
               Expanded(
-                child: Text('Windows 防火墙未放行飞传',
+                child: Text(title,
                     style:
                         TextStyle(fontSize: 14, fontWeight: FontWeight.w600)),
               ),
@@ -144,8 +164,15 @@ class _LanTransferScreenState extends State<LanTransferScreen> {
           ),
           const SizedBox(height: 6),
           Text(
-            '当前网络若为「公用」（如手机热点），系统默认拦截所有入站连接，'
-            '对端将搜不到本机或发送超时。放行后即可正常互传。',
+            both
+                ? '当前网络若为「公用」（如手机热点），系统默认拦截所有入站连接，'
+                    '对端将搜不到本机或发送超时。放行后即可正常互传。'
+                    '（微密飞传 52345-52365/52346 + LocalSend 53317）'
+                : _fwMissing
+                    ? '当前网络若为「公用」（如手机热点），系统默认拦截所有入站连接，'
+                        '对端将搜不到本机或发送超时。放行后即可正常互传。'
+                    : '与 LocalSend App 互传需要放行 53317 端口（组播发现 + HTTP 传输），'
+                        '否则对端搜不到本机或发送失败。',
             style: TextStyle(fontSize: 12, color: Colors.grey.shade700),
           ),
           const SizedBox(height: 10),
@@ -277,11 +304,16 @@ class _LanTransferScreenState extends State<LanTransferScreen> {
               onPressed: () => Navigator.pop(ctx, d),
               child: ListTile(
                 leading: Icon(
-                  d.trusted ? Icons.verified_user : Icons.devices,
-                  color: d.trusted ? Colors.green : null,
+                  d.isLocalSend
+                      ? Icons.swap_horiz
+                      : (d.trusted ? Icons.verified_user : Icons.devices),
+                  color: d.isLocalSend
+                          ? Colors.blue
+                          : (d.trusted ? Colors.green : null),
                 ),
                 title: Text(d.name),
-                subtitle: Text(d.ip),
+                subtitle: Text(
+                    '${d.ip} · ${d.isLocalSend ? 'LocalSend 设备' : '微密设备'}'),
               ),
             ),
         ],
@@ -305,6 +337,10 @@ class _LanTransferScreenState extends State<LanTransferScreen> {
   }
 
   Future<void> _sendFilesTo(LanPeer peer, List<String> files) async {
+    if (peer.isLocalSend) {
+      await _sendFilesToLocalSend(peer, files);
+      return;
+    }
     int okCount = 0;
     int failCount = 0;
     for (int i = 0; i < files.length; i++) {
@@ -351,6 +387,55 @@ class _LanTransferScreenState extends State<LanTransferScreen> {
     }
   }
 
+  /// 发送到 LocalSend 设备（v2 协议：send-request → 逐个 upload）
+  Future<void> _sendFilesToLocalSend(LanPeer peer, List<String> files) async {
+    if (mounted) {
+      ProgressDialog.show(
+        context,
+        title: '正在发送（LocalSend）',
+        currentProgress: 0,
+        totalProgress: files.length,
+        currentFileName: p.basename(files.first),
+      );
+    }
+    // onProgress 节流：对话框 pop+show 重建代价高，≥400ms 或 ≥32MB 才刷一次
+    var lastUi = DateTime.fromMillisecondsSinceEpoch(0);
+    var lastSent = 0;
+    final ok = await LocalSendService.instance.sendFiles(
+      peer: peer,
+      filePaths: files,
+      onProgress: (fileName, sent, total) {
+        if (!mounted) return;
+        final now = DateTime.now();
+        if (now.difference(lastUi).inMilliseconds < 400 &&
+            sent - lastSent < 32 * 1024 * 1024) {
+          return;
+        }
+        lastUi = now;
+        lastSent = sent;
+        ProgressDialog.update(
+          context,
+          title: '正在发送 $fileName'
+              '（${(sent / 1048576).toStringAsFixed(1)}/${(total / 1048576).toStringAsFixed(1)} MB）',
+          currentProgress: 0,
+          totalProgress: files.length,
+          currentFileName: fileName,
+        );
+      },
+    );
+    if (mounted) {
+      ProgressDialog.hide(context);
+      final detail = ok < files.length && LocalSendService.instance.lastError.isNotEmpty
+          ? '\n失败原因：${LocalSendService.instance.lastError}'
+          : '';
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+        content: Text('发送完成：成功 $ok / ${files.length}（发给 ${peer.name}）$detail'),
+        backgroundColor: ok == files.length ? Colors.green : Colors.orange,
+        duration: const Duration(seconds: 6),
+      ));
+    }
+  }
+
   Future<void> _startSendText() async {
     final controller = TextEditingController();
     final text = await showDialog<String>(
@@ -380,6 +465,14 @@ class _LanTransferScreenState extends State<LanTransferScreen> {
   }
 
   Future<void> _sendTextTo(LanPeer peer, String text) async {
+    if (peer.isLocalSend) {
+      // LocalSend v2 协议无文本消息类型，只有文件传输
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+        content: Text('LocalSend 设备只支持文件发送，不支持文本'),
+        backgroundColor: Colors.orange,
+      ));
+      return;
+    }
     if (mounted) {
       ProgressDialog.show(
         context,
@@ -658,7 +751,7 @@ class _LanTransferScreenState extends State<LanTransferScreen> {
           ),
           // Windows 防火墙未放行警示（热点/公用网络下默认拦所有入站，
           // 对端会搜不到本机或发送超时）
-          if (_fwMissing) _buildFirewallCard(),
+          if (_fwMissing || _fwLsMissing) _buildFirewallCard(),
           const SizedBox(height: 16),
           // 分享直达：待发送内容卡
           if (_pendingText != null || _pendingFiles.isNotEmpty)
@@ -796,23 +889,32 @@ class _LanTransferScreenState extends State<LanTransferScreen> {
           else
             ..._peers.map((d) {
               final trusted = d.trusted;
+              final isLs = d.isLocalSend;
               return Container(
                 margin: const EdgeInsets.only(bottom: 8),
                 decoration: BoxDecoration(
                   color: Colors.white,
                   borderRadius: BorderRadius.circular(12),
                   border: Border.all(
-                      color: trusted ? Colors.green.shade300 : Colors.grey.shade300),
+                      color: trusted
+                          ? Colors.green.shade300
+                          : (isLs ? Colors.blue.shade200 : Colors.grey.shade300)),
                 ),
                 child: ListTile(
                   leading: Icon(
-                    trusted ? Icons.verified_user : Icons.devices,
-                    color: trusted ? Colors.green : Colors.teal,
+                    isLs
+                        ? Icons.swap_horiz
+                        : (trusted ? Icons.verified_user : Icons.devices),
+                    color: isLs
+                        ? Colors.blue
+                        : (trusted ? Colors.green : Colors.teal),
                   ),
                   title: Text(d.name,
                       style: const TextStyle(fontWeight: FontWeight.w500)),
                   subtitle: Text(
-                      '${d.ip}:${d.httpPort}${trusted ? ' · 已信任' : ''}',
+                      '${d.ip}:${d.httpPort}'
+                      '${isLs ? ' · LocalSend' : ''}'
+                      '${trusted ? ' · 已信任' : ''}',
                       style: const TextStyle(fontSize: 12)),
                   trailing: PopupMenuButton<String>(
                     icon: const Icon(Icons.more_horiz, size: 20),
@@ -833,24 +935,28 @@ class _LanTransferScreenState extends State<LanTransferScreen> {
                             SizedBox(width: 8),
                             Text('发送文件'),
                           ])),
-                      const PopupMenuItem(
-                          value: 'send_text',
-                          child: Row(children: [
-                            Icon(Icons.chat_bubble_outline, size: 18),
-                            SizedBox(width: 8),
-                            Text('发送文本'),
-                          ])),
-                      PopupMenuItem(
-                          value: 'trust',
-                          child: Row(children: [
-                            Icon(
-                                trusted
-                                    ? Icons.remove_moderator_outlined
-                                    : Icons.add_moderator_outlined,
-                                size: 18),
-                            const SizedBox(width: 8),
-                            Text(trusted ? '取消信任' : '添加信任'),
-                          ])),
+                      // LocalSend 设备不支持文本/信任体系（协议无文本消息，
+                      // 信任是微密设备 ID 概念）
+                      if (!isLs)
+                        const PopupMenuItem(
+                            value: 'send_text',
+                            child: Row(children: [
+                              Icon(Icons.chat_bubble_outline, size: 18),
+                              SizedBox(width: 8),
+                              Text('发送文本'),
+                            ])),
+                      if (!isLs)
+                        PopupMenuItem(
+                            value: 'trust',
+                            child: Row(children: [
+                              Icon(
+                                  trusted
+                                      ? Icons.remove_moderator_outlined
+                                      : Icons.add_moderator_outlined,
+                                  size: 18),
+                              const SizedBox(width: 8),
+                              Text(trusted ? '取消信任' : '添加信任'),
+                            ])),
                     ],
                   ),
                   onTap: () => _onDeviceTap(d),
