@@ -82,6 +82,9 @@ class LanTransferService {
       StreamController<LanEvent>.broadcast();
   Stream<LanEvent> get events => _events.stream;
 
+  /// 供 LocalSend 兼容层等外部模块发射事件（events 是只读 Stream）。
+  void emitEvent(LanEvent event) => _events.add(event);
+
   /// 收到传入请求时的确认回调（UI 弹窗），返回 true 才接收。
   /// 仅前台且对方未信任时调用；信任设备与后台模式不经过此回调。
   Future<bool> Function(IncomingRequest request)? confirmHandler;

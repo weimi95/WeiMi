@@ -49,7 +49,10 @@ class LocalSendService {
 
   // ============ 状态 ============
   String _fingerprint = '';
+  /// 组播接收 socket（53317，尽力而为；被占时仅丢组播接收，扫描兜底）
   RawDatagramSocket? _mcastSocket;
+  /// 组播发送 socket（临时端口，恒定可用）
+  RawDatagramSocket? _sendSocket;
   HttpServer? _server;
   /// 53317 被占时会向后探端口，这里记实际绑定端口（InfoDto/announce 必须报
   /// 真实端口，否则对端按默认 53317 连会连错——甚至连到本机真 LocalSend）
@@ -156,6 +159,8 @@ class LocalSendService {
     _scanTimer = null;
     _mcastSocket?.close();
     _mcastSocket = null;
+    _sendSocket?.close();
+    _sendSocket = null;
     await _server?.close(force: true);
     _server = null;
     _serverPort = lsPort;
@@ -166,30 +171,53 @@ class LocalSendService {
 
   void _startMulticast() {
     () async {
+      // 发送 socket：绑临时端口即可向组播群发（协议只要求能发到群，
+      // 对端首选应答走 TCP register）。同时监听自身端口——对端的 UDP
+      // 回退应答是单播到 announce 的源端口，不听就丢。
       try {
-        final socket = await RawDatagramSocket.bind(
-          InternetAddress.anyIPv4,
-          lsPort,
-          reuseAddress: true,
-        );
-        // 对每个本机网卡 join，多网卡/虚拟网卡环境都能收
-        final ips = await LanTransferService.instance.localIPv4s();
-        for (final ip in ips) {
+        final send = await RawDatagramSocket.bind(InternetAddress.anyIPv4, 0);
+        send.listen((ev) => _onDatagram(send, ev));
+        _sendSocket = send;
+      } catch (e) {
+        lastError = '组播发送 socket 启动失败: $e';
+      }
+      // 接收 socket：53317。Windows 不复用地址（reuseAddress:true 在
+      // Windows 上会与同机真 LocalSend App 争抢单播投递——它的 UDP 回退
+      // 应答可能被我们收走或反之，与飞传发现端口同型坑，见
+      // lan_transfer_service 的 Windows 分支）；绑不上（对方已占）就放弃
+      // 组播接收，announce 发送与 HTTP 扫描兜底，不影响可用性。
+      // macOS/Linux：组播接收本就依赖 SO_REUSEADDR 多实例共享，保持 reuse。
+      try {
+        final socket = Platform.isWindows
+            ? await RawDatagramSocket.bind(
+                InternetAddress.anyIPv4,
+                lsPort,
+                reuseAddress: false,
+              )
+            : await RawDatagramSocket.bind(
+                InternetAddress.anyIPv4,
+                lsPort,
+                reuseAddress: true,
+              );
+        // joinMulticast 第二参是 NetworkInterface（不是 InternetAddress），
+        // 逐网卡 join，多网卡/虚拟网卡环境都能收
+        final ifaces = await NetworkInterface.list();
+        for (final iface in ifaces) {
           try {
-            socket.joinMulticast(InternetAddress(lsGroup),
-                InternetAddress(ip));
+            socket.joinMulticast(InternetAddress(lsGroup), iface);
           } catch (_) {}
         }
-        socket.listen(_onMcastDatagram);
+        socket.listen((ev) => _onDatagram(socket, ev));
         _mcastSocket = socket;
       } catch (e) {
-        lastError = '组播启动失败: $e';
+        // 端口被同机 LocalSend 占用等原因：组播接收不可用，扫描兜底
+        lastError = '组播接收启动失败（将被 HTTP 扫描兜底）: $e';
       }
     }();
   }
 
   Future<void> _sendAnnounce() async {
-    final socket = _mcastSocket;
+    final socket = _sendSocket;
     if (socket == null || !_running) return;
     final body = utf8.encode(json.encode({
       'alias': _alias,
@@ -207,9 +235,8 @@ class LocalSendService {
     } catch (_) {}
   }
 
-  void _onMcastDatagram(RawSocketEvent ev) {
-    final socket = _mcastSocket;
-    if (socket == null || ev != RawSocketEvent.read) return;
+  void _onDatagram(RawDatagramSocket socket, RawSocketEvent ev) {
+    if (ev != RawSocketEvent.read) return;
     final dg = socket.receive();
     if (dg == null) return;
     try {
@@ -235,7 +262,7 @@ class LocalSendService {
   }
 
   void _sendMcastReply(String ip, int port) {
-    final socket = _mcastSocket;
+    final socket = _sendSocket;
     if (socket == null || port == 0) return;
     final body = utf8.encode(json.encode({
       'alias': _alias,
@@ -617,7 +644,7 @@ class LocalSendService {
 
     final savePath =
         await LanTransferService.instance.resolveSavePath(file.fileName);
-    LanTransferService.instance.events.add(LanEvent(LanEventType.incomingStarted,
+    LanTransferService.instance.emitEvent(LanEvent(LanEventType.incomingStarted,
         name: file.fileName, from: session.senderName));
 
     try {
@@ -634,7 +661,7 @@ class LocalSendService {
       req.response.statusCode = HttpStatus.ok;
       req.response.write(json.encode({'status': 'ok'}));
       await req.response.close();
-      LanTransferService.instance.events.add(LanEvent(LanEventType.incomingDone,
+      LanTransferService.instance.emitEvent(LanEvent(LanEventType.incomingDone,
           name: file.fileName, from: session.senderName, path: savePath));
       ReceiveNotifyService.instance
           .fileDone(file.fileName, session.senderName, savePath);
@@ -657,7 +684,7 @@ class LocalSendService {
       req.response.statusCode = HttpStatus.internalServerError;
       req.response.write(json.encode({'error': '$e'}));
       await req.response.close();
-      LanTransferService.instance.events.add(LanEvent(
+      LanTransferService.instance.emitEvent(LanEvent(
           LanEventType.incomingFailed,
           name: file.fileName,
           from: session.senderName,
