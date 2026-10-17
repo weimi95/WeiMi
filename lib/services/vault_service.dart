@@ -391,9 +391,7 @@ class VaultService {
     final plainTmp = p.join(tmpDir.path, 'import_${DateTime.now().millisecondsSinceEpoch}_$name');
     final plainName = name.substring(0, name.length - 5);
     try {
-      RustCrypto.decryptFile(wemiPath, plainTmp,
-          Uint8List.fromList(utf8.encode(password)),
-          isMobile: _isMobile());
+      _decryptOrThrow(wemiPath, plainTmp, password, isMobile: _isMobile());
       final thumb = await makeThumbForFile(plainTmp);
       _encryptFileV3(
         plainTmp, dest,
@@ -426,6 +424,7 @@ class VaultService {
   }
 
   /// 解密箱内文件到受管临时目录，返回明文路径。锁定时统一清理。
+  /// 错误：noEntry（无映射）/ wrongPassword（密码错或损坏）/ ffi / io
   Future<String> decryptToTemp(String vaultFilePath) async {
     _requireUnlocked();
     final pw = passwordFor(vaultFilePath);
@@ -439,10 +438,57 @@ class VaultService {
         : name;
     final dest = p.join(
         tmpDir.path, '${DateTime.now().millisecondsSinceEpoch}_$outName');
-    RustCrypto.decryptFile(vaultFilePath, dest,
-        Uint8List.fromList(utf8.encode(pw)),
-        isMobile: _isMobile());
+    _decryptOrThrow(vaultFilePath, dest, pw, isMobile: _isMobile());
     return dest;
+  }
+
+  /// 用指定密码尝试解密（不写映射）；成功返回明文路径，密码错/损坏返回 null。
+  /// 供「先验证再保存」与「自动试主密码」使用，避免把错密码写进密码库。
+  Future<String?> tryDecryptToTemp(String vaultFilePath, String password) async {
+    _requireUnlocked();
+    final tmpDir = await _tmpDir();
+    final name = p.basename(vaultFilePath);
+    final outName = name.toLowerCase().endsWith('.wemi')
+        ? name.substring(0, name.length - 5)
+        : name;
+    final dest = p.join(
+        tmpDir.path, 'try_${DateTime.now().millisecondsSinceEpoch}_$outName');
+    try {
+      RustCrypto.decryptFile(vaultFilePath, dest,
+          Uint8List.fromList(utf8.encode(password)),
+          isMobile: _isMobile());
+      return dest;
+    } on Exception {
+      try {
+        final f = File(dest);
+        if (f.existsSync()) f.deleteSync();
+      } catch (_) {}
+      return null;
+    }
+  }
+
+  /// 主密码明文（仅解锁态）。用于无映射/映射失效时自动兜底尝试，
+  /// 与 passwordFor 同等暴露面（均在解锁内存中）。
+  String? get masterPassword =>
+      _unlocked && _master != null ? utf8.decode(_master!) : null;
+
+  /// 包一层：把 Rust -2 翻成中文 VaultException，界面直接可读
+  static void _decryptOrThrow(String inputPath, String outputPath, String pw,
+      {bool isMobile = false}) {
+    try {
+      RustCrypto.decryptFile(inputPath, outputPath,
+          Uint8List.fromList(utf8.encode(pw)),
+          isMobile: isMobile);
+    } on Exception catch (e) {
+      final msg = e.toString();
+      if (msg.contains('-2')) {
+        throw const VaultException('wrongPassword', '密码不正确或文件已损坏');
+      }
+      if (msg.contains('-1')) {
+        throw const VaultException('ffi', '参数错误');
+      }
+      throw VaultException('io', msg);
+    }
   }
 
   /// 清理受管临时目录（锁定/退出调用）

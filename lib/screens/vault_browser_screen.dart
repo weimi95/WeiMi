@@ -35,6 +35,7 @@ class _VaultBrowserScreenState extends State<VaultBrowserScreen>
   // 解锁后的宫格状态
   List<FileSystemEntity> _files = [];
   final Map<String, Uint8List?> _thumbCache = {};
+  final Set<String> _noPwFiles = {}; // 无密码映射的文件路径（宫格标灰标）
   bool _busy = false;
 
   // 设置引导输入
@@ -504,33 +505,57 @@ class _VaultBrowserScreenState extends State<VaultBrowserScreen>
     final hasThumb = _thumbCache.containsKey(f.path);
     final thumb = _thumbCache[f.path];
     final ext = p.extension(name).replaceFirst('.', '').toLowerCase();
+    final noPw = _noPwFiles.contains(f.path);
     return GestureDetector(
       onTap: () => _openVaultFile(f),
       onSecondaryTap: () => _showFileMenu(f),
       onLongPress: () => _showFileMenu(f),
       child: Card(
         clipBehavior: Clip.antiAlias,
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.stretch,
+        child: Stack(
           children: [
-            Expanded(
-              child: hasThumb && thumb != null
-                  ? Image.memory(thumb, fit: BoxFit.cover,
-                      errorBuilder: (_, __, ___) => _typeIcon(ext))
-                  : _typeIcon(ext),
+            Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                Expanded(
+                  child: hasThumb && thumb != null
+                      ? Image.memory(thumb, fit: BoxFit.cover,
+                          errorBuilder: (_, __, ___) => _typeIcon(ext))
+                      : _typeIcon(ext),
+                ),
+                Padding(
+                  padding: const EdgeInsets.fromLTRB(6, 4, 6, 6),
+                  child: Text(
+                    name,
+                    maxLines: 2,
+                    overflow: TextOverflow.ellipsis,
+                    style: const TextStyle(fontSize: 12),
+                  ),
+                ),
+              ],
             ),
-            Padding(
-              padding: const EdgeInsets.fromLTRB(6, 4, 6, 6),
-              child: Text(
-                name,
-                maxLines: 2,
-                overflow: TextOverflow.ellipsis,
-                style: const TextStyle(fontSize: 12),
+            if (noPw)
+              Positioned(
+                left: 4,
+                top: 4,
+                child: _noPwBadge(),
               ),
-            ),
           ],
         ),
       ),
+    );
+  }
+
+  /// 宫格角标：该文件没有密码映射，点开要补密码
+  Widget _noPwBadge() {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 2),
+      decoration: BoxDecoration(
+        color: Colors.black54,
+        borderRadius: BorderRadius.circular(4),
+      ),
+      child: const Text('未存密码',
+          style: TextStyle(fontSize: 9, color: Colors.white)),
     );
   }
 
@@ -577,6 +602,12 @@ class _VaultBrowserScreenState extends State<VaultBrowserScreen>
     setState(() {
       _files = list;
       _thumbCache.removeWhere((k, _) => !list.any((f) => f.path == k));
+      _noPwFiles
+        ..clear()
+        ..addAll(list
+            .where((f) =>
+                VaultService.instance.passwordFor(f.path) == null)
+            .map((f) => f.path));
     });
     _loadThumbs();
   }
@@ -598,73 +629,217 @@ class _VaultBrowserScreenState extends State<VaultBrowserScreen>
 
   // ---------- 打开 / 菜单 ----------
 
-  Future<void> _openVaultFile(FileSystemEntity f) async {
+  /// 打开/解密共用的「拿明文」流程：
+  /// - 有映射：直接解；-2 时先静默试主密码（映射丢了/写错了但文件是主密码
+  ///   加密的），成功则顺手修正映射；仍失败弹「补密码」对话框
+  /// - 无映射：先静默试主密码，失败弹「输入文件密码」对话框（验证通过才保存）
+  /// 返回明文路径；用户取消返回 null。
+  Future<String?> _resolvePlainFile(FileSystemEntity f) async {
     VaultService.instance.notifyActivity();
-    var pw = VaultService.instance.passwordFor(f.path);
-    if (pw == null) {
-      pw = await _askFilePassword(f);
-      if (pw == null) return;
+    final pw = VaultService.instance.passwordFor(f.path);
+    if (pw != null) {
+      try {
+        return await VaultService.instance.decryptToTemp(f.path);
+      }       on VaultException catch (e) {
+        if (e.code != 'wrongPassword') rethrow;
+        final master = VaultService.instance.masterPassword;
+        if (master != null) {
+          final plain =
+              await VaultService.instance.tryDecryptToTemp(f.path, master);
+          if (plain != null) {
+            try {
+              await VaultService.instance.saveEntry(f.path, master);
+            } catch (_) {}
+            _noPwFiles.remove(f.path);
+            return plain;
+          }
+        }
+        return _askFilePassword(f, recover: true);
+      }
     }
+    final master = VaultService.instance.masterPassword;
+    if (master != null) {
+      final plain = await VaultService.instance.tryDecryptToTemp(f.path, master);
+      if (plain != null) {
+        try {
+          await VaultService.instance.saveEntry(f.path, master);
+        } catch (_) {}
+        _noPwFiles.remove(f.path);
+        return plain;
+      }
+    }
+    return _askFilePassword(f);
+  }
+
+  Future<void> _openVaultFile(FileSystemEntity f) async {
     setState(() => _busy = true);
     try {
-      final plainPath = await VaultService.instance.decryptToTemp(f.path);
-      if (!mounted) return;
+      final plainPath = await _resolvePlainFile(f);
+      if (plainPath == null || !mounted) return;
       await FileViewerService.openFile(context, plainPath,
           isEncrypted: false);
     } catch (e) {
       if (mounted) {
         ScaffoldMessenger.of(context)
-            .showSnackBar(SnackBar(content: Text('$e')));
+            .showSnackBar(SnackBar(content: Text(_friendlyError('$e'))));
       }
     } finally {
       if (mounted) setState(() => _busy = false);
     }
   }
 
-  Future<String?> _askFilePassword(FileSystemEntity f) async {
+  /// 「输入文件密码」对话框：先尝试验证，通过才写入密码库
+  ///（防止错密码污染映射，导致以后每次都解不开）。
+  /// recover=true 表示「保存的密码解不开」的补救场景。返回明文路径。
+  Future<String?> _askFilePassword(FileSystemEntity f,
+      {bool recover = false}) async {
     final ctrl = TextEditingController();
+    String? errorText;
+    bool verifying = false;
+    String? plainPath;
+    String? usedPw;
+    String? saveError;
+    Future<void> verify(BuildContext ctx, void Function(void Function()) setDialogState) async {
+      final input = ctrl.text;
+      if (input.isEmpty) return;
+      setDialogState(() {
+        verifying = true;
+        errorText = null;
+      });
+      final plain =
+          await VaultService.instance.tryDecryptToTemp(f.path, input);
+      if (plain == null) {
+        setDialogState(() {
+          verifying = false;
+          errorText = '密码不正确（或文件已损坏）';
+        });
+        return;
+      }
+      String? saveErr;
+      try {
+        await VaultService.instance.saveEntry(f.path, input);
+      } catch (e) {
+        saveErr = '$e'; // 内存映射已更新，本次可开；持久化失败仅提示
+      }
+      plainPath = plain;
+      usedPw = input;
+      if (saveErr != null) saveError = saveErr;
+      if (ctx.mounted) Navigator.pop(ctx, true);
+    }
+    final ok = await showDialog<bool>(
+      context: context,
+      barrierDismissible: false,
+      builder: (ctx) => StatefulBuilder(
+        builder: (ctx, setDialogState) => AlertDialog(
+          title: Text(recover ? '密码不正确' : '输入文件密码'),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Text(p.basename(f.path),
+                  style: const TextStyle(fontSize: 12, color: Colors.grey)),
+              const SizedBox(height: 8),
+              TextField(
+                controller: ctrl,
+                obscureText: true,
+                autofocus: true,
+                enabled: !verifying,
+                decoration: InputDecoration(
+                  labelText: '密码',
+                  border: const OutlineInputBorder(),
+                  errorText: errorText,
+                ),
+                onSubmitted:
+                    verifying ? null : (_) => verify(ctx, setDialogState),
+              ),
+              const SizedBox(height: 8),
+              Text(
+                recover
+                    ? '保存的密码无法解开该文件。请输入导入时设置的文件密码'
+                        '（主密码已自动尝试过）。验证通过后自动更新保存的密码。'
+                    : '该文件没有保存密码。请输入导入时设置的文件密码'
+                        '（主密码已自动尝试过）。验证通过后自动保存，之后点击即开。',
+                style: const TextStyle(fontSize: 12, color: Colors.grey),
+              ),
+            ],
+          ),
+          actions: [
+            TextButton(
+              onPressed: verifying ? null : () => Navigator.pop(ctx, false),
+              child: const Text('取消'),
+            ),
+            FilledButton(
+              onPressed:
+                  verifying ? null : () => verify(ctx, setDialogState),
+              child: verifying
+                  ? const SizedBox(
+                      width: 16,
+                      height: 16,
+                      child: CircularProgressIndicator(strokeWidth: 2))
+                  : const Text('确定'),
+            ),
+          ],
+        ),
+      ),
+    );
+    ctrl.dispose();
+    if (ok != true || plainPath == null) return null;
+    if (saveError != null && mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+          content: Text('密码正确，但保存到密码库失败：$saveError')));
+    }
+    _noPwFiles.remove(f.path);
+    // 补密码成功：若还有别的文件缺映射，问一句要不要用同一密码批量尝试
+    if (usedPw != null) await _offerBatchSamePassword(f, usedPw!);
+    return plainPath;
+  }
+
+  Future<void> _offerBatchSamePassword(FileSystemEntity done, String pw) async {
+    final rest = _files
+        .where((f) => f.path != done.path && _noPwFiles.contains(f.path))
+        .toList();
+    if (rest.isEmpty || !mounted) return;
     final ok = await showDialog<bool>(
       context: context,
       builder: (ctx) => AlertDialog(
-        title: const Text('输入文件密码'),
-        content: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Text(p.basename(f.path),
-                style: const TextStyle(fontSize: 12, color: Colors.grey)),
-            const SizedBox(height: 8),
-            TextField(
-              controller: ctrl,
-              obscureText: true,
-              autofocus: true,
-              decoration: const InputDecoration(
-                  labelText: '密码', border: OutlineInputBorder()),
-            ),
-            const SizedBox(height: 8),
-            const Text('保存后可点击即开并显示缩略图',
-                style: TextStyle(fontSize: 12)),
-          ],
-        ),
+        title: const Text('批量补密码'),
+        content: Text('还有 ${rest.length} 个文件没有保存密码。'
+            '要用刚才这个密码批量尝试吗？'),
         actions: [
           TextButton(
               onPressed: () => Navigator.pop(ctx, false),
-              child: const Text('取消')),
+              child: const Text('不用')),
           FilledButton(
               onPressed: () => Navigator.pop(ctx, true),
-              child: const Text('确定')),
+              child: const Text('试试')),
         ],
       ),
     );
-    if (ok != true || ctrl.text.isEmpty) return null;
-    try {
-      await VaultService.instance.saveEntry(f.path, ctrl.text);
-    } catch (e) {
-      if (mounted) {
-        ScaffoldMessenger.of(context)
-            .showSnackBar(SnackBar(content: Text('$e')));
+    if (ok != true || !mounted) return;
+    var fixed = 0;
+    for (final f in rest) {
+      final plain = await VaultService.instance.tryDecryptToTemp(f.path, pw);
+      if (plain != null) {
+        try {
+          await VaultService.instance.saveEntry(f.path, pw);
+        } catch (_) {}
+        _noPwFiles.remove(f.path);
+        fixed++;
       }
     }
-    return ctrl.text;
+    if (mounted) {
+      setState(() {});
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+          content: Text(fixed > 0
+              ? '批量补密码完成：$fixed 个文件已保存'
+              : '批量尝试失败：这些文件的密码不同')));
+    }
+  }
+
+  /// 把 Rust 层的英文错误码翻成界面可读中文
+  String _friendlyError(String raw) {
+    if (raw.contains('code: -2')) return '密码不正确或文件已损坏';
+    if (raw.contains('code: -1')) return '参数错误';
+    return raw;
   }
 
   Future<void> _showFileMenu(FileSystemEntity f) async {
@@ -707,10 +882,10 @@ class _VaultBrowserScreenState extends State<VaultBrowserScreen>
         await _openVaultFile(f);
         break;
       case 'pw':
-        final pw = await _askFilePassword(f);
-        if (pw != null && mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(
-              const SnackBar(content: Text('密码已保存到保险箱密码库')));
+        final plainPath = await _askFilePassword(f, recover: hasPw);
+        if (plainPath != null && mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+              content: Text('密码已验证并保存到保险箱密码库')));
         }
         break;
       case 'export':
@@ -725,17 +900,15 @@ class _VaultBrowserScreenState extends State<VaultBrowserScreen>
   Future<void> _exportFile(FileSystemEntity f) async {
     setState(() => _busy = true);
     try {
-      var pw = VaultService.instance.passwordFor(f.path);
-      if (pw == null) {
-        pw = await _askFilePassword(f);
-        if (pw == null) return;
-      }
-      final plainPath = await VaultService.instance.decryptToTemp(f.path);
+      final plainPath = await _resolvePlainFile(f);
+      if (plainPath == null || !mounted) return;
       final outDir = await FilePicker.platform.getDirectoryPath(
           dialogTitle: '选择导出位置');
       if (outDir == null) return;
-      final outPath =
-          p.join(outDir, p.basename(plainPath));
+      // 明文临时文件名带时间戳前缀，导出时剥掉
+      final cleanName =
+          p.basename(plainPath).replaceFirst(RegExp(r'^\d+_'), '');
+      final outPath = p.join(outDir, cleanName);
       await File(plainPath).copy(outPath);
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
@@ -744,7 +917,7 @@ class _VaultBrowserScreenState extends State<VaultBrowserScreen>
     } catch (e) {
       if (mounted) {
         ScaffoldMessenger.of(context)
-            .showSnackBar(SnackBar(content: Text('$e')));
+            .showSnackBar(SnackBar(content: Text(_friendlyError('$e'))));
       }
     } finally {
       if (mounted) setState(() => _busy = false);

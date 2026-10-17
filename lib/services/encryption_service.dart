@@ -190,8 +190,20 @@ class EncryptionService {
       if (kDebugMode) {
         debugPrint('[DECRYPT] Decryption failed: $e');
       }
-      rethrow;
+      throw _friendlyDecryptError(e);
     }
+  }
+
+  /// 把 Rust 层英文错误码翻成中文：-2=密码错/损坏，-1=参数错
+  static Exception _friendlyDecryptError(Object e) {
+    final msg = e.toString();
+    if (msg.contains('code: -2')) {
+      return Exception('密码不正确或文件已损坏');
+    }
+    if (msg.contains('code: -1')) {
+      return Exception('参数错误');
+    }
+    return e is Exception ? e : Exception(msg);
   }
 
   static String _getOriginalExtension(String encryptedPath) {
@@ -243,7 +255,7 @@ class EncryptionService {
       if (kDebugMode) {
         debugPrint('[DECRYPT_TO_PATH] Decryption failed: $e');
       }
-      rethrow;
+      throw _friendlyDecryptError(e);
     }
   }
 
