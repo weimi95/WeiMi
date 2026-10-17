@@ -1,9 +1,11 @@
 import 'dart:async';
+import 'dart:io';
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:file_picker/file_picker.dart';
 import 'package:path/path.dart' as p;
+import '../services/firewall_service.dart';
 import '../services/lan_transfer_service.dart';
 import '../services/trusted_devices_service.dart';
 import '../widgets/progress_dialog.dart';
@@ -29,8 +31,11 @@ class _LanTransferScreenState extends State<LanTransferScreen> {
   List<WebPeer> _webPeers = [];
   String _selfName = '本机';
   String _selfIp = '…';
+  List<String> _selfIps = const [];
   int _selfHttpPort = 0;
   bool _selfWebShare = true;
+  bool _fwMissing = false; // Windows 防火墙入站规则缺失
+  bool _fwBusy = false;
   Timer? _pollTimer;
   String? _pendingText;
   List<String> _pendingFiles = [];
@@ -46,7 +51,121 @@ class _LanTransferScreenState extends State<LanTransferScreen> {
     // 打开飞传页即确保发现/接收已启动（幂等）。v1.0.37 重写时曾删掉此调用，
     // 导致 Android 端（main() 的 lan_autostart 未开时）不监听不广播、两边都搜不到设备。
     _svc.startDiscovery().catchError((_) {});
+    _checkFirewall();
     _startPolling();
+  }
+
+  /// Windows：检查防火墙入站规则是否放行（热点/公用网络下默认拦入站，
+  /// 会导致对端搜不到本机或发送超时）。只查一次，放行成功后不再提示。
+  Future<void> _checkFirewall() async {
+    if (!Platform.isWindows) return;
+    final ok = await FirewallService.rulesPresent();
+    if (mounted && !ok) setState(() => _fwMissing = true);
+  }
+
+  Future<void> _fixFirewall() async {
+    setState(() => _fwBusy = true);
+    final ok = await FirewallService.addRules();
+    if (!mounted) return;
+    setState(() {
+      _fwBusy = false;
+      _fwMissing = !ok;
+    });
+    ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+      content: Text(ok ? '已放行，飞传可正常收发' : '放行未成功，请点「手动命令」以管理员身份执行'),
+    ));
+  }
+
+  void _showFirewallManual() {
+    final cmds = FirewallService.manualCommands();
+    showDialog(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('手动放行命令'),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            const Text('以管理员身份运行 CMD 后执行以下两条命令：',
+                style: TextStyle(fontSize: 13)),
+            const SizedBox(height: 8),
+            SelectableText(cmds,
+                style: const TextStyle(fontSize: 11, fontFamily: 'monospace')),
+          ],
+        ),
+        actions: [
+          TextButton(
+            onPressed: () {
+              Clipboard.setData(ClipboardData(text: cmds));
+              Navigator.pop(ctx);
+              if (mounted) {
+                ScaffoldMessenger.of(context).showSnackBar(
+                    const SnackBar(content: Text('命令已复制')));
+              }
+            },
+            child: const Text('复制'),
+          ),
+          TextButton(
+              onPressed: () => Navigator.pop(ctx), child: const Text('关闭')),
+        ],
+      ),
+    );
+  }
+
+  /// 网页快传地址列表：多网卡时每个 IP 一条（双网卡场景只有一个可达，
+  /// 只显示排序第一的会误导用户）。
+  List<String> get _webUrls {
+    if (_selfIps.isEmpty) return const [];
+    return _selfIps.take(3).map((ip) => 'http://$ip:$_selfHttpPort').toList();
+  }
+
+  Widget _buildFirewallCard() {
+    return Container(
+      margin: const EdgeInsets.only(bottom: 16),
+      padding: const EdgeInsets.all(14),
+      decoration: BoxDecoration(
+        color: Colors.orange.withAlpha(25),
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: Colors.orange.shade700.withAlpha(90)),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          const Row(
+            children: [
+              Icon(Icons.shield_outlined, size: 20, color: Colors.orange),
+              SizedBox(width: 8),
+              Expanded(
+                child: Text('Windows 防火墙未放行飞传',
+                    style:
+                        TextStyle(fontSize: 14, fontWeight: FontWeight.w600)),
+              ),
+            ],
+          ),
+          const SizedBox(height: 6),
+          Text(
+            '当前网络若为「公用」（如手机热点），系统默认拦截所有入站连接，'
+            '对端将搜不到本机或发送超时。放行后即可正常互传。',
+            style: TextStyle(fontSize: 12, color: Colors.grey.shade700),
+          ),
+          const SizedBox(height: 10),
+          Row(
+            children: [
+              FilledButton.icon(
+                onPressed: _fwBusy ? null : _fixFirewall,
+                icon: const Icon(Icons.lock_open, size: 18),
+                label: Text(_fwBusy ? '等待授权…' : '一键放行'),
+              ),
+              const SizedBox(width: 8),
+              TextButton(
+                onPressed: _showFirewallManual,
+                child: const Text('手动命令'),
+              ),
+            ],
+          ),
+        ],
+      ),
+    );
   }
 
   void _startPolling() {
@@ -58,13 +177,14 @@ class _LanTransferScreenState extends State<LanTransferScreen> {
 
   Future<void> _poll() async {
     if (!mounted) return;
-    final ip = await _svc.localIPv4() ?? '';
+    final ips = await _svc.localIPv4s();
     if (!mounted) return;
     setState(() {
       _peers = _svc.peers;
       _webPeers = _svc.webPeers;
       _selfName = _svc.selfName.isEmpty ? '本机' : _svc.selfName;
-      _selfIp = ip;
+      _selfIps = ips;
+      _selfIp = ips.isEmpty ? '' : ips.first;
       _selfHttpPort = _svc.httpPortActual;
       _selfWebShare = _svc.webShareEnabled;
     });
@@ -521,8 +641,10 @@ class _LanTransferScreenState extends State<LanTransferScreen> {
                     ),
                   ],
                 ),
-                Text('本机 IP：$_selfIp',
-                    style: TextStyle(fontSize: 12, color: Colors.grey.shade600)),
+                Text(
+                  _selfIps.isEmpty ? '本机 IP：获取中…' : '本机 IP：${_selfIps.join('、')}',
+                  style: TextStyle(fontSize: 12, color: Colors.grey.shade600),
+                ),
                 const SizedBox(height: 8),
                 Text(
                   '允许接收文件（托盘常驻）',
@@ -534,6 +656,9 @@ class _LanTransferScreenState extends State<LanTransferScreen> {
               ],
             ),
           ),
+          // Windows 防火墙未放行警示（热点/公用网络下默认拦所有入站，
+          // 对端会搜不到本机或发送超时）
+          if (_fwMissing) _buildFirewallCard(),
           const SizedBox(height: 16),
           // 分享直达：待发送内容卡
           if (_pendingText != null || _pendingFiles.isNotEmpty)
@@ -594,19 +719,24 @@ class _LanTransferScreenState extends State<LanTransferScreen> {
                       icon: const Icon(Icons.copy, size: 18),
                       tooltip: '复制地址',
                       onPressed: () {
+                        final urls = _webUrls;
                         Clipboard.setData(ClipboardData(
-                            text: 'http://$_selfIp:$_selfHttpPort'));
+                            text: urls.isEmpty
+                                ? 'http://$_selfIp:$_selfHttpPort'
+                                : urls.join('\n')));
                         ScaffoldMessenger.of(context).showSnackBar(
                             const SnackBar(content: Text('已复制网页快传地址')));
                       },
                     ),
                   ],
                 ),
-                Text('http://$_selfIp:$_selfHttpPort',
-                    style: const TextStyle(
-                        fontSize: 15,
-                        fontWeight: FontWeight.w600,
-                        color: Colors.teal)),
+                Text(
+                  _webUrls.isEmpty ? 'http://…' : _webUrls.join('\n'),
+                  style: const TextStyle(
+                      fontSize: 15,
+                      fontWeight: FontWeight.w600,
+                      color: Colors.teal),
+                ),
                 const SizedBox(height: 4),
                 Text(
                   _selfWebShare
