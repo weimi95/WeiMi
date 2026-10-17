@@ -967,7 +967,14 @@ class WeiMiVaultScreenState extends State<WeiMiVaultScreen> {
     if (item.isDirectory) {
       entries = [_ctxMenuItem('open', Icons.folder_open, '打开')];
     } else if (multi) {
+      final hasEnc = _selectedPaths.any((p0) =>
+          p0.toLowerCase().endsWith('.wemi') ||
+          p0.toLowerCase().endsWith('.kyl'));
       entries = [
+        _ctxMenuItem('encryptsel', Icons.lock_outline,
+            '加密所选 (${_selectedPaths.length})'),
+        if (hasEnc)
+          _ctxMenuItem('decryptsel', Icons.lock_open_outlined, '解密所选'),
         _ctxMenuItem('share', Icons.share_outlined, '分享所选 (${_selectedPaths.length})'),
         _ctxMenuItem('move', Icons.drive_file_move_outlined, '移动所选'),
         _ctxMenuItem('copy', Icons.copy_all_outlined, '复制所选'),
@@ -1015,6 +1022,17 @@ class WeiMiVaultScreenState extends State<WeiMiVaultScreen> {
         break;
       case 'decrypt':
         await _decryptWithDialog(item);
+        break;
+      case 'encryptsel':
+        // 逐个走单文件加密流程（每个文件确认密码，与手机端「更多」一致）
+        for (final f in _selectedPaths.toList()) {
+          if (!mounted) return;
+          await _encryptFile(f);
+        }
+        if (mounted) _clearSelection();
+        break;
+      case 'decryptsel':
+        await _decryptSelected();
         break;
       case 'copypath':
         await Clipboard.setData(ClipboardData(text: item.fullPath));
@@ -1114,9 +1132,83 @@ class WeiMiVaultScreenState extends State<WeiMiVaultScreen> {
     if (mounted) _clearSelection();
   }
 
+  /// 从路径构造 FileItem（批量解密补问时复用单文件流程）
+  Future<FileItem> _fileItemOf(String path) async {
+    int size = 0;
+    DateTime? modified;
+    try {
+      final st = await File(path).stat();
+      size = st.size;
+      modified = st.modified;
+    } catch (_) {}
+    return FileItem(
+      name: p.basename(path),
+      fullPath: path,
+      isDirectory: false,
+      size: size,
+      modified: modified,
+    );
+  }
+
+  /// 批量解密选中的加密文件（.wemi/.kyl）：问一次密码 + 选一次输出目录，
+  /// 逐个解；密码不一致的文件逐个补问（对齐保险箱「批量补密码」体验）
+  Future<void> _decryptSelected() async {
+    final targets = _selectedPaths
+        .where((p0) =>
+            p0.toLowerCase().endsWith('.wemi') ||
+            p0.toLowerCase().endsWith('.kyl'))
+        .toList();
+    if (targets.isEmpty) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(content: Text('选中的文件里没有加密文件（.wemi）')));
+      }
+      return;
+    }
+    if (targets.length == 1) {
+      await _decryptWithDialog(await _fileItemOf(targets.first));
+      if (mounted) _clearSelection();
+      return;
+    }
+    final hint = await EncryptionService.getPasswordHint(targets.first);
+    final password = await _showPasswordDialog(hint: hint);
+    if (password == null || !mounted) return;
+    final outputDir = await FileOperationsService.pickOutputDirectory();
+    if (outputDir == null || !mounted) return;
+
+    final failed = <String>[];
+    for (final f in targets) {
+      if (!mounted) return;
+      try {
+        await FileOperationsService.decryptFile(f, outputDir, password);
+      } catch (_) {
+        failed.add(f);
+      }
+    }
+    if (!mounted) return;
+    var msg = '解密完成：成功 ${targets.length - failed.length} 个';
+    if (failed.isNotEmpty) {
+      var recovered = 0;
+      for (final f in failed) {
+        if (!mounted) break;
+        try {
+          await _decryptWithDialog(await _fileItemOf(f));
+          recovered++;
+        } catch (_) {}
+      }
+      msg += '，密码不一致已逐个补问（成功 $recovered/${failed.length}）';
+    }
+    ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(msg)));
+    _clearSelection();
+  }
+
   Future<void> _moreSelected() async {
     final single = _selectedPaths.length == 1 ? _selectedPaths.first : null;
-    final action = await FileBatchOps.moreSheet(context, single: single != null);
+    final hasEncrypted = _selectedPaths.any((p0) =>
+        p0.toLowerCase().endsWith('.wemi') ||
+        p0.toLowerCase().endsWith('.kyl'));
+    final action = await FileBatchOps.moreSheet(context,
+        single: single != null, hasEncrypted: hasEncrypted);
     if (action == null || !mounted) return;
     switch (action) {
       case 'info':
@@ -1138,6 +1230,9 @@ class WeiMiVaultScreenState extends State<WeiMiVaultScreen> {
           }
         }
         if (mounted) _clearSelection();
+        break;
+      case 'decrypt':
+        await _decryptSelected();
         break;
       case 'systemopen':
         // 逐个调系统打开（多选时可能弹多个窗口，用户预期内）

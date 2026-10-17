@@ -5,7 +5,11 @@ import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:path/path.dart' as p;
 
+// file_operations_service 导出 FileType，与 file_picker 的 FileType 冲突
+// （本文件 _importWemi 用 file_picker 的 FileType.any），故 hide 掉前者
+import '../services/file_operations_service.dart' hide FileType;
 import '../services/file_viewer_service.dart';
+import '../services/history_service.dart';
 import '../services/vault_biometric.dart';
 import '../services/vault_service.dart';
 
@@ -1097,6 +1101,7 @@ class _VaultBrowserScreenState extends State<VaultBrowserScreen>
     setState(() => _busy = true);
     var okCount = 0;
     var failCount = 0;
+    final originals = <String>[]; // 加密进箱成功的原文件（用于删原文件询问）
     for (final path in paths) {
       try {
         final pw = await askPassword(path);
@@ -1104,6 +1109,7 @@ class _VaultBrowserScreenState extends State<VaultBrowserScreen>
         if (encryptPlain) {
           await VaultService.instance.encryptIntoVault(path,
               password: pw.isEmpty ? null : pw);
+          originals.add(path);
         } else {
           await VaultService.instance.importWemi(path, pw);
         }
@@ -1124,6 +1130,127 @@ class _VaultBrowserScreenState extends State<VaultBrowserScreen>
                 '${failCount > 0 ? '，失败 $failCount 个' : ''}')));
       }
       await _loadFiles();
+      // 加密新文件进箱后询问是否删除原文件（与主界面加密行为对齐；
+      // importWemi 是移动语义，导入时已自动删除，不再询问）
+      if (encryptPlain && originals.isNotEmpty) {
+        await _askDeleteOriginals(originals);
+      }
+    }
+  }
+
+  /// 加密完成后询问是否删除原文件：保留 / 移到回收站 / 永久删除，
+  /// 复用主界面的删除偏好（DeletePreferenceService）
+  Future<void> _askDeleteOriginals(List<String> originalPaths) async {
+    if (originalPaths.isEmpty || !mounted) return;
+
+    final savedPref = await DeletePreferenceService.getSavedPreference();
+    if (savedPref != null) {
+      await _executeDeleteOriginals(originalPaths, savedPref);
+      return;
+    }
+    if (!mounted) return;
+
+    DeleteAction? selectedAction;
+    bool rememberChoice = false;
+    final confirmed = await showDialog<bool>(
+      context: context,
+      barrierDismissible: false,
+      builder: (dialogContext) => StatefulBuilder(
+        builder: (ctx, setDialogState) => AlertDialog(
+          title: const Text('加密完成'),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              const Text('是否删除原始文件？文件已安全存入保险箱。'),
+              const SizedBox(height: 8),
+              Text(
+                '已加密文件数：${originalPaths.length}',
+                style: const TextStyle(fontSize: 12, color: Colors.grey),
+              ),
+              const SizedBox(height: 12),
+              Row(
+                children: [
+                  Checkbox(
+                    value: rememberChoice,
+                    onChanged: (v) {
+                      setDialogState(() => rememberChoice = v ?? false);
+                    },
+                  ),
+                  GestureDetector(
+                    onTap: () => setDialogState(
+                        () => rememberChoice = !rememberChoice),
+                    child: const Text('记住我的选择'),
+                  ),
+                ],
+              ),
+            ],
+          ),
+          actions: [
+            TextButton(
+              onPressed: () {
+                selectedAction = DeleteAction.keep;
+                Navigator.pop(dialogContext, true);
+              },
+              child: const Text('保留'),
+            ),
+            TextButton(
+              onPressed: () {
+                selectedAction = DeleteAction.recycleBin;
+                Navigator.pop(dialogContext, true);
+              },
+              child: const Text('移到回收站'),
+            ),
+            TextButton(
+              onPressed: () async {
+                final second = await showDialog<bool>(
+                  context: dialogContext,
+                  builder: (c2) => AlertDialog(
+                    title: const Text('永久删除警告'),
+                    content: const Text('永久删除的文件无法恢复，确定吗？'),
+                    actions: [
+                      TextButton(
+                          onPressed: () => Navigator.pop(c2, false),
+                          child: const Text('取消')),
+                      TextButton(
+                          onPressed: () => Navigator.pop(c2, true),
+                          child: const Text('确定',
+                              style: TextStyle(color: Colors.red))),
+                    ],
+                  ),
+                );
+                if (second == true) {
+                  selectedAction = DeleteAction.permanent;
+                  if (dialogContext.mounted) Navigator.pop(dialogContext, true);
+                }
+              },
+              child: const Text('永久删除',
+                  style: TextStyle(color: Colors.red)),
+            ),
+          ],
+        ),
+      ),
+    );
+
+    if (confirmed == true && selectedAction != null) {
+      await DeletePreferenceService.savePreference(
+          rememberChoice, selectedAction);
+      await _executeDeleteOriginals(originalPaths, selectedAction);
+    }
+  }
+
+  Future<void> _executeDeleteOriginals(
+      List<String> originalPaths, DeleteAction action) async {
+    if (action == DeleteAction.keep) return;
+    var deleted = 0;
+    for (final path in originalPaths) {
+      try {
+        if (await FileOperationsService.deleteOriginal(path)) deleted++;
+      } catch (_) {}
+    }
+    if (deleted > 0 && mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+          content: Text('已删除原文件：$deleted 个')));
     }
   }
 

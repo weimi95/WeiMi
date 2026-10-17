@@ -935,6 +935,12 @@ pub extern "C" fn encrypt_file_v3(
         } else {
             Some(std::slice::from_raw_parts(thumb_ptr, thumb_len))
         };
+        // 输出目录缺失/不可写 → -4，与 -2（加密失败）区分，避免误判
+        if let Some(parent) = std::path::Path::new(output_path).parent() {
+            if !parent.as_os_str().is_empty() && !parent.exists() {
+                return -4;
+            }
+        }
         let thumb_key = match read_key32(thumb_key_ptr) {
             Ok(k) => k,
             Err(_) => return -1,

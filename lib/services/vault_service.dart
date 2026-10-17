@@ -458,7 +458,20 @@ class VaultService {
           Uint8List.fromList(utf8.encode(password)),
           isMobile: _isMobile());
       return dest;
-    } on Exception {
+    } on Exception catch (e) {
+      // -4 = 临时目录不可用（非密码问题）：确保目录后重试一次，仍失败返回 null
+      final msg = e.toString();
+      if (msg.contains('-4')) {
+        try {
+          final d = await _tmpDir(); // 内含 create(recursive: true)
+          if (await d.exists()) {
+            RustCrypto.decryptFile(vaultFilePath, dest,
+                Uint8List.fromList(utf8.encode(password)),
+                isMobile: _isMobile());
+            return dest;
+          }
+        } catch (_) {}
+      }
       try {
         final f = File(dest);
         if (f.existsSync()) f.deleteSync();
@@ -479,11 +492,14 @@ class VaultService {
       RustCrypto.decryptFile(inputPath, outputPath,
           Uint8List.fromList(utf8.encode(pw)),
           isMobile: isMobile);
-    } on Exception catch (e) {
-      final msg = e.toString();
-      if (msg.contains('-2')) {
-        throw const VaultException('wrongPassword', '密码不正确或文件已损坏');
-      }
+  } on Exception catch (e) {
+    final msg = e.toString();
+    if (msg.contains('-4')) {
+      throw const VaultException('io', '解密失败：临时目录不可用（缓存被系统清理或存储空间不足），请重试');
+    }
+    if (msg.contains('-2')) {
+      throw const VaultException('wrongPassword', '密码不正确或文件已损坏');
+    }
       if (msg.contains('-1')) {
         throw const VaultException('ffi', '参数错误');
       }
@@ -507,7 +523,14 @@ class VaultService {
 
   Future<Directory> _tmpDir() async {
     final base = await getTemporaryDirectory();
-    return Directory(p.join(base.path, 'vault_tmp'));
+    final d = Directory(p.join(base.path, 'vault_tmp'));
+    // 必须确保存在：lock()/收托盘会递归删除本目录，之后若不重建，
+    // Rust File::create 会因父目录缺失失败并返回 -2，被误翻成「密码不正确」
+    // （症状：保险箱内打不开、提示密码错误，而同一文件在箱外能正常解密）。
+    if (!await d.exists()) {
+      await d.create(recursive: true);
+    }
+    return d;
   }
 
   // ==================== FFI 绑定（rust_crypto vault.rs）====================

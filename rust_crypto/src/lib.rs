@@ -249,6 +249,14 @@ pub extern "C" fn decrypt_file(
         };
         let password = slice::from_raw_parts(password_ptr, password_len);
 
+        // 输出目录缺失/不可写（缓存被系统清理、存储满）→ -4，与 -2（密码错/损坏）
+        // 区分：否则 File::create 失败会被上层误译成「密码不正确」
+        if let Some(parent) = std::path::Path::new(output_path).parent() {
+            if !parent.as_os_str().is_empty() && !parent.exists() {
+                return -4;
+            }
+        }
+
         match decrypt_file_internal(input_path, output_path, password, is_mobile, cpu_cores) {
             Ok(_) => 0,
             Err(_) => -2,

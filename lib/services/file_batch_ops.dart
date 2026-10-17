@@ -94,9 +94,10 @@ class FileBatchOps {
     if (ok > 0) await afterChange?.call();
   }
 
-  /// 「更多」菜单，返回所选项：info / rename / encrypt（单选时才有 info/rename）
+  /// 「更多」菜单，返回所选项：info / rename / encrypt / decrypt / systemopen
+  /// （单选时才有 info/rename；hasEncrypted=false 时隐藏解密）
   static Future<String?> moreSheet(BuildContext context,
-      {required bool single}) async {
+      {required bool single, bool hasEncrypted = false}) async {
     return showModalBottomSheet<String>(
       context: context,
       builder: (ctx) => SafeArea(
@@ -120,6 +121,12 @@ class FileBatchOps {
               title: const Text('加密'),
               onTap: () => Navigator.pop(ctx, 'encrypt'),
             ),
+            if (hasEncrypted)
+              ListTile(
+                leading: const Icon(Icons.lock_open_outlined),
+                title: Text(single ? '解密' : '解密所选'),
+                onTap: () => Navigator.pop(ctx, 'decrypt'),
+              ),
             ListTile(
               leading: const Icon(Icons.open_in_new),
               title: Text(single ? '用系统打开' : '用系统打开所选'),
