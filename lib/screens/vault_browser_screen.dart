@@ -1232,10 +1232,11 @@ class _VaultBrowserScreenState extends State<VaultBrowserScreen>
       ),
     );
 
-    if (confirmed == true && selectedAction != null) {
-      await DeletePreferenceService.savePreference(
-          rememberChoice, selectedAction);
-      await _executeDeleteOriginals(originalPaths, selectedAction);
+    // selectedAction 被对话框闭包赋值，Dart 不做类型提升——先取 final 副本
+    final action = selectedAction;
+    if (confirmed == true && action != null) {
+      await DeletePreferenceService.savePreference(rememberChoice, action);
+      await _executeDeleteOriginals(originalPaths, action);
     }
   }
 
