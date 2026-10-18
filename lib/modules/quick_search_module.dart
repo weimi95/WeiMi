@@ -155,11 +155,15 @@ Future<void> _openFile(BuildContext context, String path) async {
     }
     return;
   }
-  final ok = await SystemOpenService.open(path);
-  if (!ok && context.mounted) {
-    ScaffoldMessenger.of(context).showSnackBar(
-      const SnackBar(content: Text('没有找到能打开该文件的程序')),
-    );
+  final r = await SystemOpenService.open(path);
+  if (!r.ok && context.mounted) {
+    if (r.needUnknownSources) {
+      await SystemOpenService.handleFailure(context, path, r);
+    } else {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('没有找到能打开该文件的程序')),
+      );
+    }
   }
 }
 

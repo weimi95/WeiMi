@@ -54,8 +54,13 @@ class FileViewerService {
       }
       if (openTarget != null &&
           FileSystemEntity.typeSync(openTarget) != FileSystemEntityType.notFound) {
-        final ok = await SystemOpenService.open(openTarget);
-        if (ok) return;
+        final r = await SystemOpenService.open(openTarget);
+        if (r.ok) return;
+        // 失败按原因兜底（apk 未授权→引导；无应用→打开方式）
+        if (context.mounted) {
+          await SystemOpenService.handleFailure(context, openTarget, r);
+          return;
+        }
       }
       if (isEncrypted) {
         throw Exception('不支持查看该文件类型。您可以通过"解密文件"功能解密后,使用其他软件查看');

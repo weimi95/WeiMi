@@ -1,11 +1,13 @@
 import 'dart:io';
 
-import 'package:file_picker/file_picker.dart';
+import 'package:file_picker/file_picker.dart' as fp;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:path/path.dart' as p;
 
+import '../services/file_operations_service.dart';
 import '../services/file_viewer_service.dart';
+import '../services/system_open_service.dart';
 import '../services/transfer_history_service.dart';
 
 /// 传输记录页：飞传收发的文件/文本列表。
@@ -83,7 +85,7 @@ class _TransferHistoryScreenState extends State<TransferHistoryScreen> {
   }
 
   Future<void> _moveFiles() async {
-    final dir = await FilePicker.platform.getDirectoryPath(
+    final dir = await fp.FilePicker.platform.getDirectoryPath(
       dialogTitle: '移动到哪个目录？',
     );
     if (dir == null) return;
@@ -192,6 +194,15 @@ class _TransferHistoryScreenState extends State<TransferHistoryScreen> {
       return;
     }
     try {
+      // 未知类型（apk 安装包等）直接走系统打开，便于走「安装引导/打开方式」兜底
+      final type = FileOperationsService.getFileType(path);
+      if (type == FileType.unknown) {
+        final r = await SystemOpenService.open(path);
+        if (!r.ok && mounted) {
+          await SystemOpenService.handleFailure(context, path, r);
+        }
+        return;
+      }
       await FileViewerService.openFile(context, path);
     } catch (e) {
       _snack('打开失败：$e', Colors.red);

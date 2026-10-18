@@ -6,6 +6,7 @@ import 'package:file_picker/file_picker.dart' hide FileType;
 import 'package:path/path.dart' as p;
 import 'package:permission_handler/permission_handler.dart';
 
+import '../framework/setting_store.dart';
 import '../services/android_compat.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import '../models/file_item.dart';
@@ -342,6 +343,8 @@ class WeiMiVaultScreenState extends State<WeiMiVaultScreen> {
   @override
   void initState() {
     super.initState();
+    _sortMode = SettingStore.get<String>('weimi_file_sort_mode', 'name');
+    _sortAsc = SettingStore.get<bool>('weimi_file_sort_asc', true);
     // 浮窗「打开主界面 / 去主界面展示全部结果」带过来的搜索词：
     // 写入搜索框并立即触发全盘搜索（不要像新开窗口一样丢掉关键词）。
     final pending = WindowModeService.instance.takePendingQuery();
@@ -691,6 +694,178 @@ class WeiMiVaultScreenState extends State<WeiMiVaultScreen> {
     return p.basename(path);
   }
 
+  // ============ 面包屑路径栏（手机/桌面通用，点任意上级跳转） ============
+
+  /// 路径 → [(显示名, 真实路径)]。Android 内部存储首级显示「手机存储」；
+  /// Windows 首级为盘符；Linux/macOS 首级为根目录。
+  List<(String, String)> _breadcrumbParts(String path) {
+    if (path.isEmpty || path == kMyComputerPath) return const [];
+    final norm = path.replaceAll('\\', '/');
+    final segs = norm.split('/').where((s) => s.isNotEmpty).toList();
+    if (segs.isEmpty) return const [];
+    final parts = <(String, String)>[];
+    if (Platform.isAndroid && norm.startsWith('/storage/emulated/0')) {
+      parts.add(('手机存储', '/storage/emulated/0'));
+      var acc = '/storage/emulated/0';
+      for (final s in segs.skip(3)) {
+        acc = '$acc/$s';
+        parts.add((s, acc));
+      }
+      return parts;
+    }
+    var acc = '';
+    for (var i = 0; i < segs.length; i++) {
+      acc = i == 0
+          ? (Platform.isWindows ? segs[0] : '/${segs[0]}')
+          : '$acc/${segs[i]}';
+      parts.add((segs[i], acc));
+    }
+    return parts;
+  }
+
+  /// 面包屑行：横向滚动、每级可点（对齐手机文件管理器/资源管理器地址栏习惯）
+  Widget _buildBreadcrumb(String path) {
+    final parts = _breadcrumbParts(path);
+    if (parts.isEmpty) return const SizedBox.shrink();
+    return SingleChildScrollView(
+      scrollDirection: Axis.horizontal,
+      child: Row(
+        children: [
+          for (var i = 0; i < parts.length; i++) ...[
+            if (i > 0)
+              Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 2),
+                child: Icon(Icons.chevron_right,
+                    size: 13, color: Colors.grey.shade500),
+              ),
+            InkWell(
+              onTap: () => _navigateTo(parts[i].$2),
+              child: Text(
+                parts[i].$1,
+                style: TextStyle(
+                  fontSize: 11,
+                  color: i == parts.length - 1
+                      ? Theme.of(context).colorScheme.onSurface
+                      : Colors.blue.shade600,
+                ),
+              ),
+            ),
+          ],
+        ],
+      ),
+    );
+  }
+
+  // ============ 排序（浏览视图，文件夹优先，状态持久化） ============
+  String _sortMode = 'name'; // name / size / type / time
+  bool _sortAsc = true;
+
+  Future<void> _showSortSheet() async {
+    final r = await showModalBottomSheet<(String, bool)>(
+      context: context,
+      builder: (ctx) => SafeArea(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            _sortRadio(ctx, 'name', '名称'),
+            _sortRadio(ctx, 'size', '大小'),
+            _sortRadio(ctx, 'type', '类型'),
+            _sortRadio(ctx, 'time', '修改时间'),
+            const Divider(height: 1),
+            SwitchListTile(
+              dense: true,
+              title: Text(_sortAsc ? '升序' : '降序'),
+              secondary: Icon(
+                  _sortAsc ? Icons.arrow_upward : Icons.arrow_downward),
+              value: _sortAsc,
+              onChanged: (v) => Navigator.pop(ctx, (_sortMode, v)),
+            ),
+          ],
+        ),
+      ),
+    );
+    if (r == null || !mounted) return;
+    if (r.$1 == _sortMode && r.$2 == _sortAsc) return;
+    setState(() {
+      _sortMode = r.$1;
+      _sortAsc = r.$2;
+    });
+    await SettingStore.set('weimi_file_sort_mode', _sortMode);
+    await SettingStore.set('weimi_file_sort_asc', _sortAsc);
+  }
+
+  Widget _sortRadio(BuildContext ctx, String mode, String label) {
+    return RadioListTile<String>(
+      dense: true,
+      value: mode,
+      groupValue: _sortMode,
+      onChanged: (v) => Navigator.pop(ctx, (v ?? mode, _sortAsc)),
+      title: Text(label),
+    );
+  }
+
+  // ============ 桌面快捷键（F2 重命名 / F5 刷新；Ctrl+A、Delete 已有） ============
+
+  /// F2：重命名当前单选（资源管理器习惯）
+  void _renameFromKeyboard() {
+    if (!_isDesktop) return;
+    if (_selectedPaths.length != 1) return;
+    final path = _selectedPaths.first;
+    FileBatchOps.rename(context, path,
+        afterChange: () => _afterBatchChange([path]));
+  }
+
+  /// F5：刷新当前目录（根视图则 setState 重展开）
+  void _refreshFromKeyboard() {
+    if (!_isDesktop) return;
+    if (_currentPath.isEmpty) {
+      setState(() {});
+      return;
+    }
+    _navigateTo(_currentPath);
+  }
+
+  // ============ 状态栏（资源管理器底栏习惯） ============
+
+  /// 底部状态条：项目数 / 文件夹数 / 选中数 / 合计大小
+  Widget _buildStatusBar() {
+    final items = _browseItems;
+    final dirs = items.where((e) => e.isDirectory).length;
+    final files = items.length - dirs;
+    String text;
+    if (_selecting) {
+      int total = 0;
+      for (final s in _selectedPaths) {
+        try {
+          total += File(s).lengthSync();
+        } catch (_) {}
+      }
+      text = '共 ${items.length} 项 · 已选 ${_selectedPaths.length} 个 · '
+          '合计 ${_fmtBytes(total)}';
+    } else {
+      text = '共 ${items.length} 项 · $dirs 个文件夹 · $files 个文件';
+    }
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 5),
+      decoration: BoxDecoration(
+        color: Theme.of(context).cardColor,
+        border: Border(top: BorderSide(color: Colors.grey.shade300)),
+      ),
+      child: Text(text,
+          style: TextStyle(fontSize: 11, color: Colors.grey.shade600)),
+    );
+  }
+
+  String _fmtBytes(int b) {
+    if (b < 1024) return '$b B';
+    if (b < 1024 * 1024) return '${(b / 1024).toStringAsFixed(1)} KB';
+    if (b < 1024 * 1024 * 1024) {
+      return '${(b / 1024 / 1024).toStringAsFixed(1)} MB';
+    }
+    return '${(b / 1024 / 1024 / 1024).toStringAsFixed(2)} GB';
+  }
+
   /// 系统返回键处理：true = 已内部消化（回到上一级/清除选择），false = 在根视图，允许退出应用
   bool handleSystemBack() {    if (_selectedPaths.isNotEmpty) {
       _clearSelection();
@@ -728,11 +903,11 @@ class WeiMiVaultScreenState extends State<WeiMiVaultScreen> {
 
     final type = FileOperationsService.getFileType(item.fullPath);
     if (type == FileType.unknown) {
-      final ok = await SystemOpenService.open(item.fullPath);
-      if (!ok && mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('系统中没有能打开此文件的应用')),
-        );
+      // 内置查看器不支持的格式 → 系统打开；失败按原因兜底
+      // （apk 未授权「安装未知应用」→ 引导；无应用 → 打开方式）
+      final r = await SystemOpenService.open(item.fullPath);
+      if (!r.ok && mounted) {
+        await SystemOpenService.handleFailure(context, item.fullPath, r);
       }
       return;
     }
@@ -965,7 +1140,10 @@ class WeiMiVaultScreenState extends State<WeiMiVaultScreen> {
     final multi = !item.isDirectory && _selectedPaths.length > 1;
     final List<PopupMenuEntry<String>> entries;
     if (item.isDirectory) {
-      entries = [_ctxMenuItem('open', Icons.folder_open, '打开')];
+      entries = [
+        _ctxMenuItem('open', Icons.folder_open, '打开'),
+        _ctxMenuItem('rename', Icons.drive_file_rename_outline, '重命名'),
+      ];
     } else if (multi) {
       final hasEnc = _selectedPaths.any((p0) =>
           p0.toLowerCase().endsWith('.wemi') ||
@@ -987,6 +1165,7 @@ class WeiMiVaultScreenState extends State<WeiMiVaultScreen> {
           _ctxMenuItem('encrypt', Icons.lock_outline, '加密'),
         if (item.isEncryptedFile)
           _ctxMenuItem('decrypt', Icons.lock_open_outlined, '解密'),
+        _ctxMenuItem('rename', Icons.drive_file_rename_outline, '重命名'),
         _ctxMenuItem('view', Icons.visibility_outlined, '查看'),
         _ctxMenuItem('systemopen', Icons.open_in_new, '用系统打开'),
         _ctxMenuItem('openfolder', Icons.folder_open, '打开所在路径'),
@@ -1010,12 +1189,14 @@ class WeiMiVaultScreenState extends State<WeiMiVaultScreen> {
         await _viewFile(item);
         break;
       case 'systemopen':
-        final ok = await SystemOpenService.open(item.fullPath);
-        if (!ok && mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(
-            const SnackBar(content: Text('系统中没有能打开此文件的应用')),
-          );
+        final r = await SystemOpenService.open(item.fullPath);
+        if (!r.ok && mounted) {
+          await SystemOpenService.handleFailure(context, item.fullPath, r);
         }
+        break;
+      case 'rename':
+        await FileBatchOps.rename(context, item.fullPath,
+            afterChange: () => _afterBatchChange([item.fullPath]));
         break;
       case 'encrypt':
         _encryptFile(item.fullPath);
@@ -1235,9 +1416,14 @@ class WeiMiVaultScreenState extends State<WeiMiVaultScreen> {
         await _decryptSelected();
         break;
       case 'systemopen':
-        // 逐个调系统打开（多选时可能弹多个窗口，用户预期内）
+        // 逐个调系统打开（多选时可能弹多个窗口，用户预期内）；
+        // 失败只兜底第一个，避免弹窗叠弹窗
         for (final f in _selectedPaths.toList()) {
-          await SystemOpenService.open(f);
+          final r = await SystemOpenService.open(f);
+          if (!r.ok && mounted) {
+            await SystemOpenService.handleFailure(context, f, r);
+            break;
+          }
         }
         if (mounted) _clearSelection();
         break;
@@ -1365,18 +1551,7 @@ class WeiMiVaultScreenState extends State<WeiMiVaultScreen> {
                       Text(_titleFor(_currentPath, isRoot),
                           style: const TextStyle(fontSize: 16)),
                       if (_currentPath != kMyComputerPath)
-                        Text(
-                          _currentPath,
-                          style: TextStyle(
-                            fontSize: 11,
-                            color: Theme.of(context)
-                                .colorScheme
-                                .onSurface
-                                .withValues(alpha: 0.55),
-                          ),
-                          maxLines: 1,
-                          overflow: TextOverflow.ellipsis,
-                        ),
+                        _buildBreadcrumb(_currentPath),
                     ],
                   ),
                   leading: _historyIndex > 0
@@ -1389,6 +1564,11 @@ class WeiMiVaultScreenState extends State<WeiMiVaultScreen> {
                       IconButton(
                           icon: const Icon(Icons.arrow_forward),
                           onPressed: _goForward),
+                    IconButton(
+                      icon: const Icon(Icons.sort),
+                      tooltip: '排序',
+                      onPressed: _showSortSheet,
+                    ),
                   ],
                 )),
       body: _loading
@@ -1402,6 +1582,10 @@ class WeiMiVaultScreenState extends State<WeiMiVaultScreen> {
                             _selectAllVisibleFiles,
                         const SingleActivator(LogicalKeyboardKey.delete):
                             _deleteSelectedFromKeyboard,
+                        const SingleActivator(LogicalKeyboardKey.f2):
+                            _renameFromKeyboard,
+                        const SingleActivator(LogicalKeyboardKey.f5):
+                            _refreshFromKeyboard,
                       }
                     : const {},
                 child: Column(
@@ -1422,6 +1606,8 @@ class WeiMiVaultScreenState extends State<WeiMiVaultScreen> {
                                   ? _emptyState
                                   : _buildFileList())),
                     ),
+                    // 状态栏（资源管理器底栏习惯；根视图无路径概念不显示）
+                    if (_globalResults != null || !isRoot) _buildStatusBar(),
                   ],
                 ),
               ),
@@ -1990,23 +2176,49 @@ class WeiMiVaultScreenState extends State<WeiMiVaultScreen> {
     ),
   );
 
-  /// 浏览视图条目：桌面端全盘模式下展示全盘结果，否则本地过滤当前目录
+  /// 浏览视图条目：桌面端全盘模式下展示全盘结果，否则本地过滤当前目录。
+  /// 统一走 _sortItems 排序（文件夹优先 + 用户排序偏好）。
   List<FileItem> get _browseItems {
+    List<FileItem> raw;
     if (_globalResults != null) {
-      return _filterCat == null
+      raw = _filterCat == null
           ? _globalResults!
           : _globalResults!.where(_matchFilter).toList();
+    } else if (_fileQuery.isEmpty) {
+      raw = _filterCat == null ? _items : _items.where(_matchFilter).toList();
+    } else {
+      final q = _fileQuery.toLowerCase();
+      raw = _items
+          .where((it) => it.name.toLowerCase().contains(q))
+          .where(_matchFilter)
+          .toList();
     }
-    if (_fileQuery.isEmpty) {
-      return _filterCat == null
-          ? _items
-          : _items.where(_matchFilter).toList();
-    }
-    final q = _fileQuery.toLowerCase();
-    return _items
-        .where((it) => it.name.toLowerCase().contains(q))
-        .where(_matchFilter)
-        .toList();
+    return _sortItems(raw);
+  }
+
+  /// 文件夹优先，再按 _sortMode/_sortAsc（与常见文件管理器一致）
+  List<FileItem> _sortItems(List<FileItem> src) {
+    final sorted = [...src];
+    sorted.sort((a, b) {
+      if (a.isDirectory != b.isDirectory) return a.isDirectory ? -1 : 1;
+      int c;
+      switch (_sortMode) {
+        case 'size':
+          c = a.size.compareTo(b.size);
+          break;
+        case 'time':
+          c = (a.modified ?? DateTime(0))
+              .compareTo(b.modified ?? DateTime(0));
+          break;
+        case 'type':
+          c = a.ext.compareTo(b.ext);
+          break;
+        default:
+          c = a.name.toLowerCase().compareTo(b.name.toLowerCase());
+      }
+      return _sortAsc ? c : -c;
+    });
+    return sorted;
   }
 
   Widget _buildFileList() {

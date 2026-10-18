@@ -1,10 +1,12 @@
 package com.weimi95.weimi_file
 
+import android.content.ActivityNotFoundException
 import android.content.Context
 import android.content.Intent
 import android.database.Cursor
 import android.net.Uri
 import android.provider.OpenableColumns
+import android.provider.Settings
 import android.os.Build
 import android.util.Base64
 import androidx.biometric.BiometricManager
@@ -59,7 +61,15 @@ class MainActivity : FlutterFragmentActivity() {
                 }
                 "openWithSystem" -> {
                     val path = call.argument<String>("path")
-                    result.success(if (path != null) openWithSystem(path) else false)
+                    result.success(if (path != null) openWithSystem(path) else mapOf(
+                        "ok" to false, "noApp" to false, "needUnknownSources" to false))
+                }
+                "openWithChooser" -> {
+                    val path = call.argument<String>("path")
+                    result.success(if (path != null) openWithChooser(path) else false)
+                }
+                "openInstallSettings" -> {
+                    result.success(openInstallSettings())
                 }
                 else -> {
                     result.notImplemented()
@@ -418,7 +428,42 @@ class MainActivity : FlutterFragmentActivity() {
 
     /// 用系统默认 App 打开文件（内置查看器不支持的格式兜底，如 apk / heic）。
     /// FileProvider content:// URI + ACTION_VIEW，系统按 MIME/扩展名选 App。
-    private fun openWithSystem(path: String): Boolean {
+    ///
+    /// 返回结构化结果（Dart 侧按类型走兜底）：
+    /// - ok=true：已成功调起
+    /// - needUnknownSources=true：apk 但用户未授权「安装未知应用」（Android 8+），
+    ///   此时直接 startActivity 会被系统静默拦掉，交给 Dart 弹引导
+    /// - noApp=true：没有任何 App 能处理该 MIME（ActivityNotFoundException）
+    private fun openWithSystem(path: String): Map<String, Any> {
+        val fail = mapOf("ok" to false, "noApp" to false, "needUnknownSources" to false)
+        return try {
+            val f = File(path)
+            if (!f.exists()) return fail
+            // apk 安装：Android 8+（targetSdk>=26）需用户授权「安装未知应用」，
+            // 未授权时 intent 会被系统静默拦截（表现为「点了没反应」）
+            val isApk = f.extension.lowercase() == "apk"
+            if (isApk && Build.VERSION.SDK_INT >= 26 && !packageManager.canRequestPackageInstalls()) {
+                return mapOf("ok" to false, "noApp" to false, "needUnknownSources" to true)
+            }
+            val uri = androidx.core.content.FileProvider.getUriForFile(
+                this, "$packageName.fileprovider", f
+            )
+            val intent = Intent(Intent.ACTION_VIEW).apply {
+                setDataAndType(uri, getMimeType(path))
+                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            }
+            startActivity(intent)
+            mapOf("ok" to true, "noApp" to false, "needUnknownSources" to false)
+        } catch (e: ActivityNotFoundException) {
+            mapOf("ok" to false, "noApp" to true, "needUnknownSources" to false)
+        } catch (e: Exception) {
+            fail
+        }
+    }
+
+    /// 「打开方式」选择器（系统 chooser），供打不开时兜底
+    private fun openWithChooser(path: String): Boolean {
         return try {
             val f = File(path)
             if (!f.exists()) return false
@@ -430,6 +475,22 @@ class MainActivity : FlutterFragmentActivity() {
                 addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
                 addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
             }
+            startActivity(Intent.createChooser(intent, "打开方式"))
+            true
+        } catch (e: Exception) {
+            false
+        }
+    }
+
+    /// 跳系统「安装未知应用」授权页（Android 8+；低版本跳安全设置）
+    private fun openInstallSettings(): Boolean {
+        return try {
+            val intent = if (Build.VERSION.SDK_INT >= 26) {
+                Intent(Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES, Uri.parse("package:$packageName"))
+            } else {
+                Intent(Settings.ACTION_SECURITY_SETTINGS)
+            }
+            intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
             startActivity(intent)
             true
         } catch (e: Exception) {
@@ -439,8 +500,14 @@ class MainActivity : FlutterFragmentActivity() {
 
     private fun getMimeType(path: String): String {
         val ext = path.substringAfterLast('.', "").lowercase()
-        return android.webkit.MimeTypeMap.getSingleton()
-            .getMimeTypeFromExtension(ext) ?: "*/*"
+        return when (ext) {
+            // MimeTypeMap 的硬编码表里没有 apk（Android 平台已知缺陷），必须特判，
+            // 否则 intent 发出 */*，系统安装器压根不匹配 → 「点了没反应」
+            "apk" -> "application/vnd.android.package-archive"
+            "apks", "apkm", "xapk" -> "application/vnd.android.package-archive"
+            else -> android.webkit.MimeTypeMap.getSingleton()
+                .getMimeTypeFromExtension(ext) ?: "*/*"
+        }
     }
 
     /// 通过系统分享菜单把本地文件分享出去（FileProvider content:// URI）
