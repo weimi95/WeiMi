@@ -208,7 +208,12 @@ class _LanTransferScreenState extends State<LanTransferScreen> {
     final ips = await _svc.localIPv4s();
     if (!mounted) return;
     setState(() {
-      _peers = _svc.peers;
+      // 服务层已按 IP 归一（微密项优先、LocalSend 只挂链路）；
+      // 这里再按协议排序兜底：微密设备永远排在 LocalSend 设备前面。
+      _peers = [..._svc.peers]..sort((a, b) {
+        if (a.isLocalSend != b.isLocalSend) return a.isLocalSend ? 1 : -1;
+        return 0;
+      });
       _webPeers = _svc.webPeers;
       _selfName = _svc.selfName.isEmpty ? '本机' : _svc.selfName;
       _selfIps = ips;

@@ -418,7 +418,7 @@ class LanTransferService {
   }
 
   /// 登记/刷新设备。同一物理设备可能同时跑着微密+LocalSend 两个 App，
-  /// 按 IP 合并成一条：后到的一方把链路信息挂到先到的一方上，不新增条目。
+  /// 按 IP 合并成一条：微密项优先，LocalSend 链路挂上来，旧 LS 条目移除。
   void addOrUpdatePeer(LanPeer peer) {
     // ① 自研协议设备到达：若已有同 IP 的 LocalSend 条目（对方先被组播发现），
     // 把它的 LocalSend 链路继承过来，然后移除旧条目——合并为一条 weimi 记录。
@@ -431,6 +431,8 @@ class LanTransferService {
       }
     }
     _peers[peer.id] = peer;
+    // ② 兜底归一化：同 IP 微密+LS 并存（任何时序竞态残留）一律合并
+    _normalizeByIp();
     _events.add(LanEvent(LanEventType.peersChanged));
     _pruneTimer ??=
         Timer.periodic(const Duration(seconds: 5), (_) => _prunePeers());
@@ -444,10 +446,16 @@ class LanTransferService {
   }
 
   /// LocalSend 兼容层登记设备用：按 IP 合并。
-  /// - 同 IP 已有微密设备 → 只把 LocalSend 链路信息挂上去，不新增条目
-  ///   （这正是「同机装了两个 App 只显示一个设备」的关键路径）；
-  /// - 同 IP 已有 LocalSend 条目 → 刷新；
-  /// - 都没有 → 新增 LocalSend 设备（对端只装了真 LocalSend App 的场景）。
+  /// 铁律：**微密项永远优先**——同一 IP 只要存在微密条目，LocalSend 就
+  /// 只以链路（lsPort/lsHttps）形式挂在它上面，绝不新增独立条目。
+  /// - 同 IP 已有微密设备 → 只挂/更新 LocalSend 链路并续命（无论该微密条目
+  ///   此前是否已挂过链路——已挂过就只刷新，不能再穿帮新增条目，
+  ///   这正是 v1.0.70 修复的「双条」bug：LS announce 约 2s 一次，
+  ///   只匹配「无链路 weimi」会让每条 announce 都新建一条纯 LS 条目）；
+  /// - 同 IP 已有 LocalSend 条目 → 刷新（对端只装真 LocalSend App 的场景）；
+  /// - 都没有 → 新增 LocalSend 设备。
+  /// 另外：微密条目被 LS announce 刷新 lastSeen = 跨协议续命，
+  /// 手机微密侧 announce 因省电延迟时合并条目也不会被 prune 掉。
   void attachLocalSendLink({
     required String ip,
     required int port,
@@ -455,11 +463,12 @@ class LanTransferService {
     String? name,
     String? fingerprint,
   }) {
-    final weimi = _findPeer(
-        (p) => p.protocol == 'weimi' && p.ip == ip && !p.hasLocalSendLink);
+    final weimi = _findPeer((p) => p.protocol == 'weimi' && p.ip == ip);
     if (weimi != null) {
-      final merged = weimi.copyWith(lsPort: port, lsHttps: https);
-      // 保持 lastSeen 新鲜，防止被 _prunePeers 清掉
+      var merged = weimi;
+      if (!weimi.hasLocalSendLink || weimi.lsPort != port) {
+        merged = weimi.copyWith(lsPort: port, lsHttps: https);
+      }
       merged.lastSeen = DateTime.now();
       _peers[weimi.id] = merged;
       _events.add(LanEvent(LanEventType.peersChanged));
@@ -482,6 +491,29 @@ class LanTransferService {
       protocol: 'localsend',
       https: https,
     ));
+  }
+
+  /// 兜底归一化：同一 IP 不允许微密条目与 LocalSend 条目并存——
+  /// 微密项优先保留，LocalSend 链路挂上去，纯 LS 条目移除；
+  /// lastSeen 取两者较新（防把刚被 LS 续过命的微密项变旧遭 prune）。
+  /// 正常路径（attachLocalSendLink / addOrUpdatePeer）已保证不产生重复，
+  /// 这里防御时序竞态与历史脏数据，在 peers 变更入口统一调用。
+  void _normalizeByIp() {
+    if (_peers.length < 2) return;
+    var changed = false;
+    for (final w in _peers.values.where((p) => p.protocol == 'weimi').toList()) {
+      final ls = _findPeer((p) => p.protocol == 'localsend' && p.ip == w.ip);
+      if (ls == null) continue;
+      _peers.remove(ls.id);
+      var merged = w;
+      if (!w.hasLocalSendLink || w.lsPort != ls.httpPort) {
+        merged = w.copyWith(lsPort: ls.httpPort, lsHttps: ls.https);
+      }
+      if (ls.lastSeen.isAfter(merged.lastSeen)) merged.lastSeen = ls.lastSeen;
+      _peers[w.id] = merged;
+      changed = true;
+    }
+    if (changed) _events.add(LanEvent(LanEventType.peersChanged));
   }
 
   void _prunePeers() {
