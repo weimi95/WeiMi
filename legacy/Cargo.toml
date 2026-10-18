@@ -1,0 +1,17 @@
+[package]
+name = "weimi_legacy"
+version = "0.1.0"
+edition = "2021"
+description = "WeiMi File Classic - lightweight client for Windows 7 / XP"
+
+[[bin]]
+name = "weimi_legacy"
+path = "src/main.rs"
+
+[dependencies]
+rust_crypto = { path = "../rust_crypto" }
+
+[profile.release]
+opt-level = 3
+lto = true
+strip = true
