@@ -60,6 +60,39 @@ class TrayService {
   /// 桌面端初始化：窗口管理 + 托盘 + 启动常驻飞传（仅调用一次）。
   /// [startHidden] = 守护进程冷启浮窗深链（--page=popup）：窗口创建即隐藏，
   /// 由 showPopup 等首帧渲染后统一 show，避免空白主窗口先上屏。
+  /// 冷启浮窗会话（--page=popup，守护进程代听双击 Ctrl 拉起）专用初始化：
+  /// 只创建隐藏窗口 + 标记守护会话，不起飞传/托盘/索引/目录监视。
+  /// 目标：双击 Ctrl → 浮窗上屏进 200ms 内（v1.0.69 秒开）。
+  Future<void> initPopupSession() async {
+    if (_initialized) return;
+    _initialized = true;
+
+    // 缩略图缓存字节限额 64MB（默认只限张数不限字节，宫格/瀑布流狂滚会吃上百 MB）
+    try {
+      PaintingBinding.instance.imageCache.maximumSizeBytes = 64 << 20;
+    } catch (_) {}
+
+    await windowManager.ensureInitialized();
+    const opts = WindowOptions(
+      size: Size(1100, 800),
+      minimumSize: Size(700, 500),
+      title: '微密文件',
+    );
+    await windowManager.waitUntilReadyToShow(opts, () async {
+      // 不 show：等浮窗内容渲染完由 showPopup() 统一上屏（防闪空白）
+      await windowManager.hide();
+      await windowManager.setPreventClose(true);
+    });
+    windowManager.addListener(_WindowListener());
+
+    // 本会话由守护进程拉起、它仍在跑：只标记 daemon 模式，
+    // 不做 ensureRunning/TCP 握手（省一次连接+配置推送）；
+    // 浮窗收起时 handOffToDaemon 推 uiActive=false 再退出即可。
+    if (await DaemonService.enabled()) {
+      _daemonMode = true;
+    }
+  }
+
   Future<void> initDesktop({bool startHidden = false}) async {
     if (_initialized) return;
     _initialized = true;

@@ -56,80 +56,101 @@ void main(List<String> args) async {
   // 窗口要不要 show——冷启浮窗若先 show 再 hide，就会闪一下空白大窗。
   final deepPopupStart = args.contains('--page=popup');
 
-  // Initialize localization service before running the app
-  await LocalizationService.getInstance();
-
-  // 加载全局视图偏好（列表/宫格/瀑布流）
-  await ViewPrefsService.instance.load();
-
-  // 桌面端：加载关闭按钮行为设置（收托盘/退出/询问）
-  await TrayService.instance.loadPrefs();
-
-  // 统一设置层 + 功能模块注册表（设置中心/文件动作的单一数据源）
-  await SettingStore.init();
-  bootstrapModules();
-
-  // 局域网接收文件的兜底目录（用户未设置加密目录时用）
-  try {
-    final docs = await getApplicationDocumentsDirectory();
-    LanTransferService.instance.fallbackDir = docs.path;
-  } catch (_) {}
-
-  // 启动时自动开启微密飞传接收（仅 Android，默认开；桌面端由 initDesktop 常驻启动）
-  if (Platform.isAndroid) {
-    try {
-      final prefs = await SharedPreferences.getInstance();
-      if (prefs.getBool('lan_autostart') ?? true) {
-        LanTransferService.instance.applyDiscoverSetting();
+  if (deepPopupStart) {
+    // ===== 冷启浮窗极简路径（秒开，v1.0.69）=====
+    // 守护进程代听双击 Ctrl 拉起的临时会话：只做浮窗必需的初始化，
+    // 注册表/飞传/托盘/索引/目录监视/通知全部跳过——那些属于常驻会话，
+    // 不属于一次性弹窗。此前这些串行 await 是双击到上屏 ~0.5s 的主因。
+    await Future.wait([
+      LocalizationService.getInstance(),
+      SettingStore.init(),
+    ]);
+    bootstrapModules();
+    if (!Platform.isAndroid && !Platform.isIOS) {
+      try {
+        // 只建隐藏窗口 + 标记守护会话，不起飞传/托盘/索引
+        await TrayService.instance.initPopupSession();
+      } catch (e) {
+        debugPrint('popup session init failed: $e');
       }
-    } catch (_) {}
-    // Android 全局接收确认：未信任设备发来弹窗（带超时倒计时）。
-    // 桌面端在 initDesktop 挂同款；App 在后台时对话框等回到前台再渲染，
-    // 超时由 _decideAccept 的 timeout 兜底自动拒收。
-    LanTransferService.instance.confirmHandler = (req) async {
-      final ctx = ShareReceiveService.navigatorKey.currentContext;
-      if (ctx == null) return false;
-      return showIncomingConfirmDialog(
-        ctx,
-        senderName: req.senderName,
-        content: req.fileName,
-        sizeBytes: req.fileSize,
-        isText: req.fileName == '一条文本消息',
-        countdownSec: LanTransferService.confirmTimeoutSecs(),
-      );
-    };
-  }
-
-  // 系统分享接收（Android SEND/SEND_MULTIPLE → 飞传页）
-  await ShareReceiveService.instance.init();
-
-  // 接收完成通知（PC 系统通知 / 安卓应用内横幅）
-  await ReceiveNotifyService.instance.init();
-
-  if (Platform.isWindows) {
-    await FileAssociationService.registerFileAssociation();
-  }
-
-  // 桌面端：单进程常驻托盘，主程序自身跑飞传 + 托盘（见 tray_service.dart）
-  if (!Platform.isAndroid && !Platform.isIOS) {
-    try {
-      await TrayService.instance
-          .initDesktop(startHidden: deepPopupStart);
-    } catch (e) {
-      debugPrint('desktop init failed: $e');
     }
-    // 全局「双击 Ctrl」呼出快捷搜索浮窗（仅 Windows：GetAsyncKeyState 轮询）
-    if (Platform.isWindows) {
-      HotkeyService.instance.onDoubleCtrl = () =>
-          unawaited(WindowModeService.instance.togglePopup());
-      QuickSearchActions.onEnabledChanged = (enabled) {
-        if (enabled) {
-          HotkeyService.instance.start();
-        } else {
-          HotkeyService.instance.stop();
+  } else {
+    // ===== 常驻会话完整初始化 =====
+    // Initialize localization service before running the app
+    await LocalizationService.getInstance();
+
+    // 加载全局视图偏好（列表/宫格/瀑布流）
+    await ViewPrefsService.instance.load();
+
+    // 桌面端：加载关闭按钮行为设置（收托盘/退出/询问）
+    await TrayService.instance.loadPrefs();
+
+    // 统一设置层 + 功能模块注册表（设置中心/文件动作的单一数据源）
+    await SettingStore.init();
+    bootstrapModules();
+
+    // 局域网接收文件的兜底目录（用户未设置加密目录时用）
+    try {
+      final docs = await getApplicationDocumentsDirectory();
+      LanTransferService.instance.fallbackDir = docs.path;
+    } catch (_) {}
+
+    // 启动时自动开启微密飞传接收（仅 Android，默认开；桌面端由 initDesktop 常驻启动）
+    if (Platform.isAndroid) {
+      try {
+        final prefs = await SharedPreferences.getInstance();
+        if (prefs.getBool('lan_autostart') ?? true) {
+          LanTransferService.instance.applyDiscoverSetting();
         }
+      } catch (_) {}
+      // Android 全局接收确认：未信任设备发来弹窗（带超时倒计时）。
+      // 桌面端在 initDesktop 挂同款；App 在后台时对话框等回到前台再渲染，
+      // 超时由 _decideAccept 的 timeout 兜底自动拒收。
+      LanTransferService.instance.confirmHandler = (req) async {
+        final ctx = ShareReceiveService.navigatorKey.currentContext;
+        if (ctx == null) return false;
+        return showIncomingConfirmDialog(
+          ctx,
+          senderName: req.senderName,
+          content: req.fileName,
+          sizeBytes: req.fileSize,
+          isText: req.fileName == '一条文本消息',
+          countdownSec: LanTransferService.confirmTimeoutSecs(),
+        );
       };
-      HotkeyService.instance.start();
+    }
+
+    // 系统分享接收（Android SEND/SEND_MULTIPLE → 飞传页）
+    await ShareReceiveService.instance.init();
+
+    // 接收完成通知（PC 系统通知 / 安卓应用内横幅）
+    await ReceiveNotifyService.instance.init();
+
+    if (Platform.isWindows) {
+      await FileAssociationService.registerFileAssociation();
+    }
+
+    // 桌面端：单进程常驻托盘，主程序自身跑飞传 + 托盘（见 tray_service.dart）
+    if (!Platform.isAndroid && !Platform.isIOS) {
+      try {
+        await TrayService.instance
+            .initDesktop(startHidden: false);
+      } catch (e) {
+        debugPrint('desktop init failed: $e');
+      }
+      // 全局「双击 Ctrl」呼出快捷搜索浮窗（仅 Windows：GetAsyncKeyState 轮询）
+      if (Platform.isWindows) {
+        HotkeyService.instance.onDoubleCtrl = () =>
+            unawaited(WindowModeService.instance.togglePopup());
+        QuickSearchActions.onEnabledChanged = (enabled) {
+          if (enabled) {
+            HotkeyService.instance.start();
+          } else {
+            HotkeyService.instance.stop();
+          }
+        };
+        HotkeyService.instance.start();
+      }
     }
   }
 

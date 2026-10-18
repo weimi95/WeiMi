@@ -44,6 +44,8 @@ class WindowModeService {
   Offset? _savedPosition;
   bool _switching = false;
   bool _popupExpanded = false;
+  /// 浮窗几何（尺寸+居中）是否已就位：呼出时未变则跳过 IPC 下发。
+  bool _popupGeomReady = false;
 
   bool get isPopup => popupMode.value;
 
@@ -64,6 +66,10 @@ class WindowModeService {
 
   /// 呼出浮窗：先在隐藏态完成「切内容 + 改尺寸」（resize 会清空缓冲，
   /// 必须发生在 show 之前），等浮窗渲染出一帧后再上屏——不闪空白。
+  ///
+  /// v1.0.69 秒开优化：几何（尺寸+居中）只在首次或状态变化时下发，
+  /// 后续呼出窗口位置尺寸未变，跳过 setSize/center 的方法通道 IPC
+  /// （每次 IPC 数毫秒，重复 setSize 即使同尺寸也触发窗口重排）。
   Future<void> showPopup() async {
     _popupExpanded = true;
     try {
@@ -71,9 +77,12 @@ class WindowModeService {
         _savedSize = await windowManager.getSize();
         _savedPosition = await windowManager.getPosition();
       }
-      // 不置顶：与普通窗口一致（前台时在上，弹系统文件对话框等不被挡）。
-      await windowManager.setSize(popupExpandedSize);
-      await windowManager.center();
+      if (!_popupGeomReady) {
+        // 不置顶：与普通窗口一致（前台时在上，弹系统文件对话框等不被挡）。
+        await windowManager.setSize(popupExpandedSize);
+        await windowManager.center();
+        _popupGeomReady = true;
+      }
     } catch (e) {
       debugPrint('popup resize failed: $e');
     }
@@ -136,6 +145,8 @@ class WindowModeService {
 
   /// 恢复正常主窗口：几何还原 + 取消置顶。
   Future<void> _restoreNormal() async {
+    // 回主界面后几何被还原，下次呼出浮窗需重新下发
+    _popupGeomReady = false;
     try {
       await windowManager.setAlwaysOnTop(false);
       if (_savedSize != null) {
