@@ -308,9 +308,10 @@ footer a:hover { color: var(--accent3); }
     <nav class="hero-links">
       <a class="btn" href="https://pan.quark.cn/s/ba97115eccfc" target="_blank" rel="noopener">下载最新版</a>
       <a class="btn ghost" href="#features">看看功能</a>
+      <a class="btn ghost" href="changelog.html">更新日志</a>
     </nav>
     <div class="badges">
-      <span class="badge hl">v1.0.19</span>
+      <span class="badge hl">v1.0.69</span>
       <span class="badge">AES-256-GCM</span>
       <span class="badge">Windows · macOS · Linux · Android</span>
       <span class="badge">Apache 2.0 开源</span>
@@ -351,11 +352,38 @@ footer a:hover { color: var(--accent3); }
 
         <article class="card reveal">
           <div class="card-head">
+            <span class="icon">🗝️</span>
+            <h3>保险箱 <span class="en">Vault</span></h3>
+          </div>
+          <p class="desc">给重要文件再上一道锁：主密码 + 指纹解锁（Android/macOS），每个文件可设独立密码，箱内直接看、导出即解密。密码忘了有主密码兜底与批量补录。</p>
+          <div class="tags"><span>主密码</span><span>指纹解锁</span><span>独立文件密码</span></div>
+        </article>
+
+        <article class="card reveal">
+          <div class="card-head">
+            <span class="icon">📡</span>
+            <h3>微密飞传 <span class="en">LAN 互传</span></h3>
+          </div>
+          <p class="desc">同一 WiFi 下设备间直传文件/文本，不走服务器、不耗流量；支持文件夹整体发送，还能与开源的 LocalSend App 互收互发。电脑端双击 Ctrl 秒呼搜索浮窗。</p>
+          <div class="tags"><span>局域网直传</span><span>文件夹发送</span><span>LocalSend 互通</span><span>网页版</span></div>
+        </article>
+
+        <article class="card reveal">
+          <div class="card-head">
+            <span class="icon">⌨️</span>
+            <h3>快捷搜索浮窗 <span class="en">双击 Ctrl</span></h3>
+          </div>
+          <p class="desc">任意界面双击 Ctrl 呼出，全盘文件秒搜（索引压缩落盘、启动自检），一屏 9 条 Ctrl+1..9 直达；常驻区放常用软件和网址。</p>
+          <div class="tags"><span>全盘搜索</span><span>双击 Ctrl</span><span>快捷启动</span></div>
+        </article>
+
+        <article class="card reveal">
+          <div class="card-head">
             <span class="icon">🗂️</span>
             <h3>文件管理器</h3>
           </div>
           <p class="desc">常用目录（下载 / 文档 / 图片 / 相册 / 音乐 / 视频）折叠展开随手浏览，也支持添加自己的常用目录，加密选文件不用来回翻。</p>
-          <div class="tags"><span>常用目录</span><span>自定义目录</span></div>
+          <div class="tags"><span>常用目录</span><span>自定义目录</span><span>缩略图档位</span></div>
         </article>
 
         <article class="card reveal">
@@ -365,6 +393,15 @@ footer a:hover { color: var(--accent3); }
           </div>
           <p class="desc">Windows / macOS / Linux / Android 四端齐发，一套加密格式走天下；桌面端还支持文件拖拽直接加密。</p>
           <div class="tags"><span>Windows</span><span>macOS</span><span>Linux</span><span>Android</span></div>
+        </article>
+
+        <article class="card reveal">
+          <div class="card-head">
+            <span class="icon">🛡️</span>
+            <h3>省心细节</h3>
+          </div>
+          <p class="desc">关窗收后台只留约 10MB 守护进程继续跑飞传；热点网络防火墙一键放行；接收完成系统通知点击直达；加解密历史随时回看。</p>
+          <div class="tags"><span>后台省内存</span><span>防火墙助手</span><span>通知深链</span></div>
         </article>
 
         <article class="card reveal">
@@ -423,6 +460,7 @@ footer a:hover { color: var(--accent3); }
   <footer>
     <p>© <span id="year"></span> 微密文件 WeiMi</p>
     <p class="foot-links">
+      <a href="changelog.html">更新日志</a> ·
       <a href="https://weimi95.github.io/" target="_blank" rel="noopener">阿伟小站</a> ·
       <a href="https://weimi95.github.io/weitu/" target="_blank" rel="noopener">微图相册管家</a> ·
       <a href="https://weimi95.github.io/wei8/" target="_blank" rel="noopener">导航站</a>
