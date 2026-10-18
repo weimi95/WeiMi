@@ -6,6 +6,7 @@ import 'dart:math';
 import 'package:path/path.dart' as p;
 import 'package:shared_preferences/shared_preferences.dart';
 
+import '../framework/setting_store.dart';
 import 'lan_transfer_service.dart';
 import 'receive_notify_service.dart';
 import 'transfer_history_service.dart';
@@ -134,9 +135,16 @@ class LocalSendService {
 
   // ============ 生命周期 ============
 
+  /// 总开关：是否兼容 LocalSend 协议（设置→微密飞传→LocalSend 兼容）。
+  /// 关闭后不广播也不收 LocalSend，同机装两个 App 的用户眼不见为净；
+  /// 与真 LocalSend App 的互传能力同时失去——故默认开启。
+  static bool get enabled =>
+      SettingStore.get<bool>('lan_localsend_enabled', true);
+
   /// 启动：组播 announce + 53317 server（随飞传接收开关启停）
   Future<void> start() async {
     if (_running) return;
+    if (!enabled) return; // 总开关关闭：整个兼容层不启动
     await _ensureFingerprint();
     _running = true;
     await _startServer();
@@ -148,6 +156,15 @@ class LocalSendService {
     // 立即来一轮 announce + 扫描，不用等周期
     _sendAnnounce();
     scanOnce();
+  }
+
+  /// 设置页开关切换时调用：开启→立即启动；关闭→立即停止。
+  Future<void> setEnabled(bool v) async {
+    if (v) {
+      await start();
+    } else {
+      await stop();
+    }
   }
 
   Future<void> stop() async {
@@ -375,21 +392,21 @@ class LocalSendService {
     return req.close();
   }
 
+  /// 登记 LocalSend 设备——走按 IP 合并路径（同 IP 已有微密设备时只挂链路，
+  /// 不新增条目，避免同机装两个 App 显示两条）。
   void _addLocalSendPeer(
       {required String fp,
       required String name,
       required String ip,
       required int port,
       bool https = false}) {
-    LanTransferService.instance.addOrUpdatePeer(LanPeer(
-      id: 'ls_$fp',
-      name: name,
+    LanTransferService.instance.attachLocalSendLink(
       ip: ip,
-      httpPort: port,
-      lastSeen: DateTime.now(),
-      protocol: 'localsend',
+      port: port,
       https: https,
-    ));
+      name: name,
+      fingerprint: fp,
+    );
   }
 
   // ============ 53317 HTTP server（LocalSend v2 路由） ============

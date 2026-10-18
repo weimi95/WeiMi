@@ -8,6 +8,7 @@ import '../framework/module_registry.dart';
 import '../framework/setting_store.dart';
 import '../services/daemon_service.dart';
 import '../services/lan_transfer_service.dart';
+import '../services/localsend_service.dart';
 import '../services/receive_notify_service.dart';
 import '../services/trusted_devices_service.dart';
 
@@ -53,6 +54,26 @@ class LanTransferModule extends FeatureModule {
                 content: Text(v == true
                     ? '已开启：其他设备可搜索到本机（网页快传不受影响）'
                     : '已关闭：其他设备搜索不到本机（网页快传仍可用）'),
+                duration: const Duration(seconds: 2),
+              ));
+            }
+          },
+        ),
+        SettingDef(
+          key: 'lan_localsend_enabled',
+          title: 'LocalSend 兼容',
+          icon: Icons.swap_horiz,
+          subtitle: '与 LocalSend App 互收互发文件。若同机装着两个 App，'
+              '设备列表只显示一条（自动合并）；关闭后不再广播/扫描 LocalSend 设备',
+          type: SettingType.boolean,
+          defaultValue: true,
+          onChanged: (ctx, v) async {
+            await LocalSendService.instance.setEnabled(v as bool);
+            if (ctx.mounted) {
+              ScaffoldMessenger.of(ctx).showSnackBar(SnackBar(
+                content: Text(v == true
+                    ? '已开启：可与 LocalSend 设备互传'
+                    : '已关闭：不再发现/连接 LocalSend 设备'),
                 duration: const Duration(seconds: 2),
               ));
             }

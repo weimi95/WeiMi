@@ -417,12 +417,71 @@ class LanTransferService {
     }
   }
 
-  /// 新增/更新设备（LocalSend 兼容层也走这里登记设备）
+  /// 登记/刷新设备。同一物理设备可能同时跑着微密+LocalSend 两个 App，
+  /// 按 IP 合并成一条：后到的一方把链路信息挂到先到的一方上，不新增条目。
   void addOrUpdatePeer(LanPeer peer) {
+    // ① 自研协议设备到达：若已有同 IP 的 LocalSend 条目（对方先被组播发现），
+    // 把它的 LocalSend 链路继承过来，然后移除旧条目——合并为一条 weimi 记录。
+    if (peer.protocol == 'weimi') {
+      final dup = _findPeer(
+          (p) => p.protocol == 'localsend' && p.ip == peer.ip);
+      if (dup != null) {
+        _peers.remove(dup.id);
+        peer = peer.copyWith(lsPort: dup.httpPort, lsHttps: dup.https);
+      }
+    }
     _peers[peer.id] = peer;
     _events.add(LanEvent(LanEventType.peersChanged));
     _pruneTimer ??=
         Timer.periodic(const Duration(seconds: 5), (_) => _prunePeers());
+  }
+
+  LanPeer? _findPeer(bool Function(LanPeer) test) {
+    for (final p in _peers.values) {
+      if (test(p)) return p;
+    }
+    return null;
+  }
+
+  /// LocalSend 兼容层登记设备用：按 IP 合并。
+  /// - 同 IP 已有微密设备 → 只把 LocalSend 链路信息挂上去，不新增条目
+  ///   （这正是「同机装了两个 App 只显示一个设备」的关键路径）；
+  /// - 同 IP 已有 LocalSend 条目 → 刷新；
+  /// - 都没有 → 新增 LocalSend 设备（对端只装了真 LocalSend App 的场景）。
+  void attachLocalSendLink({
+    required String ip,
+    required int port,
+    required bool https,
+    String? name,
+    String? fingerprint,
+  }) {
+    final weimi = _findPeer(
+        (p) => p.protocol == 'weimi' && p.ip == ip && !p.hasLocalSendLink);
+    if (weimi != null) {
+      final merged = weimi.copyWith(lsPort: port, lsHttps: https);
+      // 保持 lastSeen 新鲜，防止被 _prunePeers 清掉
+      merged.lastSeen = DateTime.now();
+      _peers[weimi.id] = merged;
+      _events.add(LanEvent(LanEventType.peersChanged));
+      return;
+    }
+    final ls = _findPeer((p) => p.protocol == 'localsend' && p.ip == ip);
+    if (ls != null) {
+      ls.lastSeen = DateTime.now();
+      _peers[ls.id] = ls;
+      _events.add(LanEvent(LanEventType.peersChanged));
+      return;
+    }
+    final fp = (fingerprint == null || fingerprint.isEmpty) ? ip : fingerprint;
+    addOrUpdatePeer(LanPeer(
+      id: 'ls_$fp',
+      name: name ?? 'LocalSend 设备',
+      ip: ip,
+      httpPort: port,
+      lastSeen: DateTime.now(),
+      protocol: 'localsend',
+      https: https,
+    ));
   }
 
   void _prunePeers() {
@@ -1489,15 +1548,25 @@ function done(el, text, ok) {
   Future<String> effectiveReceiveDir() => _resolveSaveDir();
 
   /// 解析保存路径（接收目录 + 冲突加 (n) 后缀）。LocalSend 兼容层复用。
+  /// fileName 可含相对路径（文件夹传输），落盘前确保父目录存在。
   Future<String> resolveSavePath(String fileName) async {
     final dirPath = await _resolveSaveDir();
     final ext = p.extension(fileName);
     final base = p.basenameWithoutExtension(fileName);
-    var target = p.join(dirPath, fileName);
+    final relDir = p.dirname(fileName);
+    final targetDir = relDir == '.' ? dirPath : p.join(dirPath, relDir);
+    var target = p.join(targetDir, p.basename(fileName));
     var i = 1;
     while (await File(target).exists()) {
-      target = p.join(dirPath, '$base ($i)$ext');
+      target = p.join(targetDir, '$base ($i)$ext');
       i++;
+    }
+    // 文件夹传输：子目录此时才可能存在，创建之
+    if (relDir != '.') {
+      try {
+        final d = Directory(targetDir);
+        if (!await d.exists()) await d.create(recursive: true);
+      } catch (_) {}
     }
     return target;
   }
@@ -1505,14 +1574,19 @@ function done(el, text, ok) {
   // ============ 发送端 ============
 
   /// 发送一个文件（明文原样直传，与 Landrop 行为一致）。
+  /// [relativeName]：文件夹传输时传相对路径（'文件夹/子目录/文件'），
+  /// 接收端按此路径落盘；单文件传 basename。
+  /// [recordHistory]：文件夹传输由调用方汇总记一条，置 false 免逐条记。
   Future<bool> sendFile({
     required LanPeer peer,
     required String filePath,
+    String? relativeName,
+    bool recordHistory = true,
     void Function(int sent, int total)? onProgress,
   }) async {
     lastSendError = '';
     try {
-      final sendName = p.basename(filePath);
+      final sendName = relativeName ?? p.basename(filePath);
       final f = File(filePath);
       if (!await f.exists()) {
         lastSendError = '本地文件不存在: $filePath';
@@ -1546,6 +1620,24 @@ function done(el, text, ok) {
             .timeout(const Duration(seconds: 60))
             .join();
         if (resp.statusCode == HttpStatus.ok && body.contains('"ok":true')) {
+          if (recordHistory) {
+            await TransferHistoryService.instance.add(TransferRecord(
+              id: '${DateTime.now().microsecondsSinceEpoch}_out',
+              kind: 'file',
+              direction: 'out',
+              name: sendName,
+              path: filePath,
+              size: total,
+              peerName: peer.name,
+              time: DateTime.now(),
+              ok: true,
+            ));
+          }
+          return true;
+        }
+        lastSendError =
+            '对方返回 ${resp.statusCode}（403=拒收/防火墙拦截，500=对方写入失败）';
+        if (recordHistory) {
           await TransferHistoryService.instance.add(TransferRecord(
             id: '${DateTime.now().microsecondsSinceEpoch}_out',
             kind: 'file',
@@ -1555,23 +1647,9 @@ function done(el, text, ok) {
             size: total,
             peerName: peer.name,
             time: DateTime.now(),
-            ok: true,
+            ok: false,
           ));
-          return true;
         }
-        lastSendError =
-            '对方返回 ${resp.statusCode}（403=拒收/防火墙拦截，500=对方写入失败）';
-        await TransferHistoryService.instance.add(TransferRecord(
-          id: '${DateTime.now().microsecondsSinceEpoch}_out',
-          kind: 'file',
-          direction: 'out',
-          name: sendName,
-          path: filePath,
-          size: total,
-          peerName: peer.name,
-          time: DateTime.now(),
-          ok: false,
-        ));
         return false;
       } finally {
         client.close(force: true);
@@ -1658,7 +1736,17 @@ function done(el, text, ok) {
     _discovering = false;
   }
 
+  /// 清洗文件名；含 '/' 时按相对路径处理（v1.0.68 文件夹传输）：
+  /// 逐段拍平非法字符，丢弃空段与 '.'/'..'（防目录穿越），保留层级。
   static String _safeFileName(String name) {
+    if (name.contains('/')) {
+      final segs = name
+          .split('/')
+          .map((s) => s.replaceAll(RegExp(r'[\\/:*?"<>|]'), '_').trim())
+          .where((s) => s.isNotEmpty && s != '.' && s != '..')
+          .toList();
+      return segs.isEmpty ? 'unnamed' : segs.join('/');
+    }
     final cleaned = name.replaceAll(RegExp(r'[\\/:*?"<>|]'), '_');
     return cleaned.isEmpty ? 'unnamed' : cleaned;
   }
@@ -1673,11 +1761,18 @@ class LanPeer {
   final int httpPort;
   final bool trusted;
   DateTime lastSeen;
-  /// 协议：'weimi'=微密自研飞传；'localsend'=LocalSend v2 兼容设备
+  /// 协议：'weimi'=微密自研飞传；'localsend'=LocalSend v2 兼容设备。
+  /// 合并显示后一台物理设备只有一条记录：同 IP 同时跑着微密+LocalSend 的
+  /// 设备以 weimi 条目为主，LocalSend 链路信息挂在 [lsPort]/[lsHttps] 上。
   final String protocol;
   /// LocalSend 设备的传输 scheme（App 默认 HTTPS only，自签证书）。
   /// 微密设备用不到（恒 false）。
   final bool https;
+  /// 该设备（IP）上的 LocalSend 链路端口；null=该设备没有 LocalSend 链路。
+  /// 仅 protocol='weimi' 的合并条目会非空。
+  final int? lsPort;
+  /// LocalSend 链路是否走 HTTPS（对端 App 默认开）。
+  final bool lsHttps;
 
   LanPeer({
     required this.id,
@@ -1688,11 +1783,16 @@ class LanPeer {
     required this.lastSeen,
     this.protocol = 'weimi',
     this.https = false,
+    this.lsPort,
+    this.lsHttps = false,
   });
 
   bool get isLocalSend => protocol == 'localsend';
 
-  LanPeer copyWith({bool? trusted}) => LanPeer(
+  /// 是否同时具备 LocalSend 链路（合并条目：主链路微密 + LocalSend 兜底）。
+  bool get hasLocalSendLink => lsPort != null;
+
+  LanPeer copyWith({bool? trusted, int? lsPort, bool? lsHttps}) => LanPeer(
         id: id,
         name: name,
         ip: ip,
@@ -1701,6 +1801,8 @@ class LanPeer {
         lastSeen: lastSeen,
         protocol: protocol,
         https: https,
+        lsPort: lsPort ?? this.lsPort,
+        lsHttps: lsHttps ?? this.lsHttps,
       );
 }
 

@@ -8,6 +8,7 @@ import 'package:path/path.dart' as p;
 import '../services/firewall_service.dart';
 import '../services/lan_transfer_service.dart';
 import '../services/localsend_service.dart';
+import '../services/transfer_history_service.dart';
 import '../services/trusted_devices_service.dart';
 import '../widgets/progress_dialog.dart';
 import 'settings_screen.dart';
@@ -312,13 +313,19 @@ class _LanTransferScreenState extends State<LanTransferScreen> {
                           : (d.trusted ? Colors.green : null),
                 ),
                 title: Text(d.name),
-                subtitle: Text(
-                    '${d.ip} · ${d.isLocalSend ? 'LocalSend 设备' : '微密设备'}'),
+                subtitle: Text('${d.ip} · ${_peerProtocolLabel(d)}'),
               ),
             ),
         ],
       ),
     );
+  }
+
+  /// 设备协议标注：纯 LocalSend 设备 / 微密设备 / 合并条目（微密+LocalSend 双链路）。
+  String _peerProtocolLabel(LanPeer d) {
+    if (d.isLocalSend) return ' · LocalSend';
+    if (d.hasLocalSendLink) return ' · 微密+LocalSend';
+    return '';
   }
 
   Future<void> _startSendFiles() async {
@@ -336,41 +343,118 @@ class _LanTransferScreenState extends State<LanTransferScreen> {
     await _sendFilesTo(peer, files);
   }
 
+  /// 发送文件夹（仅微密设备：自研协议按相对路径落盘，保留目录结构）。
+  Future<void> _startSendFolderTo(LanPeer peer) async {
+    final dir = await FilePicker.platform.getDirectoryPath(
+      dialogTitle: '选择要发送的文件夹',
+    );
+    if (dir == null || dir.isEmpty || !mounted) return;
+    await _sendFilesTo(peer, [dir]);
+  }
+
   Future<void> _sendFilesTo(LanPeer peer, List<String> files) async {
+    // 展开：目录递归成「相对路径」条目（v1.0.68 文件夹传输，仅自研协议支持），
+    // 单文件保持 basename。folderTop 非空 = 该条目属于某个顶层目录。
+    final entries = <_SendEntry>[];
+    for (final f in files) {
+      if (FileSystemEntity.isDirectorySync(f)) {
+        final top = p.basename(f);
+        await for (final e in Directory(f).list(recursive: true, followLinks: false)) {
+          if (e is! File) continue;
+          final rel = p.relative(e.path, from: f).replaceAll('\\', '/');
+          entries.add(_SendEntry(e.path, '$top/$rel', top));
+        }
+      } else {
+        entries.add(_SendEntry(f, p.basename(f), null));
+      }
+    }
+    if (entries.isEmpty) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+          content: Text('没有可发送的文件'),
+        ));
+      }
+      return;
+    }
     if (peer.isLocalSend) {
+      // LocalSend v2 协议只有文件没有目录概念：含目录时拒绝并说明
+      if (entries.any((e) => e.folderTop != null)) {
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+            content: Text('LocalSend 设备不支持文件夹发送（协议无目录概念），'
+                '请仅选择文件，或改用微密设备'),
+            backgroundColor: Colors.orange,
+            duration: const Duration(seconds: 5),
+          ));
+        }
+        return;
+      }
       await _sendFilesToLocalSend(peer, files);
       return;
     }
     int okCount = 0;
     int failCount = 0;
-    for (int i = 0; i < files.length; i++) {
-      final name = p.basename(files[i]);
+    final folderBytes = <String, int>{};
+    final folderFails = <String, int>{};
+    for (int i = 0; i < entries.length; i++) {
+      final e = entries[i];
       if (mounted) {
         if (i == 0) {
           ProgressDialog.show(
             context,
             title: '正在发送',
             currentProgress: i,
-            totalProgress: files.length,
-            currentFileName: name,
+            totalProgress: entries.length,
+            currentFileName: e.relativeName,
           );
         } else {
           ProgressDialog.update(
             context,
             title: '正在发送',
             currentProgress: i,
-            totalProgress: files.length,
-            currentFileName: name,
+            totalProgress: entries.length,
+            currentFileName: e.relativeName,
           );
         }
       }
 
-      final ok = await _svc.sendFile(peer: peer, filePath: files[i]);
+      final ok = await _svc.sendFile(
+        peer: peer,
+        filePath: e.absPath,
+        relativeName: e.relativeName,
+        // 目录内文件由调用方按目录汇总记账，避免记录被文件数量刷爆
+        recordHistory: e.folderTop == null,
+      );
       if (ok) {
         okCount++;
       } else {
         failCount++;
       }
+      if (e.folderTop != null) {
+        final top = e.folderTop!;
+        if (ok) {
+          try {
+            folderBytes[top] = (folderBytes[top] ?? 0) + await File(e.absPath).length();
+          } catch (_) {}
+        } else {
+          folderFails[top] = (folderFails[top] ?? 0) + 1;
+        }
+      }
+    }
+
+    // 每个顶层目录记一条 folder 记录（传输页/历史按 kind 渲染，不参与文件操作）
+    for (final top in folderBytes.keys) {
+      await TransferHistoryService.instance.add(TransferRecord(
+        id: '${DateTime.now().microsecondsSinceEpoch}_out',
+        kind: 'folder',
+        direction: 'out',
+        name: top,
+        size: folderBytes[top]!,
+        peerName: peer.name,
+        time: DateTime.now(),
+        ok: (folderFails[top] ?? 0) == 0,
+        note: (folderFails[top] ?? 0) > 0 ? '${folderFails[top]} 个文件失败' : null,
+      ));
     }
 
     if (mounted) {
@@ -804,7 +888,7 @@ class _LanTransferScreenState extends State<LanTransferScreen> {
                     const Icon(Icons.language, size: 20, color: Colors.teal),
                     const SizedBox(width: 8),
                     const Expanded(
-                      child: Text('网页快传',
+                      child: Text('微密飞传-网页版',
                           style: TextStyle(
                               fontWeight: FontWeight.w600, fontSize: 15)),
                     ),
@@ -913,7 +997,7 @@ class _LanTransferScreenState extends State<LanTransferScreen> {
                       style: const TextStyle(fontWeight: FontWeight.w500)),
                   subtitle: Text(
                       '${d.ip}:${d.httpPort}'
-                      '${isLs ? ' · LocalSend' : ''}'
+                      '${_peerProtocolLabel(d)}'
                       '${trusted ? ' · 已信任' : ''}',
                       style: const TextStyle(fontSize: 12)),
                   trailing: PopupMenuButton<String>(
@@ -921,6 +1005,8 @@ class _LanTransferScreenState extends State<LanTransferScreen> {
                     onSelected: (v) {
                       if (v == 'send_file') {
                         _startSendFilesTo(d);
+                      } else if (v == 'send_folder') {
+                        _startSendFolderTo(d);
                       } else if (v == 'send_text') {
                         _startSendTextTo(d);
                       } else if (v == 'trust') {
@@ -935,6 +1021,16 @@ class _LanTransferScreenState extends State<LanTransferScreen> {
                             SizedBox(width: 8),
                             Text('发送文件'),
                           ])),
+                      // 文件夹发送：仅微密设备（自研协议支持目录层级，
+                      // LocalSend v2 协议无目录概念）
+                      if (!isLs)
+                        const PopupMenuItem(
+                            value: 'send_folder',
+                            child: Row(children: [
+                              Icon(Icons.folder_outlined, size: 18),
+                              SizedBox(width: 8),
+                              Text('发送文件夹'),
+                            ])),
                       // LocalSend 设备不支持文本/信任体系（协议无文本消息，
                       // 信任是微密设备 ID 概念）
                       if (!isLs)
@@ -1058,4 +1154,12 @@ class _LanTransferScreenState extends State<LanTransferScreen> {
     if (text == null || text.trim().isEmpty || !mounted) return;
     await _sendTextTo(peer, text);
   }
+}
+
+/// 发送条目：绝对路径 + 对端相对名（文件夹传输）+ 所属顶层目录（汇总记账用）。
+class _SendEntry {
+  final String absPath;
+  final String relativeName;
+  final String? folderTop;
+  const _SendEntry(this.absPath, this.relativeName, this.folderTop);
 }
