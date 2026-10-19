@@ -18,6 +18,11 @@ serde_json = "1"
 native-windows-gui = { version = "1", features = ["notice"] }
 native-windows-derive = "1"
 
+# XP 保真：getrandom 0.2 静态导入 bcrypt.dll（Vista+），XP 加载器拒载整个 exe。
+# vendor fork 改用 RtlGenRandom（advapi32，XP 原生）。
+[patch.crates-io]
+getrandom = { path = "vendor/getrandom" }
+
 [profile.release]
 opt-level = 3
 lto = true
