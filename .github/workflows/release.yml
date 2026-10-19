@@ -242,6 +242,12 @@ jobs:
           install: mingw-w64-i686-gcc
           path-type: inherit
 
+      - name: Unit tests (transfer protocol, host arch)
+        run: |
+          cd legacy
+          cargo test --release
+          cd ..
+
       - name: Build legacy client
         run: |
           $VERSION = $env:GITHUB_REF -replace 'refs/tags/', ''
