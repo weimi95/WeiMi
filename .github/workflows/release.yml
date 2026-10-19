@@ -249,7 +249,19 @@ jobs:
           cd ..
 
       - name: Build legacy client
+        shell: pwsh
         run: |
+          # setup-msys2 v2 对已废弃的 MINGW32 只设 MSYSTEM 环境变量、不再把 mingw32\bin
+          # 加进 PATH（32 位环境淘汰中），需显式补 PATH，否则 cargo 报
+          # linker `i686-w64-mingw32-gcc` not found。
+          $gcc = Join-Path $env:RUNNER_TEMP "msys64\mingw32\bin\i686-w64-mingw32-gcc.exe"
+          if (-not (Test-Path $gcc)) {
+            $found = Get-ChildItem $env:RUNNER_TEMP -Recurse -Filter "i686-w64-mingw32-gcc.exe" -ErrorAction SilentlyContinue | Select-Object -First 1
+            if ($found) { $gcc = $found.FullName }
+          }
+          if (-not $gcc -or -not (Test-Path $gcc)) { throw "i686-w64-mingw32-gcc.exe not found under $env:RUNNER_TEMP" }
+          $env:PATH = "$(Split-Path $gcc -Parent);$env:PATH"
+          Write-Host "using linker: $gcc"
           $VERSION = $env:GITHUB_REF -replace 'refs/tags/', ''
           cd legacy
           cargo build --release --target i686-pc-windows-gnu
