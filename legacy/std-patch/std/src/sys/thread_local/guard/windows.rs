@@ -50,5 +50,14 @@ pub fn run_thread_dtors() {
 }
 
 extern "C" fn dtor_atexit() {
-    run_thread_dtors();
+    // Main-thread TLS destructors only. The main thread's `thread_cleanup` is
+    // already performed by the runtime (lang_start) at exit; doing it again
+    // here double-runs and aborts on heavier workloads. `run_thread_dtors`
+    // (used by spawned threads from their entry point) keeps `thread_cleanup`.
+    unsafe {
+        #[cfg(target_thread_local)]
+        super::super::destructors::run();
+        #[cfg(not(target_thread_local))]
+        super::super::key::run_dtors();
+    }
 }
