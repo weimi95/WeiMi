@@ -1,0 +1,129 @@
+name: Build and Release (Legacy / Win7 / XP)
+
+# 微密文件·经典版 独立发版线。
+# 与主程序（v* tag）解耦：经典版打 legacy-v* tag 才触发，不随主程序每次更新。
+# XP 保真链路：i686-win7-windows-gnu 靶 + -Zbuild-std 重编补丁 std（mutex/condvar
+# 去 SRWLOCK/CONDITION_VARIABLE、thread_local 去 FLS、time 去 GetSystemTimePrecise）
+# + .cargo/config.toml 把 PE 头降到 5.1 + ci_pe_gate.py 静态门禁（XP 导入表/PE 版本）。
+on:
+  push:
+    tags:
+      - 'legacy-v*'
+
+permissions:
+  contents: write
+
+jobs:
+  build-legacy:
+    runs-on: windows-latest
+    env:
+      RUSTC_BOOTSTRAP: "1"
+    steps:
+      - uses: actions/checkout@v4
+
+      # win7 靶自带 XP 友好的 windows7.rs 后端；build-std 会把补丁后的 std 源码重编进去。
+      - name: Setup Rust (i686-win7 gnu + rust-src)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: i686-win7-windows-gnu
+          components: rust-src
+
+      # mingw 提供 i686-w64-mingw32-gcc 链接器，链 XP 原生 msvcrt.dll（不依赖 VCRUNTIME140）。
+      - name: Setup MinGW-w64 (i686)
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: MINGW32
+          install: mingw-w64-i686-gcc
+          path-type: inherit
+
+      # setup-msys2@v2 对废弃 MINGW32 只设 MSYSTEM 不把 mingw32/bin 进 PATH，
+      # 会导致 linker not found。显式补 PATH（优先默认位，找不到再递归兜底）。
+      - name: Add MinGW i686 bin to PATH
+        shell: pwsh
+        run: |
+          $mingw = Join-Path $env:RUNNER_TEMP "msys64\mingw32\bin"
+          if (Test-Path $mingw) {
+            echo "$mingw" | Out-File -Append $env:GITHUB_PATH
+            Write-Host "added $mingw to PATH"
+          } else {
+            $cand = Get-ChildItem -Path $env:RUNNER_TEMP -Recurse -Filter gcc.exe -ErrorAction SilentlyContinue |
+              Where-Object { $_.FullName -match 'mingw32\\bin' } | Select-Object -First 1
+            if ($cand) {
+              $d = Split-Path $cand.FullName
+              echo "$d" | Out-File -Append $env:GITHUB_PATH
+              Write-Host "added $d to PATH (fallback)"
+            } else {
+              throw "mingw32 gcc not found under $env:RUNNER_TEMP"
+            }
+          }
+
+      - name: Verify toolchain
+        shell: pwsh
+        run: |
+          gcc --version
+          rustc -vV | Select-String host
+          rustc --print target-list | Select-String win7
+
+      # 把 XP 兼容补丁覆盖进 sysroot 的 rust-src（仅 win7 靶编译时经 cfg 生效）。
+      - name: Apply XP-compat std patch
+        shell: pwsh
+        run: pwsh legacy/apply_std_patch.ps1
+
+      # 协议/逻辑单测在宿主机（x86_64）跑，走未改动的预编 std，验证业务逻辑。
+      - name: Unit tests (transfer protocol, host arch)
+        run: |
+          cd legacy
+          cargo test --release
+          cd ..
+
+      # XP 保真构建：build-std 重编补丁 std，PE 头经 .cargo/config.toml 降到 5.1。
+      - name: Build legacy client (XP-faithful, build-std)
+        shell: pwsh
+        run: |
+          cd legacy
+          cargo build --release -Z build-std=std --target i686-win7-windows-gnu
+          cd ..
+          $VERSION = $env:GITHUB_REF -replace 'refs/tags/legacy-', ''
+          copy legacy\target\i686-win7-windows-gnu\release\weimi_legacy.exe "weimi_legacy-$VERSION-windows-x86.exe"
+
+      # WoW64 下实跑 32 位 exe，验证补丁 std 运行时行为（加载/线程/时间/加解密）。
+      - name: Smoke test (round-trip, runs under WoW64)
+        shell: pwsh
+        run: |
+          $VERSION = $env:GITHUB_REF -replace 'refs/tags/legacy-', ''
+          $exe = "weimi_legacy-$VERSION-windows-x86.exe"
+          "smoke test content" | Out-File -Encoding ASCII smoke.txt
+          & ".\$exe" encrypt smoke.txt smoke.wemi -p SmokeTest123
+          if ($LASTEXITCODE -ne 0) { throw "legacy encrypt failed" }
+          & ".\$exe" decrypt smoke.wemi smoke.out -p SmokeTest123
+          if ($LASTEXITCODE -ne 0) { throw "legacy decrypt failed" }
+          $a = (Get-FileHash smoke.txt -Algorithm SHA256).Hash
+          $b = (Get-FileHash smoke.out -Algorithm SHA256).Hash
+          if ($a -ne $b) { throw "legacy round-trip sha mismatch" }
+          Write-Host "=== legacy round-trip OK ==="
+
+      # 静态门禁：XP 不兼容（Vista+ API / 动态 CRT / PE 头 >5.x）直接 fail 整条 CI。
+      - name: PE XP-compat gate
+        shell: pwsh
+        run: |
+          $VERSION = $env:GITHUB_REF -replace 'refs/tags/legacy-', ''
+          python legacy/ci_pe_gate.py "weimi_legacy-$VERSION-windows-x86.exe"
+          if ($LASTEXITCODE -ne 0) { throw "PE gate: binary is NOT XP-compatible" }
+
+      - name: Generate legacy checksum
+        run: |
+          $VERSION = $env:GITHUB_REF -replace 'refs/tags/legacy-', ''
+          $hash = Get-FileHash -Algorithm SHA256 "weimi_legacy-$VERSION-windows-x86.exe"
+          "$($hash.Hash.ToLower())  weimi_legacy-$VERSION-windows-x86.exe" | Out-File -Encoding ASCII "weimi_legacy-$VERSION-windows-x86.exe.sha256"
+
+      - name: Upload Release
+        uses: softprops/action-gh-release@v1
+        with:
+          files: |
+            weimi_legacy-*-windows-x86.exe
+            weimi_legacy-*-windows-x86.exe.sha256
+          draft: false
+          prerelease: false
+          generate_release_notes: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

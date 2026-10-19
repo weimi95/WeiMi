@@ -223,80 +223,6 @@ jobs:
             weimi_file-*-windows.zip
             weimi_file-*-windows.zip.sha256
 
-  build-legacy:
-    runs-on: windows-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      # 微密文件·经典版：Win7/XP 旧机器客户端（32 位，gnu 目标链 XP 原生 msvcrt.dll，
-      # 不依赖 VCRUNTIME140 等 VC 运行库——裸 XP 上动态 CRT 必挂）。
-      - name: Setup Rust (i686 gnu)
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: i686-pc-windows-gnu
-
-      - name: Setup MinGW-w64 (i686)
-        uses: msys2/setup-msys2@v2
-        with:
-          msystem: MINGW32
-          install: mingw-w64-i686-gcc
-          path-type: inherit
-
-      - name: Unit tests (transfer protocol, host arch)
-        run: |
-          cd legacy
-          cargo test --release
-          cd ..
-
-      - name: Build legacy client
-        shell: pwsh
-        run: |
-          # setup-msys2 v2 对已废弃的 MINGW32 只设 MSYSTEM 环境变量、不再把 mingw32\bin
-          # 加进 PATH（32 位环境淘汰中），需显式补 PATH，否则 cargo 报
-          # linker `i686-w64-mingw32-gcc` not found。
-          $gcc = Join-Path $env:RUNNER_TEMP "msys64\mingw32\bin\i686-w64-mingw32-gcc.exe"
-          if (-not (Test-Path $gcc)) {
-            $found = Get-ChildItem $env:RUNNER_TEMP -Recurse -Filter "i686-w64-mingw32-gcc.exe" -ErrorAction SilentlyContinue | Select-Object -First 1
-            if ($found) { $gcc = $found.FullName }
-          }
-          if (-not $gcc -or -not (Test-Path $gcc)) { throw "i686-w64-mingw32-gcc.exe not found under $env:RUNNER_TEMP" }
-          $env:PATH = "$(Split-Path $gcc -Parent);$env:PATH"
-          Write-Host "using linker: $gcc"
-          $VERSION = $env:GITHUB_REF -replace 'refs/tags/', ''
-          cd legacy
-          cargo build --release --target i686-pc-windows-gnu
-          cd ..
-          copy legacy\target\i686-pc-windows-gnu\release\weimi_legacy.exe "weimi_legacy-$VERSION-windows-x86.exe"
-
-      - name: Smoke test (round-trip, runs under WoW64)
-        shell: pwsh
-        run: |
-          $VERSION = $env:GITHUB_REF -replace 'refs/tags/', ''
-          $exe = "weimi_legacy-$VERSION-windows-x86.exe"
-          "smoke test content" | Out-File -Encoding ASCII smoke.txt
-          & ".\$exe" encrypt smoke.txt smoke.wemi -p SmokeTest123
-          if ($LASTEXITCODE -ne 0) { throw "legacy encrypt failed" }
-          & ".\$exe" decrypt smoke.wemi smoke.out -p SmokeTest123
-          if ($LASTEXITCODE -ne 0) { throw "legacy decrypt failed" }
-          $a = (Get-FileHash smoke.txt -Algorithm SHA256).Hash
-          $b = (Get-FileHash smoke.out -Algorithm SHA256).Hash
-          if ($a -ne $b) { throw "legacy round-trip sha mismatch" }
-          Write-Host "=== legacy round-trip OK ==="
-
-      - name: Generate legacy checksum
-        run: |
-          $VERSION = $env:GITHUB_REF -replace 'refs/tags/', ''
-          $hash = Get-FileHash -Algorithm SHA256 "weimi_legacy-$VERSION-windows-x86.exe"
-          "$($hash.Hash.ToLower())  weimi_legacy-$VERSION-windows-x86.exe" | Out-File -Encoding ASCII "weimi_legacy-$VERSION-windows-x86.exe.sha256"
-
-      - name: Upload legacy
-        uses: actions/upload-artifact@v4
-        with:
-          name: legacy-exe
-          path: |
-            weimi_legacy-*-windows-x86.exe
-            weimi_legacy-*-windows-x86.exe.sha256
-
   build-macos:
     runs-on: macos-latest
     steps:
@@ -427,7 +353,7 @@ jobs:
             weimi_file-*-linux.tar.gz.sha256
 
   release:
-    needs: [build-android, build-windows, build-legacy, build-macos, build-linux]
+    needs: [build-android, build-windows, build-macos, build-linux]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -453,9 +379,6 @@ jobs:
             cat artifacts/macos-dmg/weimi_file-*-macos.zip.sha256 >> SHA256SUMS.txt
           fi
           cat artifacts/linux-tarball/weimi_file-*-linux.tar.gz.sha256 >> SHA256SUMS.txt
-          if [ -f artifacts/legacy-exe/weimi_legacy-*-windows-x86.exe.sha256 ]; then
-            cat artifacts/legacy-exe/weimi_legacy-*-windows-x86.exe.sha256 >> SHA256SUMS.txt
-          fi
       
       - name: Create Release
         uses: softprops/action-gh-release@v1
@@ -467,7 +390,6 @@ jobs:
             artifacts/macos-dmg/weimi_file-*-macos.dmg
             artifacts/macos-dmg/weimi_file-*-macos.zip
             artifacts/linux-tarball/weimi_file-*-linux.tar.gz
-            artifacts/legacy-exe/weimi_legacy-*-windows-x86.exe
             SHA256SUMS.txt
           draft: false
           prerelease: false

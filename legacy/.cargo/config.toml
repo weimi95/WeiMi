@@ -1,0 +1,10 @@
+# Windows XP loadability: the win7 target emits a PE header with
+# MajorSubsystemVersion = 6.0, which XP's loader rejects
+# ("not a valid Win32 application"). Force the PE subsystem/OS version down to
+# 5.1 so the binary actually loads on XP. Applies only to the legacy (XP) target.
+[target.i686-win7-windows-gnu]
+rustflags = [
+  "-C", "link-arg=-Wl,--subsystem,windows:5.1",
+  "-C", "link-arg=-Wl,--major-os-version,5",
+  "-C", "link-arg=-Wl,--minor-os-version,1",
+]
