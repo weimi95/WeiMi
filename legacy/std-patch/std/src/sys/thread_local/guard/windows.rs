@@ -50,14 +50,14 @@ pub fn run_thread_dtors() {
 }
 
 extern "C" fn dtor_atexit() {
-    // Main-thread TLS destructors only. The main thread's `thread_cleanup` is
-    // already performed by the runtime (lang_start) at exit; doing it again
-    // here double-runs and aborts on heavier workloads. `run_thread_dtors`
-    // (used by spawned threads from their entry point) keeps `thread_cleanup`.
-    unsafe {
-        #[cfg(target_thread_local)]
-        super::super::destructors::run();
-        #[cfg(not(target_thread_local))]
-        super::super::key::run_dtors();
-    }
+    // Intentionally a no-op. On the GNU targets (`#[thread_local]` via
+    // emutls / native TLS) the TLS backing storage is already being torn
+    // down by the time `atexit` handlers run, so touching `DTORS` here
+    // aborts the process *after* main has returned (observed on
+    // i686-win7-windows-gnu: encrypt prints OK, exit code != 0).
+    //
+    // Leaking main-thread TLS destructors at process exit is harmless and
+    // matches std's documented "not guaranteed to run" cleanup semantics.
+    // Spawned threads still drain their destructors via `run_thread_dtors`,
+    // which runs inside the thread entry point while the CRT is alive.
 }
