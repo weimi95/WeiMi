@@ -87,29 +87,32 @@ jobs:
           $VERSION = $env:GITHUB_REF -replace 'refs/tags/legacy-', ''
           copy legacy\target\i686-win7-windows-gnu\release\weimi_legacy.exe "weimi_legacy-$VERSION-windows-x86.exe"
 
-      # WoW64 下实跑 32 位 exe，验证补丁 std 运行时行为（加载/线程/时间/加解密）。
-      - name: Smoke test (round-trip, runs under WoW64)
-        shell: pwsh
-        run: |
-          $VERSION = $env:GITHUB_REF -replace 'refs/tags/legacy-', ''
-          $exe = "weimi_legacy-$VERSION-windows-x86.exe"
-          "smoke test content" | Out-File -Encoding ASCII smoke.txt
-          & ".\$exe" encrypt smoke.txt smoke.wemi -p SmokeTest123
-          if ($LASTEXITCODE -ne 0) { throw "legacy encrypt failed" }
-          & ".\$exe" decrypt smoke.wemi smoke.out -p SmokeTest123
-          if ($LASTEXITCODE -ne 0) { throw "legacy decrypt failed" }
-          $a = (Get-FileHash smoke.txt -Algorithm SHA256).Hash
-          $b = (Get-FileHash smoke.out -Algorithm SHA256).Hash
-          if ($a -ne $b) { throw "legacy round-trip sha mismatch" }
-          Write-Host "=== legacy round-trip OK ==="
-
-      # 静态门禁：XP 不兼容（Vista+ API / 动态 CRT / PE 头 >5.x）直接 fail 整条 CI。
+      # 静态门禁提前到冒烟之前：先静态后动态，失败时仍能看到 PE 导入表结论。
       - name: PE XP-compat gate
         shell: pwsh
         run: |
           $VERSION = $env:GITHUB_REF -replace 'refs/tags/legacy-', ''
           python legacy/ci_pe_gate.py "weimi_legacy-$VERSION-windows-x86.exe"
           if ($LASTEXITCODE -ne 0) { throw "PE gate: binary is NOT XP-compatible" }
+
+      # WoW64 下实跑 32 位 exe，验证补丁 std 运行时行为（加载/线程/时间/加解密）。
+      - name: Smoke test (round-trip, runs under WoW64)
+        shell: pwsh
+        run: |
+          $VERSION = $env:GITHUB_REF -replace 'refs/tags/legacy-', ''
+          $exe = "weimi_legacy-$VERSION-windows-x86.exe"
+          Write-Host "exe exists: $(Test-Path $exe), size: $((Get-Item $exe).Length)"
+          "smoke test content" | Out-File -Encoding ASCII smoke.txt
+          & ".\$exe" encrypt smoke.txt smoke.wemi -p SmokeTest123
+          $code = $LASTEXITCODE
+          Write-Host "encrypt(pwsh) exit=$code hex=0x$('{0:X8}' -f ($code -band 0xFFFFFFFF))"
+          if ($code -ne 0) { throw "legacy encrypt failed exit=$code" }
+          cmd /c ".\$exe decrypt smoke.wemi smoke.out -p SmokeTest123 & echo decrypt(cmd) exit=%ERRORLEVEL%"
+          if ($LASTEXITCODE -ne 0) { throw "legacy decrypt failed exit=$LASTEXITCODE" }
+          $a = (Get-FileHash smoke.txt -Algorithm SHA256).Hash
+          $b = (Get-FileHash smoke.out -Algorithm SHA256).Hash
+          if ($a -ne $b) { throw "legacy round-trip sha mismatch" }
+          Write-Host "=== legacy round-trip OK ==="
 
       - name: Generate legacy checksum
         run: |
