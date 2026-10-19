@@ -2,9 +2,14 @@
 # MajorSubsystemVersion = 6.0, which XP's loader rejects
 # ("not a valid Win32 application"). Force the PE subsystem/OS version down to
 # 5.1 so the binary actually loads on XP. Applies only to the legacy (XP) target.
+#
+# IMPORTANT: subsystem must be `console`, NOT `windows`. The legacy client is
+# dual-mode (CLI when given args, NWG GUI otherwise) and CI smoke tests invoke
+# it as a CLI tool. A `windows` (GUI) subsystem binary does not block the
+# calling PowerShell, so $LASTEXITCODE is empty and the CI smoke check false-fails.
 [target.i686-win7-windows-gnu]
 rustflags = [
-  "-C", "link-arg=-Wl,--subsystem,windows:5.1",
+  "-C", "link-arg=-Wl,--subsystem,console:5.1",
   "-C", "link-arg=-Wl,--major-os-version,5",
   "-C", "link-arg=-Wl,--minor-os-version,1",
 ]
