@@ -21,11 +21,12 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # win7 靶自带 XP 友好的 windows7.rs 后端；build-std 会把补丁后的 std 源码重编进去。
-      - name: Setup Rust (i686-win7 gnu + rust-src)
+      # win7 靶的预编译 std 只在 nightly 提供，但我们用 -Zbuild-std 从 rust-src
+      # 源码重编 std，故不 rustup target add（stable 上该靶预编译 std 下载会失败），
+      # 只装 rust-src 组件即可。target spec 内置，build-std 会据此编出 win7 靶 std。
+      - name: Setup Rust (rust-src for build-std)
         uses: dtolnay/rust-toolchain@stable
         with:
-          targets: i686-win7-windows-gnu
           components: rust-src
 
       # mingw 提供 i686-w64-mingw32-gcc 链接器，链 XP 原生 msvcrt.dll（不依赖 VCRUNTIME140）。
