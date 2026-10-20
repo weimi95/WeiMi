@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:io';
+import 'dart:isolate';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:file_picker/file_picker.dart' hide FileType;
@@ -894,6 +895,11 @@ class WeiMiVaultScreenState extends State<WeiMiVaultScreen> {
     }
 
     if (item.isEncryptedFile) {
+      // 归档容器（WEMI_FARC）不是单文件格式：单击直接进解包流程
+      if (await EncryptionService.isArchiveFile(item.fullPath)) {
+        await _unpackArchiveWithDialog(item.fullPath);
+        return;
+      }
       final hint = await EncryptionService.getPasswordHint(item.fullPath);
       final password = await _showPasswordDialog(hint: hint);
       if (password == null || !mounted) return;
@@ -939,8 +945,12 @@ class WeiMiVaultScreenState extends State<WeiMiVaultScreen> {
     }
   }
 
-  /// 问密码后解密单个文件（右键菜单/操作面板共用）
+  /// 问密码后解密单个文件（右键菜单/操作面板共用）；归档容器走独立流程
   Future<void> _decryptWithDialog(FileItem item) async {
+    if (await EncryptionService.isArchiveFile(item.fullPath)) {
+      await _unpackArchiveWithDialog(item.fullPath);
+      return;
+    }
     final hint = await EncryptionService.getPasswordHint(item.fullPath);
     final password = await _showPasswordDialog(hint: hint);
     if (password == null || !mounted) return;
@@ -1003,6 +1013,202 @@ class WeiMiVaultScreenState extends State<WeiMiVaultScreen> {
         );
       }
     }
+  }
+
+  // ============ 文件夹加密（归档容器 WEMI_FARC）============
+
+  /// 主界面（拖拽/解密卡片）入口：加密文件夹
+  Future<void> packFolderFlow(String dirPath) => _packFolderWithDialog(dirPath);
+
+  /// 主界面（拖拽/解密卡片）入口：解密归档
+  Future<void> openArchiveFlow(String archivePath) =>
+      _unpackArchiveWithDialog(archivePath);
+
+  /// 右键「加密文件夹」：选输出目录 → 设密码 → isolate 后台打包（不卡 UI）
+  Future<void> _packFolderWithDialog(String dirPath) async {
+    if (!mounted) return;
+
+    String? outputDir;
+    if (_vaultDir != null) {
+      outputDir = _vaultDir;
+    } else {
+      outputDir = await FileOperationsService.pickOutputDirectory();
+    }
+    if (outputDir == null || !mounted) return;
+
+    final result = await _showEncryptPasswordDialog();
+    if (result == null || !mounted) return;
+
+    final folderName = p.basename(dirPath);
+    final outputPath = p.join(outputDir, '$folderName.wemi');
+    if (await File(outputPath).exists()) {
+      final overwrite = await showDialog<bool>(
+        context: context,
+        builder: (ctx) => AlertDialog(
+          title: const Text('文件已存在'),
+          content: Text('$folderName.wemi 已存在于输出目录，覆盖它吗？'),
+          actions: [
+            TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('取消')),
+            TextButton(onPressed: () => Navigator.pop(ctx, true), child: const Text('覆盖')),
+          ],
+        ),
+      );
+      if (overwrite != true || !mounted) return;
+    }
+
+    final password = result['password']!;
+    final hint = result['hint'];
+    await _runArchiveJob(
+      title: '正在加密文件夹',
+      job: () => EncryptionService.packFolder(dirPath, outputPath, password, hint: hint),
+    );
+    if (mounted) _refreshAfterOp(dirPath);
+  }
+
+  /// 归档解密入口（右键/单击加密文件时按 magic 路由进来）：
+  /// 输密码 → 列清单 → 勾选 → 选输出目录 → isolate 后台解包
+  Future<void> _unpackArchiveWithDialog(String archivePath) async {
+    if (!mounted) return;
+
+    final password = await _showPasswordDialog();
+    if (password == null || password.isEmpty || !mounted) return;
+
+    final ArchiveListing listing;
+    try {
+      listing = await EncryptionService.listArchive(archivePath, password);
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('$e'), backgroundColor: Colors.red),
+        );
+      }
+      return;
+    }
+
+    final selected = await _showArchiveListingDialog(listing);
+    if (selected == null || !mounted) return; // null = 取消
+
+    final outputDir = await FileOperationsService.pickOutputDirectory();
+    if (outputDir == null || !mounted) return;
+
+    final paths = selected.isEmpty ? const <String>[] : selected;
+    await _runArchiveJob(
+      title: '正在解密归档',
+      job: () => EncryptionService.extractSelected(archivePath, outputDir, password, paths),
+    );
+    if (mounted) _refreshAfterOp(archivePath);
+  }
+
+  /// 归档清单对话框：全量字节 + 勾选。返回 null=取消；空列表=全部；否则勾选项。
+  Future<List<String>?> _showArchiveListingDialog(ArchiveListing listing) async {
+    final checked = <String>{for (final e in listing.entries) e.path};
+    return showDialog<List<String>>(
+      context: context,
+      builder: (ctx) {
+        return StatefulBuilder(
+          builder: (ctx, setDialogState) {
+            return AlertDialog(
+              title: Text('归档内容（${listing.entries.length} 个文件）'),
+              content: SizedBox(
+                width: 420,
+                height: 380,
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      '总大小 ${_formatBytes(listing.totalSize)}'
+                      '${listing.hint != null && listing.hint!.isNotEmpty ? ' · 提示: ${listing.hint}' : ''}',
+                      style: TextStyle(fontSize: 12, color: Colors.grey.shade600),
+                    ),
+                    const SizedBox(height: 8),
+                    Expanded(
+                      child: ListView.builder(
+                        itemCount: listing.entries.length,
+                        itemBuilder: (c, i) {
+                          final e = listing.entries[i];
+                          final on = checked.contains(e.path);
+                          return CheckboxListTile(
+                            dense: true,
+                            value: on,
+                            title: Text(e.path,
+                                maxLines: 1,
+                                overflow: TextOverflow.ellipsis,
+                                        style: const TextStyle(fontSize: 13)),
+                            subtitle: Text(_formatBytes(e.size),
+                                style: const TextStyle(fontSize: 11)),
+                            onChanged: (v) {
+                              setDialogState(() {
+                                if (v == true) {
+                                  checked.add(e.path);
+                                } else {
+                                  checked.remove(e.path);
+                                }
+                              });
+                            },
+                          );
+                        },
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              actions: [
+                TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('取消')),
+                TextButton(
+                  onPressed: checked.isEmpty
+                      ? null
+                      : () => Navigator.pop(ctx, checked.toList()),
+                  child: Text('解密所选 (${checked.length})'),
+                ),
+                TextButton(
+                  onPressed: () => Navigator.pop(ctx, const <String>[]),
+                  child: const Text('全部解密'),
+                ),
+              ],
+            );
+          },
+        );
+      },
+    );
+  }
+
+  /// 归档任务执行器：isolate 跑重活 + 轮询进度对话框，完成后统一报错/成功
+  Future<void> _runArchiveJob({
+    required String title,
+    required Future<void> Function() job,
+  }) async {
+    if (!mounted) return;
+    Object? error;
+    showDialog(
+      context: context,
+      barrierDismissible: false,
+      builder: (ctx) => _ArchiveProgressDialog(title: title),
+    );
+    try {
+      await Isolate.run(job);
+    } catch (e) {
+      error = e;
+    }
+    if (!mounted) return;
+    Navigator.of(context).pop(); // 关进度对话框
+    if (error != null) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('$error'), backgroundColor: Colors.red),
+      );
+    } else {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('操作成功')),
+      );
+    }
+  }
+
+  static String _formatBytes(int bytes) {
+    if (bytes < 1024) return '$bytes B';
+    if (bytes < 1024 * 1024) return '${(bytes / 1024).toStringAsFixed(1)} KB';
+    if (bytes < 1024 * 1024 * 1024) {
+      return '${(bytes / (1024 * 1024)).toStringAsFixed(1)} MB';
+    }
+    return '${(bytes / (1024 * 1024 * 1024)).toStringAsFixed(2)} GB';
   }
 
   /// 操作后刷新：在浏览视图则刷新当前目录，展开的目录列表也刷新缓存
@@ -1142,6 +1348,7 @@ class WeiMiVaultScreenState extends State<WeiMiVaultScreen> {
     if (item.isDirectory) {
       entries = [
         _ctxMenuItem('open', Icons.folder_open, '打开'),
+        _ctxMenuItem('packfolder', Icons.folder_zip_outlined, '加密文件夹'),
         _ctxMenuItem('rename', Icons.drive_file_rename_outline, '重命名'),
       ];
     } else if (multi) {
@@ -1184,6 +1391,9 @@ class WeiMiVaultScreenState extends State<WeiMiVaultScreen> {
     switch (action) {
       case 'open':
         _navigateTo(item.fullPath);
+        break;
+      case 'packfolder':
+        await _packFolderWithDialog(item.fullPath);
         break;
       case 'view':
         await _viewFile(item);
@@ -2666,6 +2876,79 @@ class _FileListItem extends StatelessWidget {
           : null,
       onTap: onTap,
       onLongPress: onLongPress,
+      ),
+    );
+  }
+}
+
+/// 归档打包/解包进度对话框：轮询 Rust 侧原子计数器（明文字节）。
+/// 后台任务跑在 isolate，UI 线程空闲，轮询可正常刷新。
+class _ArchiveProgressDialog extends StatefulWidget {
+  final String title;
+  const _ArchiveProgressDialog({required this.title});
+
+  @override
+  State<_ArchiveProgressDialog> createState() => _ArchiveProgressDialogState();
+}
+
+class _ArchiveProgressDialogState extends State<_ArchiveProgressDialog> {
+  Timer? _timer;
+  int _done = 0;
+  int _total = 0;
+
+  @override
+  void initState() {
+    super.initState();
+    _timer = Timer.periodic(const Duration(milliseconds: 400), (_) => _poll());
+    _poll();
+  }
+
+  void _poll() {
+    final p = EncryptionService.archiveProgress();
+    if (!mounted) return;
+    setState(() {
+      _done = p.done;
+      _total = p.total;
+    });
+  }
+
+  String _fmt(int b) {
+    if (b < 1024) return '$b B';
+    if (b < 1024 * 1024) return '${(b / 1024).toStringAsFixed(1)} KB';
+    if (b < 1024 * 1024 * 1024) return '${(b / (1024 * 1024)).toStringAsFixed(1)} MB';
+    return '${(b / (1024 * 1024 * 1024)).toStringAsFixed(2)} GB';
+  }
+
+  @override
+  void dispose() {
+    _timer?.cancel();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final value = _total > 0 ? _done / _total : null;
+    return PopScope(
+      canPop: false,
+      child: AlertDialog(
+        title: Text(widget.title),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            LinearProgressIndicator(value: value),
+            const SizedBox(height: 14),
+            Text(
+              value != null ? '已处理 ${_fmt(_done)} / ${_fmt(_total)}' : '准备中…',
+              style: const TextStyle(fontSize: 13),
+            ),
+            const SizedBox(height: 6),
+            Text(
+              '大文件夹耗时较长，请勿关闭窗口',
+              style: TextStyle(fontSize: 11, color: Colors.grey.shade500),
+            ),
+          ],
+        ),
       ),
     );
   }

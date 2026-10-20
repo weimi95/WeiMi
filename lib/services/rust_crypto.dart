@@ -1,3 +1,4 @@
+import 'dart:convert';
 import 'dart:ffi' as ffi;
 import 'dart:io';
 import 'dart:typed_data';
@@ -718,5 +719,226 @@ class RustCrypto {
       calloc.free(inputPathPtr);
       calloc.free(hintLenPtr);
     }
+  }
+
+  // ---- 归档容器（文件夹加密，magic WEMI_FARC）----
+
+  /// 打包文件夹 → 单文件 .wemi 归档（逐文件 AES-256-GCM + 加密清单）。
+  /// 返回码：0 成功；-1 参数；-2 IO/加密失败；-3 空文件夹；-4 源目录不存在。
+  static void packFolder(
+    String dirPath,
+    String outputPath,
+    Uint8List password, {
+    String? hint,
+    bool isMobile = false,
+  }) {
+    _loadLibrary();
+
+    final packFunc = _lib!.lookupFunction<
+      ffi.Int32 Function(
+        ffi.Pointer<ffi.Char> dirPathPtr,
+        ffi.Pointer<ffi.Char> outputPathPtr,
+        ffi.Pointer<ffi.Uint8> passwordPtr,
+        ffi.Size passwordLen,
+        ffi.Pointer<ffi.Char> hintPtr,
+        ffi.Bool isMobile,
+      ),
+      int Function(
+        ffi.Pointer<ffi.Char> dirPathPtr,
+        ffi.Pointer<ffi.Char> outputPathPtr,
+        ffi.Pointer<ffi.Uint8> passwordPtr,
+        int passwordLen,
+        ffi.Pointer<ffi.Char> hintPtr,
+        bool isMobile,
+      )
+    >('pack_folder');
+
+    final dirPathPtr = dirPath.toNativeUtf8().cast<ffi.Char>();
+    final outputPathPtr = outputPath.toNativeUtf8().cast<ffi.Char>();
+    final passwordPtr = _allocateUint8List(password);
+    final hintPtr = hint != null
+        ? hint.toNativeUtf8().cast<ffi.Char>()
+        : ffi.nullptr;
+
+    try {
+      final result = packFunc(
+        dirPathPtr,
+        outputPathPtr,
+        passwordPtr,
+        password.length,
+        hintPtr,
+        isMobile,
+      );
+      if (result != 0) {
+        throw Exception('Folder packing failed with code: $result');
+      }
+    } finally {
+      calloc.free(dirPathPtr);
+      calloc.free(outputPathPtr);
+      calloc.free(passwordPtr);
+      if (hintPtr != ffi.nullptr) {
+        calloc.free(hintPtr);
+      }
+    }
+  }
+
+  /// 解包整个归档到 outputDir。返回码语义同 packFolder（-2=密码错/损坏，-3=非归档）。
+  static void unpackArchive(
+    String archivePath,
+    String outputDir,
+    Uint8List password,
+  ) {
+    _loadLibrary();
+
+    final unpackFunc = _lib!.lookupFunction<
+      ffi.Int32 Function(
+        ffi.Pointer<ffi.Char> archivePathPtr,
+        ffi.Pointer<ffi.Char> outputDirPtr,
+        ffi.Pointer<ffi.Uint8> passwordPtr,
+        ffi.Size passwordLen,
+        ffi.Bool isMobile,
+      ),
+      int Function(
+        ffi.Pointer<ffi.Char> archivePathPtr,
+        ffi.Pointer<ffi.Char> outputDirPtr,
+        ffi.Pointer<ffi.Uint8> passwordPtr,
+        int passwordLen,
+        bool isMobile,
+      )
+    >('unpack_archive');
+
+    final archivePathPtr = archivePath.toNativeUtf8().cast<ffi.Char>();
+    final outputDirPtr = outputDir.toNativeUtf8().cast<ffi.Char>();
+    final passwordPtr = _allocateUint8List(password);
+
+    try {
+      final result = unpackFunc(
+        archivePathPtr,
+        outputDirPtr,
+        passwordPtr,
+        password.length,
+        false,
+      );
+      if (result != 0) {
+        throw Exception('Archive unpacking failed with code: $result');
+      }
+    } finally {
+      calloc.free(archivePathPtr);
+      calloc.free(outputDirPtr);
+      calloc.free(passwordPtr);
+    }
+  }
+
+  /// 输密码后列归档清单（Rust 侧返回 JSON，Dart 解析）。
+  /// 返回 {'ok': true, 'entries': [{'p':..,'s':..}], 'dirs': [...], 'hint': ..}
+  /// 或 {'ok': false, 'code': -2/-3}。
+  static Map<String, dynamic> archiveList(
+    String archivePath,
+    Uint8List password,
+  ) {
+    _loadLibrary();
+
+    final listFunc = _lib!.lookupFunction<
+      ffi.Pointer<ffi.Char> Function(
+        ffi.Pointer<ffi.Char> archivePathPtr,
+        ffi.Pointer<ffi.Uint8> passwordPtr,
+        ffi.Size passwordLen,
+      ),
+      ffi.Pointer<ffi.Char> Function(
+        ffi.Pointer<ffi.Char> archivePathPtr,
+        ffi.Pointer<ffi.Uint8> passwordPtr,
+        int passwordLen,
+      )
+    >('archive_list');
+
+    final archivePathPtr = archivePath.toNativeUtf8().cast<ffi.Char>();
+    final passwordPtr = _allocateUint8List(password);
+
+    try {
+      final ptr = listFunc(archivePathPtr, passwordPtr, password.length);
+      if (ptr == ffi.nullptr) {
+        return {'ok': false, 'code': -99};
+      }
+      try {
+        final json = ptr.cast<ffi.Utf8>().toDartString();
+        return jsonDecode(json) as Map<String, dynamic>;
+      } finally {
+        archiveFreeString(ptr);
+      }
+    } finally {
+      calloc.free(archivePathPtr);
+      calloc.free(passwordPtr);
+    }
+  }
+
+  /// 选择性解密：只抽取 paths 中的相对路径；空列表 = 全部。
+  static void extractSelected(
+    String archivePath,
+    String outputDir,
+    Uint8List password,
+    List<String> paths,
+  ) {
+    _loadLibrary();
+
+    final extractFunc = _lib!.lookupFunction<
+      ffi.Int32 Function(
+        ffi.Pointer<ffi.Char> archivePathPtr,
+        ffi.Pointer<ffi.Char> outputDirPtr,
+        ffi.Pointer<ffi.Uint8> passwordPtr,
+        ffi.Size passwordLen,
+        ffi.Pointer<ffi.Char> pathsJsonPtr,
+      ),
+      int Function(
+        ffi.Pointer<ffi.Char> archivePathPtr,
+        ffi.Pointer<ffi.Char> outputDirPtr,
+        ffi.Pointer<ffi.Uint8> passwordPtr,
+        int passwordLen,
+        ffi.Pointer<ffi.Char> pathsJsonPtr,
+      )
+    >('extract_selected');
+
+    final archivePathPtr = archivePath.toNativeUtf8().cast<ffi.Char>();
+    final outputDirPtr = outputDir.toNativeUtf8().cast<ffi.Char>();
+    final passwordPtr = _allocateUint8List(password);
+    final pathsJson = jsonEncode(paths);
+    final pathsJsonPtr = pathsJson.toNativeUtf8().cast<ffi.Char>();
+
+    try {
+      final result = extractFunc(
+        archivePathPtr,
+        outputDirPtr,
+        passwordPtr,
+        password.length,
+        pathsJsonPtr,
+      );
+      if (result != 0) {
+        throw Exception('Selective extraction failed with code: $result');
+      }
+    } finally {
+      calloc.free(archivePathPtr);
+      calloc.free(outputDirPtr);
+      calloc.free(passwordPtr);
+      calloc.free(pathsJsonPtr);
+    }
+  }
+
+  /// 打包/解包进度（明文字节数）：done / total。total=0 表示未启动。
+  static ({int done, int total}) archiveProgress() {
+    _loadLibrary();
+    final doneFunc = _lib!.lookupFunction<ffi.Int64 Function(), int Function()>(
+        'archive_progress_done');
+    final totalFunc = _lib!.lookupFunction<ffi.Int64 Function(), int Function()>(
+        'archive_progress_total');
+    return (done: doneFunc(), total: totalFunc());
+  }
+
+  /// 释放 Rust 侧分配的 C 字符串（archive_list 返回值）。
+  static void archiveFreeString(ffi.Pointer<ffi.Char> ptr) {
+    _loadLibrary();
+    final freeFunc = _lib!.lookupFunction<
+      ffi.Void Function(ffi.Pointer<ffi.Char> ptr),
+      void Function(ffi.Pointer<ffi.Char> ptr)
+    >('archive_free_string');
+    freeFunc(ptr);
   }
 }

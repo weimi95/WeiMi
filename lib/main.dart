@@ -701,11 +701,14 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
 
     try {
       final decryptFiles = <String>[];
+      final packDirs = <String>[];
       final encryptFiles = <String>[];
 
       for (final xfile in files) {
         final path = xfile.path;
-        if (path.toLowerCase().endsWith('.wemi')) {
+        if (await FileSystemEntity.isDirectory(path)) {
+          packDirs.add(path);
+        } else if (path.toLowerCase().endsWith('.wemi')) {
           decryptFiles.add(path);
         } else {
           final isEnc = await EncryptionService.isEncryptedFile(path);
@@ -717,6 +720,10 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
         }
       }
 
+      for (final dir in packDirs) {
+        if (!mounted) return;
+        await _filesKey.currentState?.packFolderFlow(dir);
+      }
       if (decryptFiles.isNotEmpty) {
         await _processDecryptFiles(decryptFiles);
       }
@@ -909,7 +916,13 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
 
   Future<void> _processDecryptFiles(List<String> filePaths) async {
     final encryptedFiles = <String>[];
+    final archiveFiles = <String>[];
     for (final filePath in filePaths) {
+      // 归档容器（WEMI_FARC）走独立解包流程（列清单/勾选/进度）
+      if (await EncryptionService.isArchiveFile(filePath)) {
+        archiveFiles.add(filePath);
+        continue;
+      }
       final isEncrypted = await EncryptionService.isEncryptedFile(filePath);
       if (isEncrypted) {
         encryptedFiles.add(filePath);
@@ -919,6 +932,11 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
           isError: true,
         );
       }
+    }
+
+    for (final archivePath in archiveFiles) {
+      if (!mounted) return;
+      await _filesKey.currentState?.openArchiveFlow(archivePath);
     }
 
     if (encryptedFiles.isEmpty) return;

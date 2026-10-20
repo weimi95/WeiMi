@@ -20,6 +20,8 @@ mod usn;
 mod watcher;
 // 微密保险箱：密码库（钥匙环）+ v3 文件格式 + 缩略图（全平台）
 mod vault;
+// 微密归档容器：文件夹加密（.wemi 归档 format v1，magic WEMI_FARC）
+mod archive;
 
 const NONCE_SIZE: usize = 12;
 const TAG_SIZE: usize = 16;
@@ -37,7 +39,7 @@ fn derive_key(password: &[u8]) -> [u8; 32] {
     key
 }
 
-fn get_chunk_size(is_mobile: bool) -> usize {
+pub(crate) fn get_chunk_size(is_mobile: bool) -> usize {
     if is_mobile {
         128 * 1024 * 1024
     } else {
@@ -61,7 +63,7 @@ fn get_parallel_batch_size(cpu_cores: usize, is_mobile: bool) -> usize {
     }
 }
 
-fn generate_nonce() -> [u8; NONCE_SIZE] {
+pub(crate) fn generate_nonce() -> [u8; NONCE_SIZE] {
     let mut nonce = [0u8; NONCE_SIZE];
     rand::thread_rng().fill_bytes(&mut nonce);
     nonce
