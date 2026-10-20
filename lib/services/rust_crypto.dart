@@ -860,7 +860,7 @@ class RustCrypto {
         return {'ok': false, 'code': -99};
       }
       try {
-        final json = ptr.cast<ffi.Utf8>().toDartString();
+        final json = ptr.cast<Utf8>().toDartString();
         return jsonDecode(json) as Map<String, dynamic>;
       } finally {
         archiveFreeString(ptr);
