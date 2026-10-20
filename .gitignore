@@ -70,6 +70,12 @@ rust_crypto.dll
 librust_crypto.so
 librust_crypto.dylib
 
+# Legacy (classic Win7/XP) build output — huge, never commit
+legacy/target/
+
+# 本地下载的发布资产 / CI 拉取的归档不入库
+downloads/
+
 # AI 
 .claude
 # WorkBuddy

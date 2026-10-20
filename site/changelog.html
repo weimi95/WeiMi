@@ -1,0 +1,291 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="robots" content="noindex">
+<title>微密文件 · 更新日志</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🔒</text></svg>">
+<style>
+/* 自包含单页：不引任何外部资源，断网也能开。
+   配色跟随官网首页（暗色极光风），主色用官网的青。 */
+:root {
+  --accent: 34, 211, 238;
+  --bg: #07070c;
+  --card: rgba(255, 255, 255, 0.045);
+  --text: #e8e9f0;
+  --muted: #9aa0b4;
+  --line: rgba(255, 255, 255, 0.09);
+}
+* { box-sizing: border-box; }
+body {
+  margin: 0;
+  padding: 2.8rem 1.25rem 4rem;
+  background:
+    radial-gradient(120% 120% at 50% 0%, #0c0c16 0%, #07070c 60%);
+  color: var(--text);
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC",
+    "Hiragino Sans GB", "Microsoft YaHei", "Noto Sans SC", system-ui, sans-serif;
+  font-size: 16px;
+  line-height: 1.7;
+  -webkit-font-smoothing: antialiased;
+}
+main { max-width: 46rem; margin: 0 auto; }
+a { color: rgb(var(--accent)); text-decoration: none; }
+a:hover { text-decoration: underline; }
+header { margin-bottom: 2.4rem; }
+h1 {
+  margin: 0 0 0.4rem;
+  font-size: 1.7rem;
+  font-weight: 800;
+  letter-spacing: -0.01em;
+}
+h1 .grad {
+  background: linear-gradient(100deg, #22d3ee, #a855f7 55%, #f472b6);
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+}
+.badge {
+  display: inline-block;
+  margin-left: 0.55rem;
+  padding: 0.12rem 0.68rem;
+  border-radius: 1rem;
+  background: rgb(var(--accent) / 0.12);
+  border: 1px solid rgb(var(--accent) / 0.35);
+  color: rgb(var(--accent));
+  font-size: 0.84rem;
+  font-weight: 600;
+  vertical-align: 0.14em;
+}
+.sub { margin: 0; color: var(--muted); font-size: 0.92rem; }
+.back { display: inline-block; margin-bottom: 1.4rem; font-size: 0.9rem; }
+
+/* 时间线：左侧竖线 + 圆点，纯 CSS */
+.log {
+  list-style: none;
+  margin: 0;
+  padding: 0 0 0 1.6rem;
+  border-left: 2px solid var(--line);
+}
+.log > li { position: relative; padding: 0 0 1.9rem; }
+.log > li::before {
+  content: "";
+  position: absolute;
+  left: -1.6rem;
+  top: 0.62rem;
+  width: 0.7rem;
+  height: 0.7rem;
+  margin-left: -0.36rem;
+  border-radius: 50%;
+  background: var(--muted);
+  box-shadow: 0 0 0 3px var(--bg);
+}
+.log > li.current::before { background: rgb(var(--accent)); }
+.ver { font-weight: 700; font-size: 1.05rem; }
+.log > li.current .ver { color: rgb(var(--accent)); }
+.date {
+  margin-left: 0.55rem;
+  color: var(--muted);
+  font-size: 0.85rem;
+  font-weight: 400;
+}
+ul.changes { margin: 0.45rem 0 0; padding-left: 1.15rem; }
+ul.changes li { margin: 0.16rem 0; }
+ul.changes li::marker { color: var(--muted); }
+strong { font-weight: 600; }
+code {
+  padding: 0.1em 0.36em;
+  border-radius: 0.3em;
+  background: rgb(var(--accent) / 0.12);
+  color: rgb(var(--accent));
+  font-size: 0.88em;
+  font-family: ui-monospace, Consolas, "Courier New", monospace;
+  word-break: break-all;
+}
+section.credits {
+  margin-top: 0.5rem;
+  padding: 1.2rem 1.4rem;
+  border: 1px solid var(--line);
+  border-radius: 1rem;
+  background: var(--card);
+}
+section.credits h2 { margin: 0 0 0.6rem; font-size: 1rem; font-weight: 700; }
+section.credits dl {
+  margin: 0;
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: 0.3rem 1.1rem;
+  font-size: 0.92rem;
+}
+section.credits dt { color: var(--muted); white-space: nowrap; }
+section.credits dd { margin: 0; }
+footer { margin-top: 2.6rem; color: var(--muted); font-size: 0.88rem; }
+@media (max-width: 480px) {
+  section.credits dl { grid-template-columns: 1fr; gap: 0.1rem; }
+  section.credits dd { margin-bottom: 0.55rem; }
+}
+</style>
+</head>
+<body>
+<main>
+  <a class="back" href="/weimi/">← 返回官网首页</a>
+  <header>
+    <h1>微密文件 <span class="grad">WeiMi</span> · 更新日志<span class="badge">v1.1.00</span></h1>
+    <p class="sub">
+      按时间倒序记录每一版改了什么，方便日后回看「某个功能是哪一版加的」。
+      下载最新版见<a href="/weimi/">官网首页</a>。
+    </p>
+  </header>
+
+  <ul class="log">
+    <li class="current">
+      <span class="ver">v1.1.00</span><span class="date">2026-10-20</span>
+      <ul class="changes">
+        <li><strong>文件夹加密（单文件归档）</strong>：把整个文件夹打包成一个加密归档（扩展名 <code>.wemi</code>，容器格式 <code>WEMI_FARC</code> v1），用同一个口令保护；归档内的<strong>文件名与目录结构也加密</strong>（AES-256-GCM），外人拿到归档看不到里面有什么</li>
+        <li><strong>逐文件独立分块</strong>：归档内每个文件独立加密、大文件自动分块（桌面 256MB / 手机 128MB），单个文件损坏不会影响其余文件解包，且断点可续</li>
+        <li><strong>选择性解包</strong>：解密归档时可先「列出内容」，勾选其中部分文件单独解出，不必整包解压</li>
+        <li><strong>全链路入口</strong>：电脑端把文件夹拖进窗口即打包；手机端长按文件夹「加密文件夹」、点 <code>.wemi</code> 归档走解密/选择性解包；进度实时显示，底层复用 Rust 加密引擎（与单文件加密同一套 AES-256-GCM）</li>
+      </ul>
+    </li>
+    <li>
+      <span class="ver">v1.0.72</span><span class="date">2026-10-19</span>
+      <ul class="changes">
+        <li>例行发版：随「微密经典版（Win7/XP 客户端）」同期，主程序安装链路与启动稳定性加固</li>
+      </ul>
+    </li>
+    <li>
+      <span class="ver">v1.0.71</span><span class="date">2026-10-18</span>
+      <ul class="changes">
+        <li>APK 安装链路修复，文件管理交互顺手度对齐</li>
+      </ul>
+    </li>
+    <li>
+      <span class="ver">v1.0.70</span><span class="date">2026-10-18</span>
+      <ul class="changes">
+        <li><strong>飞传设备合并显示修复</strong>：开着 LocalSend 兼容时，同一台设备仍可能出现两条（一条「微密+LocalSend」+ 一条纯 LocalSend），个别情况下甚至只剩 LocalSend 条目——根因是合并后的微密条目已带链路，后续每条 LocalSend 广播都又新建了一条独立设备。现在微密设备永远优先，LocalSend 只作为链路挂在微密条目上，任何时序下同 IP 最多一条；手机端微密广播因省电延迟时，合并条目也不会被清掉</li>
+      </ul>
+    </li>
+    <li>
+      <span class="ver">v1.0.69</span><span class="date">2026-10-18</span>
+      <ul class="changes">
+        <li><strong>双击 Ctrl 秒开浮窗</strong>：修复冷启路径约 0.5s 延迟——弹窗会话不再串行跑注册表写入、守护进程握手、飞传启动、索引加载等一整套常驻初始化，只保留必要项；UI 常驻时呼出也跳过了重复的窗口几何下发。按键检测本身 30ms 轮询不变</li>
+      </ul>
+    </li>
+    <li>
+      <span class="ver">v1.0.68</span><span class="date">2026-10-18</span>
+      <ul class="changes">
+        <li><strong>设备列表合并显示</strong>：同一台手机同装微密 + LocalSend 两个 App 时，电脑端只显示一条设备（副标题「微密+LocalSend」），按 IP 自动合并双链路；只装真 LocalSend App 的对端仍正常单条显示</li>
+        <li><strong>文件夹发送</strong>：设备菜单新增「发送文件夹」，自研协议按相对路径传输、保留目录结构落盘；每个顶层目录在传输记录里汇总为一条。LocalSend 对端不支持目录（协议本身无此概念），会明确提示</li>
+        <li><strong>LocalSend 兼容总开关</strong>：设置 → 微密飞传，默认开；关掉后不再广播/扫描 LocalSend 设备（隐私向兜底，不是显示开关）</li>
+        <li>传输页「网页快传」卡片改名「微密飞传-网页版」</li>
+      </ul>
+    </li>
+    <li>
+      <span class="ver">v1.0.67</span><span class="date">2026-10-17</span>
+      <ul class="changes">
+        <li><strong>LocalSend v2 协议互通</strong>：与开源的 LocalSend App 互收互发文件（组播发现 + HTTP 传输双通道，Android 免原生代码）。协议考古级兼容：兼容新旧两代端点名、MIME 文件类型、对端默认 HTTPS 自签证书；本机恒明文</li>
+        <li>防火墙放行范围扩到 LocalSend 端口（UDP/TCP 53317），老用户不会被误报</li>
+      </ul>
+    </li>
+    <li>
+      <span class="ver">v1.0.66</span><span class="date">2026-10-17</span>
+      <ul class="changes">
+        <li><strong>保险箱「打不开报密码错」根治</strong>：真实根因是缓存临时目录被系统清理后无人重建（与密码无关），底层错误码分型专错专报，不再把所有失败翻译成「密码不正确」</li>
+        <li>保险箱导入完成后询问是否删除原文件（保留/回收站/永久删除，可记住选择）</li>
+        <li>电脑右键菜单 / 手机长按多选菜单补上「解密」项（此前只有加密）</li>
+      </ul>
+    </li>
+    <li>
+      <span class="ver">v1.0.65</span><span class="date">2026-10-17</span>
+      <ul class="changes">
+        <li><strong>飞传防火墙助手</strong>：热点/公用网络下 Windows 防火墙默认拦入站导致对端搜不到/发不过去——传输页自动检测，一键放行（UAC 确认）或给出手动命令</li>
+        <li>多网卡环境显示全部可达 IP</li>
+      </ul>
+    </li>
+    <li>
+      <span class="ver">v1.0.64</span><span class="date">2026-10-17</span>
+      <ul class="changes">
+        <li><strong>指纹解锁真修复</strong>：Android BiometricPrompt 漏设取消按钮导致系统指纹框从未弹出（v1.0.57-63 全中）——补全必填项、错误码翻中文、密钥失效自清理、解锁态开开关当场录入</li>
+      </ul>
+    </li>
+    <li>
+      <span class="ver">v1.0.63</span><span class="date">2026-10-17</span>
+      <ul class="changes">
+        <li><strong>保险箱密码自愈链</strong>：未保存密码的文件亮「未存密码」角标、支持批量补录；忘存时先静默试主密码自动修映射，失败再弹输入框（验证通过才保存，防止错密码污染钥匙环）</li>
+      </ul>
+    </li>
+    <li>
+      <span class="ver">v1.0.57 – v1.0.62</span><span class="date">2026-10-15</span>
+      <ul class="changes">
+        <li><strong>保险箱正式可用</strong>（v1.0.57）：加密核心 vault 模块上船，密钥环（Argon2id + AES-256-GCM 三层封装）+ 文件密码/主密码双轨</li>
+        <li>飞传批次修复：中文目录乱码、同设备 2 分钟豁免窗、自动打开目录去重</li>
+        <li>指纹录入 UX、网页版消息时间戳、通知点击直达传输记录等一批体验修订</li>
+      </ul>
+    </li>
+    <li>
+      <span class="ver">v1.0.53 – v1.0.56</span><span class="date">2026-10-15</span>
+      <ul class="changes">
+        <li>保险箱初版（设置主密码 / 导入 / 三层加密）、冷启闪屏修复、视频缩略图类名修复等</li>
+      </ul>
+    </li>
+    <li>
+      <span class="ver">v1.0.51 – v1.0.52</span><span class="date">2026-10-15</span>
+      <ul class="changes">
+        <li>索引白名单（只索引勾选文件夹）、设置中心语法残留修复</li>
+      </ul>
+    </li>
+    <li>
+      <span class="ver">v1.0.49 – v1.0.50</span><span class="date">2026-10-14</span>
+      <ul class="changes">
+        <li><strong>守护进程端口释放修复</strong>：此前 UI 在后台时飞传端口永不释放、电脑搜不到手机——守护进程改为每秒重读配置 + 主动踢醒阻塞线程</li>
+        <li>快捷启动区「添加」无反应修复、网址自动补 <code>https://</code>、双击 Ctrl 加释放间隔下限（长按不误触）</li>
+      </ul>
+    </li>
+    <li>
+      <span class="ver">v1.0.47 – v1.0.48</span><span class="date">2026-10-14</span>
+      <ul class="changes">
+        <li><strong>后台省内存模式（守护进程）</strong>：关窗后主程序完全退出，托盘图标与飞传交给约 10MB 的守护进程；点收包通知直达传输记录</li>
+        <li>浮窗快捷区重构（常用软件/网址网格 + 图标缓存）、索引启动自检（抽样比对，腐化自动重建）</li>
+      </ul>
+    </li>
+    <li>
+      <span class="ver">v1.0.44 – v1.0.46</span><span class="date">2026-10-13 / 14</span>
+      <ul class="changes">
+        <li>双击 Ctrl 快捷搜索浮窗上线（一屏 9 条 + Ctrl+1..9）、索引 zlib 压缩（128MB→16MB）、托盘幽灵图标修复</li>
+        <li>缩略图大中小档位 + 横竖图不裁切；点击行为重构（加密文件直接弹密码框）；收托盘释放索引内存</li>
+      </ul>
+    </li>
+    <li>
+      <span class="ver">v1.0.37 – v1.0.43</span><span class="date">2026-10-10 ~ 13</span>
+      <ul class="changes">
+        <li>模块化设置框架、索引实时增量、接收保存目录与加密目录解耦、设置中心「语言」分类、目录遍历方案回退等</li>
+      </ul>
+    </li>
+    <li>
+      <span class="ver">v1.0.36 及更早</span><span class="date">2026-10-10 前</span>
+      <ul class="changes">
+        <li>早期版本：基础加解密、自有 <code>.wemi</code> 格式（兼容旧 <code>.kyl</code>）、四平台齐发、微密飞传初版、内置查看器。此后所有版本均保持同一格式，老文件一直能打开</li>
+      </ul>
+    </li>
+  </ul>
+
+  <section class="credits">
+    <h2>关于</h2>
+    <dl>
+      <dt>加密引擎</dt><dd>Rust（AES-256-GCM），经 dart:ffi 桥接</dd>
+      <dt>支持平台</dt><dd>Windows 10+ · macOS 10.15+ · Linux · Android 7.0+</dd>
+      <dt>下载</dt><dd><a href="https://pan.quark.cn/s/e60186a6d3ee" target="_blank" rel="noopener">夸克网盘</a>（各版本附 SHA256 校验）</dd>
+      <dt>其他站点</dt><dd><a href="https://weimi95.github.io/" target="_blank" rel="noopener">阿伟小站</a> · <a href="https://weimi95.github.io/wei8/" target="_blank" rel="noopener">导航站</a> · <a href="https://weimi95.github.io/weitu/" target="_blank" rel="noopener">微图相册管家</a></dd>
+    </dl>
+  </section>
+
+  <footer>
+    <p>© <span id="year"></span> 微密文件 WeiMi · Apache 2.0</p>
+  </footer>
+</main>
+<script>
+  document.getElementById('year').textContent = new Date().getFullYear();
+</script>
+</body>
+</html>
