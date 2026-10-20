@@ -239,6 +239,71 @@ main { max-width: var(--maxw); margin: 0 auto; padding: 0 24px 4rem; }
 .dl-note a { color: var(--accent1); text-decoration: none; }
 .dl-note a:hover { color: var(--accent3); }
 
+/* ===== 界面预览 ===== */
+.shots-sub {
+  color: var(--muted);
+  font-size: 0.92rem;
+  margin: -0.6rem 0 1.6rem;
+}
+.shot-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
+  gap: 1.2rem;
+}
+.shot {
+  border-radius: 14px;
+  overflow: hidden;
+  background: var(--card-bg);
+  border: 1px solid var(--card-border);
+  transition: transform 0.22s ease, border-color 0.22s ease, box-shadow 0.22s ease;
+}
+.shot:hover {
+  transform: translateY(-4px);
+  border-color: rgba(34, 211, 238, 0.35);
+  box-shadow: 0 16px 44px -18px rgba(34, 211, 238, 0.35);
+}
+.shot img { display: block; width: 100%; height: auto; }
+.shot figcaption {
+  padding: 0.78rem 1rem 0.9rem;
+  font-size: 0.86rem;
+  color: var(--muted);
+}
+.shot figcaption strong {
+  display: block;
+  color: var(--fg);
+  font-size: 0.95rem;
+  margin-bottom: 0.15rem;
+}
+.shot-web {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+  gap: 1.2rem;
+  margin-top: 1.2rem;
+}
+
+.shot-phone {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(210px, 1fr));
+  gap: 1.2rem;
+  margin-top: 1.2rem;
+}
+.shot-group-label {
+  margin: 1.8rem 0 0.9rem;
+  font-size: 0.98rem;
+  font-weight: 700;
+  color: var(--fg);
+  display: flex;
+  align-items: center;
+  gap: 0.55rem;
+}
+.shot-group-label::before {
+  content: "";
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: linear-gradient(100deg, var(--accent1), var(--accent2));
+}
+
 /* ===== 三步上手 ===== */
 .steps {
   display: grid;
@@ -306,8 +371,10 @@ footer a:hover { color: var(--accent3); }
     <h1 class="name">微密文件 <span class="grad">WeiMi</span></h1>
     <p class="tagline">跨平台文件加密工具 · Rust 加密引擎（AES-256-GCM）· 加密之外，还能直接看</p>
     <nav class="hero-links">
-      <a class="btn" href="https://pan.quark.cn/s/ba97115eccfc" target="_blank" rel="noopener">下载最新版</a>
+      <a class="btn" href="https://pan.quark.cn/s/e60186a6d3ee" target="_blank" rel="noopener">下载最新版</a>
       <a class="btn ghost" href="#features">看看功能</a>
+      <a class="btn ghost" href="#screenshots">看看界面</a>
+      <a class="btn ghost" href="changelog.html">更新日志</a>
     </nav>
     <div class="badges">
       <span class="badge hl">v1.1.00</span>
@@ -351,11 +418,38 @@ footer a:hover { color: var(--accent3); }
 
         <article class="card reveal">
           <div class="card-head">
+            <span class="icon">🗝️</span>
+            <h3>保险箱 <span class="en">Vault</span></h3>
+          </div>
+          <p class="desc">给重要文件再上一道锁：主密码 + 指纹解锁（Android/macOS），每个文件可设独立密码，箱内直接看、导出即解密。密码忘了有主密码兜底与批量补录。</p>
+          <div class="tags"><span>主密码</span><span>指纹解锁</span><span>独立文件密码</span></div>
+        </article>
+
+        <article class="card reveal">
+          <div class="card-head">
+            <span class="icon">📡</span>
+            <h3>微密飞传 <span class="en">LAN 互传</span></h3>
+          </div>
+          <p class="desc">同一 WiFi 下设备间直传文件/文本，不走服务器、不耗流量；支持文件夹整体发送，还能与开源的 LocalSend App 互收互发。电脑端双击 Ctrl 秒呼搜索浮窗。</p>
+          <div class="tags"><span>局域网直传</span><span>文件夹发送</span><span>LocalSend 互通</span><span>网页版</span></div>
+        </article>
+
+        <article class="card reveal">
+          <div class="card-head">
+            <span class="icon">⌨️</span>
+            <h3>快捷启动浮窗 <span class="en">双击 Ctrl</span></h3>
+          </div>
+          <p class="desc">电脑上的效率入口：常用软件和网址一屏直达——拖入即添加、图标自动识别、Ctrl+1..9 秒开；输入关键词顺手全盘秒搜文件，搜到直接加密 / 解密 / 发送到手机，全程不跳主界面。</p>
+          <div class="tags"><span>快捷启动</span><span>全盘搜索</span><span>双击 Ctrl</span></div>
+        </article>
+
+        <article class="card reveal">
+          <div class="card-head">
             <span class="icon">🗂️</span>
             <h3>文件管理器</h3>
           </div>
           <p class="desc">常用目录（下载 / 文档 / 图片 / 相册 / 音乐 / 视频）折叠展开随手浏览，也支持添加自己的常用目录，加密选文件不用来回翻。</p>
-          <div class="tags"><span>常用目录</span><span>自定义目录</span></div>
+          <div class="tags"><span>常用目录</span><span>自定义目录</span><span>缩略图档位</span></div>
         </article>
 
         <article class="card reveal">
@@ -365,6 +459,15 @@ footer a:hover { color: var(--accent3); }
           </div>
           <p class="desc">Windows / macOS / Linux / Android 四端齐发，一套加密格式走天下；桌面端还支持文件拖拽直接加密。</p>
           <div class="tags"><span>Windows</span><span>macOS</span><span>Linux</span><span>Android</span></div>
+        </article>
+
+        <article class="card reveal">
+          <div class="card-head">
+            <span class="icon">🛡️</span>
+            <h3>省心细节</h3>
+          </div>
+          <p class="desc">关窗收后台只留约 10MB 守护进程继续跑飞传；热点网络防火墙一键放行；接收完成系统通知点击直达；加解密历史随时回看。</p>
+          <div class="tags"><span>后台省内存</span><span>防火墙助手</span><span>通知深链</span></div>
         </article>
 
         <article class="card reveal">
@@ -379,19 +482,102 @@ footer a:hover { color: var(--accent3); }
       </div>
     </section>
 
+    <section id="screenshots">
+      <h2 class="section-title reveal">界面预览</h2>
+      <p class="shots-sub reveal">Windows 电脑端与 Android 手机端实拍 · v1.0.69</p>
+      <p class="shot-group-label reveal">电脑端 · Windows</p>
+      <div class="shot-grid">
+
+        <figure class="shot reveal">
+          <img src="shots/main.png" alt="微密文件主界面：全盘搜索、常用目录与保险箱入口" loading="lazy">
+          <figcaption><strong>主界面</strong>搜索框直达全盘文件，常用目录随手浏览，保险箱单独成区</figcaption>
+        </figure>
+
+        <figure class="shot reveal">
+          <img src="shots/popup.png" alt="双击 Ctrl 呼出的快捷浮窗：常用软件与网址网格" loading="lazy">
+          <figcaption><strong>快捷浮窗</strong>软件 / 网址拖入即固定，Ctrl+1..9 秒开；输入即全盘搜文件</figcaption>
+        </figure>
+
+        <figure class="shot reveal">
+          <img src="shots/transfer.png" alt="微密飞传页：本机信息、网页版入口与附近设备" loading="lazy">
+          <figcaption><strong>微密飞传</strong>附近设备同机装两个 App 也合并显示为一条，标注「微密 + LocalSend」</figcaption>
+        </figure>
+
+        <figure class="shot reveal">
+          <img src="shots/settings-lan.png" alt="飞传设置：网页快传、可被发现、LocalSend 兼容与接收确认" loading="lazy">
+          <figcaption><strong>飞传设置</strong>网页快传开关、LocalSend 兼容总开关、未信任设备请求确认时限</figcaption>
+        </figure>
+
+        <figure class="shot reveal">
+          <img src="shots/settings-search.png" alt="搜索设置：快捷浮窗、失焦收起、索引与排除文件夹" loading="lazy">
+          <figcaption><strong>搜索设置</strong>浮窗开关与失焦收起、结果数量、索引文件夹 / 排除文件夹</figcaption>
+        </figure>
+
+        <figure class="shot reveal">
+          <img src="shots/settings-general.png" alt="通用与保险箱设置：切后台上锁、主密码、备份密码库" loading="lazy">
+          <figcaption><strong>通用与保险箱</strong>切后台即上锁、修改主密码、备份密码库、开机自启与省内存模式</figcaption>
+        </figure>
+
+      </div>
+      <div class="shot-web">
+
+        <figure class="shot reveal">
+          <img src="shots/web-light.png" alt="微密飞传网页版亮色界面：选择设备、发送文件或文本" loading="lazy">
+          <figcaption><strong>网页版 · 亮色</strong>同一 WiFi 浏览器打开即用，选设备发文件 / 发文本，免安装</figcaption>
+        </figure>
+
+        <figure class="shot reveal">
+          <img src="shots/web-dark.png" alt="微密飞传网页版暗色界面：文件直存接收目录" loading="lazy">
+          <figcaption><strong>网页版 · 暗色</strong>电脑处于托盘模式时，文件直接保存到接收目录，数据不出局域网</figcaption>
+        </figure>
+
+      </div>
+      <p class="shot-group-label reveal">手机端 · Android</p>
+      <div class="shot-phone">
+
+        <figure class="shot reveal">
+          <img src="shots/phone-main.jpg" alt="手机端主界面：全盘搜索、常用目录与保险箱" loading="lazy">
+          <figcaption><strong>主界面</strong>常用目录随手机存储自动列出，保险箱常驻「我的目录」</figcaption>
+        </figure>
+
+        <figure class="shot reveal">
+          <img src="shots/phone-menu.jpg" alt="手机端右上角菜单：视图切换与缩略图档位" loading="lazy">
+          <figcaption><strong>视图与缩略图</strong>列表 / 宫格 / 瀑布流，缩略图小中大三档随手切换</figcaption>
+        </figure>
+
+        <figure class="shot reveal">
+          <img src="shots/phone-settings.jpg" alt="手机端飞传设置：网页快传、可被发现、LocalSend 兼容" loading="lazy">
+          <figcaption><strong>飞传设置</strong>与电脑端同一套开关：网页快传、可被发现、LocalSend 兼容</figcaption>
+        </figure>
+
+        <figure class="shot reveal">
+          <img src="shots/phone-transfer.jpg" alt="手机端飞传页：附近设备只显示电脑一条" loading="lazy">
+          <figcaption><strong>微密飞传</strong>同机装两个 App 也只显示一台设备，不会出现重复条目</figcaption>
+        </figure>
+
+      </div>
+    </section>
+
     <section id="download">
       <h2 class="section-title reveal">下载</h2>
       <div class="dl-grid">
 
-        <article class="card dl-card reveal" style="grid-column: 1 / -1;">
+        <article class="card dl-card reveal">
           <span class="icon">⚡</span>
           <h3>夸克网盘 · 全平台安装包</h3>
           <p class="desc">Android APK · Windows ZIP · macOS DMG · Linux TAR.GZ · SHA256 校验文件<br>国内下载速度更快，链接长期有效，新版本自动同步更新</p>
-          <a class="btn" href="https://pan.quark.cn/s/ba97115eccfc" target="_blank" rel="noopener">打开夸克网盘下载</a>
+          <a class="btn" href="https://pan.quark.cn/s/e60186a6d3ee" target="_blank" rel="noopener">打开夸克网盘下载</a>
+        </article>
+
+        <article class="card dl-card reveal">
+          <span class="icon">🖥️</span>
+          <h3>微密文件 · 经典版</h3>
+          <p class="desc">旧版电脑（Win7 / XP）专用客户端，32 位单文件<br>免安装 · 不需要 .NET / VC 运行库 · 加解密 + 飞传互收</p>
+          <a class="btn" href="https://pan.quark.cn/s/e60186a6d3ee" target="_blank" rel="noopener">下载经典版（Win7/XP）</a>
         </article>
 
       </div>
-      <p class="dl-note reveal">网盘文件夹长期有效，历史版本并存留档，随取随用。</p>
+      <p class="dl-note reveal">网盘文件夹长期有效，按版本分文件夹存放（v1.0.65 起），经典版安装包在网盘「legacy」文件夹，历史版本并存留档，随取随用。</p>
     </section>
 
     <section id="howto">
@@ -423,6 +609,7 @@ footer a:hover { color: var(--accent3); }
   <footer>
     <p>© <span id="year"></span> 微密文件 WeiMi</p>
     <p class="foot-links">
+      <a href="changelog.html">更新日志</a> ·
       <a href="https://weimi95.github.io/" target="_blank" rel="noopener">阿伟小站</a> ·
       <a href="https://weimi95.github.io/weitu/" target="_blank" rel="noopener">微图相册管家</a> ·
       <a href="https://weimi95.github.io/wei8/" target="_blank" rel="noopener">导航站</a>
