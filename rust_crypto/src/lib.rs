@@ -22,6 +22,8 @@ mod watcher;
 mod vault;
 // 微密归档容器：文件夹加密（.wemi 归档 format v1，magic WEMI_FARC）
 mod archive;
+// LANDrop v2 协议加密原语（kx/secp256k1/BLAKE2b/ChaCha20-Poly1305-IETF，libsodium 对拍）
+mod landrop;
 
 const NONCE_SIZE: usize = 12;
 const TAG_SIZE: usize = 16;

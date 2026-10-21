@@ -14,6 +14,7 @@ import 'framework/setting_store.dart';
 import 'modules/language_module.dart';
 import 'modules/quick_search_module.dart';
 import 'services/tray_service.dart';
+import 'services/trusted_devices_service.dart';
 import 'services/hotkey_service.dart';
 import 'services/quick_search_window.dart';
 import 'services/file_operations_service.dart';
@@ -111,14 +112,21 @@ void main(List<String> args) async {
         if (ctx == null) {
           return const IncomingDecision(accepted: false, batchDefault: true);
         }
-        return showIncomingConfirmDialog(
+        final d = await showIncomingConfirmDialog(
           ctx,
           senderName: req.senderName,
           content: req.fileName,
           sizeBytes: req.fileSize,
           isText: req.fileName == '一条文本消息',
           countdownSec: LanTransferService.confirmTimeoutSecs(),
+          verifCode: req.verifCode,
+          trustable: req.trustable,
         );
+        // 勾选信任 → 按设备 ID 持久化（LANDrop 为 secp256k1 公钥 base64）
+        if (d.accepted && d.trust && req.trustable && req.senderId.isNotEmpty) {
+          await TrustedDevices.instance.add(req.senderId, req.senderName);
+        }
+        return d;
       };
     }
 

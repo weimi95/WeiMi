@@ -6,6 +6,7 @@ import 'package:flutter/services.dart';
 import 'package:path/path.dart' as p;
 import 'package:shared_preferences/shared_preferences.dart';
 import '../framework/setting_store.dart';
+import 'landrop_service.dart';
 import 'localsend_service.dart';
 import 'trusted_devices_service.dart';
 import 'transfer_history_service.dart';
@@ -233,6 +234,8 @@ class LanTransferService {
     await _ensureIdentity();
     // LocalSend v2 兼容层随接收开关启停（组播 announce + 53317 server）
     await LocalSendService.instance.start();
+    // LANDrop v2 兼容层随接收开关启停（UDP 52637 发现 + TCP 服务）
+    await LandropService.instance.start();
 
     if (_udpSocket == null) {
       if (Platform.isWindows) {
@@ -347,6 +350,7 @@ class LanTransferService {
     _announceTimer?.cancel();
     _announceTimer = null;
     await LocalSendService.instance.stop();
+    await LandropService.instance.stop();
     _events.add(LanEvent(LanEventType.receivingStopped));
     _stopAndroidForeground();
   }
@@ -618,22 +622,39 @@ class LanTransferService {
   /// single-flight：同设备并发连发多个文件时复用同一次确认。
   /// 手机分享 N 个文件 = N 个 POST 几乎同时到达，只弹一个框，
   /// 全部文件共用用户的这一次决定（=「这一批」的语义）。
-  final Map<String, Future<bool>> _pendingAsks = {};
+  final Map<String, Future<IncomingDecision>> _pendingAsks = {};
 
   Future<bool> decideAccept(
       {required String senderId,
       required Future<IncomingDecision> Function() ask}) async {
-    if (TrustedDevices.instance.isTrustedSync(senderId)) return true;
+    final d = await decideAcceptDecision(senderId: senderId, ask: ask);
+    return d.accepted;
+  }
+
+  /// 完整决定版（LANDrop 兼容层需要 trust 标记来持久化信任设备）。
+  /// 其余语义与 decideAccept 完全一致。
+  Future<IncomingDecision> decideAcceptDecision(
+      {required String senderId,
+      required Future<IncomingDecision> Function() ask}) async {
+    if (TrustedDevices.instance.isTrustedSync(senderId)) {
+      return const IncomingDecision(accepted: true, batchDefault: false);
+    }
     final now = DateTime.now();
     // 顺手清过期项，防长期膨胀
     _batchGrantedUntil.removeWhere((_, v) => now.isAfter(v));
     _batchRejectedUntil.removeWhere((_, v) => now.isAfter(v));
     final rejected = _batchRejectedUntil[senderId];
-    if (rejected != null && now.isBefore(rejected)) return false;
+    if (rejected != null && now.isBefore(rejected)) {
+      return const IncomingDecision(accepted: false, batchDefault: true);
+    }
     final granted = _batchGrantedUntil[senderId];
-    if (granted != null && now.isBefore(granted)) return true;
+    if (granted != null && now.isBefore(granted)) {
+      return const IncomingDecision(accepted: true, batchDefault: false);
+    }
     final mode = SettingStore.get<String>('lan_untrusted_mode', 'confirm');
-    if (mode == 'reject') return false;
+    if (mode == 'reject') {
+      return const IncomingDecision(accepted: false, batchDefault: true);
+    }
     // single-flight：同设备已有一个请求在等用户确认时，后续请求复用其结果
     final pending = _pendingAsks[senderId];
     if (pending != null) return pending;
@@ -646,7 +667,7 @@ class LanTransferService {
     }
   }
 
-  Future<bool> _askOnce(
+  Future<IncomingDecision> _askOnce(
       String senderId, Future<IncomingDecision> Function() ask) async {
     IncomingDecision decision;
     try {
@@ -665,7 +686,7 @@ class LanTransferService {
         _batchRejectedUntil[senderId] = until;
       }
     }
-    return decision.accepted;
+    return decision;
   }
 
   /// 某设备当前是否还有进行中的文件接收（按 senderName 计数）。
@@ -674,6 +695,15 @@ class LanTransferService {
 
   bool hasActiveIncomingByName(String senderName) =>
       (_activeIncomingByName[senderName] ?? 0) > 0;
+
+  /// 外部兼容层（LANDrop）登记进行中的接收（供通知整批聚合判批）
+  void beginIncomingByName(String senderName) {
+    _activeIncomingByName[senderName] =
+        (_activeIncomingByName[senderName] ?? 0) + 1;
+  }
+
+  void endIncomingByName(String senderName) =>
+      _decActiveIncomingByName(senderName);
 
   void _decActiveIncomingByName(String senderName) {
     final n = (_activeIncomingByName[senderName] ?? 1) - 1;
@@ -1851,9 +1881,11 @@ class LanPeer {
   final int httpPort;
   final bool trusted;
   DateTime lastSeen;
-  /// 协议：'weimi'=微密自研飞传；'localsend'=LocalSend v2 兼容设备。
+  /// 协议：'weimi'=微密自研飞传；'localsend'=LocalSend v2 兼容设备；
+  /// 'landrop'=LANDrop v2 兼容设备（纯 LANDrop 物理设备才单独立项）。
   /// 合并显示后一台物理设备只有一条记录：同 IP 同时跑着微密+LocalSend 的
-  /// 设备以 weimi 条目为主，LocalSend 链路信息挂在 [lsPort]/[lsHttps] 上。
+  /// 设备以 weimi 条目为主，LocalSend 链路信息挂在 [lsPort]/[lsHttps] 上；
+  /// LANDrop 链路信息（如有）挂在 [ldPort]/[ldPkB64] 上。
   final String protocol;
   /// LocalSend 设备的传输 scheme（App 默认 HTTPS only，自签证书）。
   /// 微密设备用不到（恒 false）。
@@ -1863,6 +1895,10 @@ class LanPeer {
   final int? lsPort;
   /// LocalSend 链路是否走 HTTPS（对端 App 默认开）。
   final bool lsHttps;
+  /// 该设备（IP）上的 LANDrop 链路 TCP 端口；null=没有 LANDrop 链路。
+  final int? ldPort;
+  /// LANDrop 设备身份公钥 base64（= 信任列表 key；LANDrop 信任按它持久化）。
+  final String? ldPkB64;
 
   LanPeer({
     required this.id,
@@ -1875,12 +1911,20 @@ class LanPeer {
     this.https = false,
     this.lsPort,
     this.lsHttps = false,
+    this.ldPort,
+    this.ldPkB64,
   });
 
   bool get isLocalSend => protocol == 'localsend';
 
   /// 是否同时具备 LocalSend 链路（合并条目：主链路微密 + LocalSend 兜底）。
   bool get hasLocalSendLink => lsPort != null;
+
+  /// 纯 LANDrop 设备条目（无微密/LocalSend 主链路的物理设备）。
+  bool get isLandrop => protocol == 'landrop';
+
+  /// 是否同时具备 LANDrop 链路（合并条目附加信息）。
+  bool get hasLandropLink => ldPort != null;
 
   LanPeer copyWith({bool? trusted, int? lsPort, bool? lsHttps}) => LanPeer(
         id: id,
@@ -1893,6 +1937,8 @@ class LanPeer {
         https: https,
         lsPort: lsPort ?? this.lsPort,
         lsHttps: lsHttps ?? this.lsHttps,
+        ldPort: ldPort,
+        ldPkB64: ldPkB64,
       );
 }
 
@@ -1905,7 +1951,14 @@ class LanPeer {
 class IncomingDecision {
   final bool accepted;
   final bool batchDefault;
-  const IncomingDecision({required this.accepted, required this.batchDefault});
+  /// 用户勾选了「信任该设备」（仅 trustable 请求有意义）
+  final bool trust;
+
+  const IncomingDecision({
+    required this.accepted,
+    required this.batchDefault,
+    this.trust = false,
+  });
 }
 
 class IncomingRequest {
@@ -1913,12 +1966,18 @@ class IncomingRequest {
   final String senderName;
   final String fileName;
   final int fileSize;
+  /// 是否可在确认框里勾选「信任该设备」（LANDrop：按 secp256k1 身份公钥持久化）
+  final bool trustable;
+  /// 6 位 verifCode（LANDrop TOFU 核对用；非 LANDrop 来源为 null）
+  final String? verifCode;
 
   IncomingRequest({
     required this.senderId,
     required this.senderName,
     required this.fileName,
     required this.fileSize,
+    this.trustable = false,
+    this.verifCode,
   });
 }
 

@@ -12,6 +12,7 @@ import 'daemon_service.dart';
 import 'lan_transfer_service.dart';
 import 'quick_search_window.dart';
 import 'share_receive_service.dart';
+import 'trusted_devices_service.dart';
 import 'vault_service.dart';
 
 /// 托盘策略（v1.0.47 起双模式）：
@@ -375,19 +376,28 @@ Future<IncomingDecision> _globalConfirmRequest(IncomingRequest req) async {
   if (ctx == null) {
     return const IncomingDecision(accepted: false, batchDefault: true);
   }
-  return showIncomingConfirmDialog(
+  final d = await showIncomingConfirmDialog(
     ctx,
     senderName: req.senderName,
     content: req.fileName,
     sizeBytes: req.fileSize,
     isText: req.fileName == '一条文本消息',
     countdownSec: LanTransferService.confirmTimeoutSecs(),
+    verifCode: req.verifCode,
+    trustable: req.trustable,
   );
+  // 勾选信任 → 按设备 ID 持久化（LANDrop 为 secp256k1 公钥 base64）
+  if (d.accepted && d.trust && req.trustable && req.senderId.isNotEmpty) {
+    await TrustedDevices.instance.add(req.senderId, req.senderName);
+  }
+  return d;
 }
 
 /// 未信任设备请求确认框（PC UI 态 / 手机端 / 守护进程拉起 UI 三路共用）。
 /// 带倒计时，超时自动按「拒收」处理；勾选「同批后续文件也按此处理」时
 /// （默认勾选），本次决定对同一设备紧接着发来的文件/文本生效（2 分钟）。
+/// [verifCode]：LANDrop 的 6 位验证码（TOFU 核对，两台设备应显示相同数字）。
+/// [trustable]：是否显示「信任该设备」勾选（LANDrop 身份公钥可持久化）。
 Future<IncomingDecision> showIncomingConfirmDialog(
   BuildContext ctx, {
   required String senderName,
@@ -395,6 +405,8 @@ Future<IncomingDecision> showIncomingConfirmDialog(
   required int sizeBytes,
   bool isText = false,
   int countdownSec = 30,
+  String? verifCode,
+  bool trustable = false,
 }) async {
   final decision = await showDialog<IncomingDecision>(
     context: ctx,
@@ -405,6 +417,8 @@ Future<IncomingDecision> showIncomingConfirmDialog(
       sizeBytes: sizeBytes,
       isText: isText,
       countdownSec: countdownSec,
+      verifCode: verifCode,
+      trustable: trustable,
     ),
   );
   // 对话框被意外关闭（无结果）= 拒收，且不再就本批打扰
@@ -418,6 +432,8 @@ class _ConfirmCountdownDialog extends StatefulWidget {
   final int sizeBytes;
   final bool isText;
   final int countdownSec;
+  final String? verifCode;
+  final bool trustable;
 
   const _ConfirmCountdownDialog({
     required this.senderName,
@@ -425,6 +441,8 @@ class _ConfirmCountdownDialog extends StatefulWidget {
     required this.sizeBytes,
     required this.isText,
     required this.countdownSec,
+    this.verifCode,
+    this.trustable = false,
   });
 
   @override
@@ -440,6 +458,9 @@ class _ConfirmCountdownDialogState extends State<_ConfirmCountdownDialog> {
   /// 这一次的接收/拒收决定对同设备紧接着发来的文件生效，不再逐条弹框。
   bool _batchDefault = true;
 
+  /// 「信任该设备」：默认勾选（LANDrop 来源）；勾选后按身份公钥持久化免确认
+  bool _trust = true;
+
   @override
   void initState() {
     super.initState();
@@ -451,8 +472,7 @@ class _ConfirmCountdownDialogState extends State<_ConfirmCountdownDialog> {
         // 超时 = 拒收；batchDefault=true 让同批后续直接拒、不再打扰
         Navigator.pop(context,
             const IncomingDecision(accepted: false, batchDefault: true));
-      }
-    });
+      }    });
   }
 
   @override
@@ -477,6 +497,38 @@ class _ConfirmCountdownDialogState extends State<_ConfirmCountdownDialog> {
           Text(widget.isText
               ? '大小：${_fmtSize(widget.sizeBytes)}（约）'
               : '大小：${_fmtSize(widget.sizeBytes)}'),
+          // LANDrop TOFU：6 位验证码，两台设备应显示相同数字
+          if (widget.verifCode != null) ...[
+            const SizedBox(height: 8),
+            Container(
+              padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+              decoration: BoxDecoration(
+                color: Colors.blue.shade50,
+                borderRadius: BorderRadius.circular(6),
+                border: Border.all(color: Colors.blue.shade200),
+              ),
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Icon(Icons.verified_user_outlined,
+                      size: 16, color: Colors.blue.shade700),
+                  const SizedBox(width: 6),
+                  Text(
+                    '验证码：${widget.verifCode}',
+                    style: TextStyle(
+                        fontSize: 15,
+                        fontWeight: FontWeight.bold,
+                        color: Colors.blue.shade900,
+                        letterSpacing: 2),
+                  ),
+                  const SizedBox(width: 8),
+                  Text('请与对方设备核对',
+                      style: TextStyle(
+                          fontSize: 11, color: Colors.blue.shade700)),
+                ],
+              ),
+            ),
+          ],
           const SizedBox(height: 10),
           Row(
             children: [
@@ -510,18 +562,34 @@ class _ConfirmCountdownDialogState extends State<_ConfirmCountdownDialog> {
             controlAffinity: ListTileControlAffinity.leading,
             materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
           ),
+          if (widget.trustable)
+            CheckboxListTile(
+              value: _trust,
+              onChanged: (v) => setState(() => _trust = v ?? true),
+              title: const Text('信任该设备', style: TextStyle(fontSize: 13)),
+              subtitle: const Text('以后此设备传来的文件免确认直接接收',
+                  style: TextStyle(fontSize: 11)),
+              dense: true,
+              contentPadding: EdgeInsets.zero,
+              controlAffinity: ListTileControlAffinity.leading,
+              materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
+            ),
         ],
       ),
       actions: [
         TextButton(
             onPressed: () => Navigator.pop(
                 context,
-                IncomingDecision(accepted: false, batchDefault: _batchDefault)),
+                IncomingDecision(
+                    accepted: false, batchDefault: _batchDefault)),
             child: const Text('拒收')),
         TextButton(
             onPressed: () => Navigator.pop(
                 context,
-                IncomingDecision(accepted: true, batchDefault: _batchDefault)),
+                IncomingDecision(
+                    accepted: true,
+                    batchDefault: _batchDefault,
+                    trust: _trust)),
             child: const Text('接收')),
       ],
     );

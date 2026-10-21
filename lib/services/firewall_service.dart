@@ -20,10 +20,15 @@ class FirewallService {
   static const String _udpRule = 'WeiMiFileLANUDP';
   /// LocalSend v2 兼容层（组播发现 UDP + HTTP 53317）的入站规则
   static const String _lsRule = 'WeiMiFileLSLAN';
+  static const String _lsTcpRule = 'WeiMiFileLSTCP';
+  /// LANDrop v2 兼容层（UDP 52637 发现 + TCP 52637 加密传输）的入站规则
+  static const String _ldRule = 'WeiMiFileLANDROP';
+  static const String _ldUdpRule = 'WeiMiFileLANDROPUDP';
 
   /// 会话内缓存：已放行就不再查（netsh 查询虽快，也不必每分钟跑）。
   static bool? _cachedOk;
   static bool? _cachedLsOk;
+  static bool? _cachedLdOk;
 
   static bool get supported => Platform.isWindows;
 
@@ -45,9 +50,20 @@ class FirewallService {
     if (!supported) return true;
     if (_cachedLsOk == true) return true;
     final udp = await _ruleExists(_lsRule);
-    final tcp = await _ruleExists('WeiMiFileLSTCP');
+    final tcp = await _ruleExists(_lsTcpRule);
     final ok = udp && tcp;
     if (ok) _cachedLsOk = true;
+    return ok;
+  }
+
+  /// LANDrop 兼容层规则是否都在（UDP 52637 发现 + TCP 52637 传输）。
+  static Future<bool> landropRulesPresent() async {
+    if (!supported) return true;
+    if (_cachedLdOk == true) return true;
+    final udp = await _ruleExists(_ldUdpRule);
+    final tcp = await _ruleExists(_ldRule);
+    final ok = udp && tcp;
+    if (ok) _cachedLdOk = true;
     return ok;
   }
 
@@ -81,8 +97,12 @@ class FirewallService {
         'protocol=UDP localport=52346 profile=any; '
         'netsh advfirewall firewall add rule name=$_lsRule dir=in action=allow '
         'protocol=UDP localport=53317 profile=any; '
-        'netsh advfirewall firewall add rule name=WeiMiFileLSTCP dir=in action=allow '
-        'protocol=TCP localport=53317 profile=any';
+        'netsh advfirewall firewall add rule name=$_lsTcpRule dir=in action=allow '
+        'protocol=TCP localport=53317 profile=any; '
+        'netsh advfirewall firewall add rule name=$_ldUdpRule dir=in action=allow '
+        'protocol=UDP localport=52637 profile=any; '
+        'netsh advfirewall firewall add rule name=$_ldRule dir=in action=allow '
+        'protocol=TCP localport=52637 profile=any';
     try {
       await Process.run(
         'powershell',
@@ -101,9 +121,11 @@ class FirewallService {
       await Future.delayed(const Duration(milliseconds: 1500));
       final ok = await rulesPresent();
       final lsOk = await lsRulesPresent();
-      if (ok && lsOk) {
+      final ldOk = await landropRulesPresent();
+      if (ok && lsOk && ldOk) {
         _cachedOk = true;
         _cachedLsOk = true;
+        _cachedLdOk = true;
         return true;
       }
     }
@@ -118,6 +140,10 @@ class FirewallService {
       'protocol=UDP localport=52346 profile=any\n'
       'netsh advfirewall firewall add rule name=$_lsRule dir=in action=allow '
       'protocol=UDP localport=53317 profile=any\n'
-      'netsh advfirewall firewall add rule name=WeiMiFileLSTCP dir=in action=allow '
-      'protocol=TCP localport=53317 profile=any';
+      'netsh advfirewall firewall add rule name=$_lsTcpRule dir=in action=allow '
+      'protocol=TCP localport=53317 profile=any\n'
+      'netsh advfirewall firewall add rule name=$_ldUdpRule dir=in action=allow '
+      'protocol=UDP localport=52637 profile=any\n'
+      'netsh advfirewall firewall add rule name=$_ldRule dir=in action=allow '
+      'protocol=TCP localport=52637 profile=any';
 }
