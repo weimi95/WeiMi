@@ -369,10 +369,12 @@ String _fmtSize(int bytes) {
 
 /// 全局接收确认弹窗：非信任设备发来文件/文本时由 LanTransferService 调用。
 /// 弹窗前先恢复主窗口（收托盘隐藏时也能看到），信任设备已在 _decideAccept 直收、不会到这里。
-Future<bool> _globalConfirmRequest(IncomingRequest req) async {
+Future<IncomingDecision> _globalConfirmRequest(IncomingRequest req) async {
   await TrayService.instance.openMainWindow();
   final ctx = ShareReceiveService.navigatorKey.currentContext;
-  if (ctx == null) return false;
+  if (ctx == null) {
+    return const IncomingDecision(accepted: false, batchDefault: true);
+  }
   return showIncomingConfirmDialog(
     ctx,
     senderName: req.senderName,
@@ -384,8 +386,9 @@ Future<bool> _globalConfirmRequest(IncomingRequest req) async {
 }
 
 /// 未信任设备请求确认框（PC UI 态 / 手机端 / 守护进程拉起 UI 三路共用）。
-/// 带 30 秒倒计时，超时自动按「拒收」处理。
-Future<bool> showIncomingConfirmDialog(
+/// 带倒计时，超时自动按「拒收」处理；勾选「同批后续文件也按此处理」时
+/// （默认勾选），本次决定对同一设备紧接着发来的文件/文本生效（2 分钟）。
+Future<IncomingDecision> showIncomingConfirmDialog(
   BuildContext ctx, {
   required String senderName,
   required String content,
@@ -393,7 +396,7 @@ Future<bool> showIncomingConfirmDialog(
   bool isText = false,
   int countdownSec = 30,
 }) async {
-  final accepted = await showDialog<bool>(
+  final decision = await showDialog<IncomingDecision>(
     context: ctx,
     barrierDismissible: false,
     builder: (c) => _ConfirmCountdownDialog(
@@ -404,7 +407,9 @@ Future<bool> showIncomingConfirmDialog(
       countdownSec: countdownSec,
     ),
   );
-  return accepted == true;
+  // 对话框被意外关闭（无结果）= 拒收，且不再就本批打扰
+  return decision ??
+      const IncomingDecision(accepted: false, batchDefault: true);
 }
 
 class _ConfirmCountdownDialog extends StatefulWidget {
@@ -431,6 +436,10 @@ class _ConfirmCountdownDialogState extends State<_ConfirmCountdownDialog> {
   late int _remain;
   Timer? _timer;
 
+  /// 「同批后续文件也按此处理」：默认勾选——手机一次共享多文件时，
+  /// 这一次的接收/拒收决定对同设备紧接着发来的文件生效，不再逐条弹框。
+  bool _batchDefault = true;
+
   @override
   void initState() {
     super.initState();
@@ -439,7 +448,9 @@ class _ConfirmCountdownDialogState extends State<_ConfirmCountdownDialog> {
       if (!mounted) return;
       setState(() => _remain--);
       if (_remain <= 0) {
-        Navigator.pop(context, false); // 超时 = 拒收
+        // 超时 = 拒收；batchDefault=true 让同批后续直接拒、不再打扰
+        Navigator.pop(context,
+            const IncomingDecision(accepted: false, batchDefault: true));
       }
     });
   }
@@ -487,14 +498,30 @@ class _ConfirmCountdownDialogState extends State<_ConfirmCountdownDialog> {
               minHeight: 4,
             ),
           ),
+          CheckboxListTile(
+            value: _batchDefault,
+            onChanged: (v) => setState(() => _batchDefault = v ?? true),
+            title: const Text('同批后续文件也按此处理',
+                style: TextStyle(fontSize: 13)),
+            subtitle: const Text('同一设备紧接着发来的文件，不再逐条询问',
+                style: TextStyle(fontSize: 11)),
+            dense: true,
+            contentPadding: EdgeInsets.zero,
+            controlAffinity: ListTileControlAffinity.leading,
+            materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
+          ),
         ],
       ),
       actions: [
         TextButton(
-            onPressed: () => Navigator.pop(context, false),
+            onPressed: () => Navigator.pop(
+                context,
+                IncomingDecision(accepted: false, batchDefault: _batchDefault)),
             child: const Text('拒收')),
         TextButton(
-            onPressed: () => Navigator.pop(context, true),
+            onPressed: () => Navigator.pop(
+                context,
+                IncomingDecision(accepted: true, batchDefault: _batchDefault)),
             child: const Text('接收')),
       ],
     );
@@ -512,7 +539,7 @@ Future<void> _checkDaemonPending() async {
     for (final j in pending) {
       final token = j['token'] as String?;
       if (token == null || token.isEmpty) continue;
-      final ok = await showIncomingConfirmDialog(
+      final d = await showIncomingConfirmDialog(
         ctx,
         senderName: (j['from'] as String?) ?? '未知设备',
         content: (j['name'] as String?) ?? '',
@@ -520,6 +547,7 @@ Future<void> _checkDaemonPending() async {
         isText: j['isText'] == true,
         countdownSec: LanTransferService.confirmTimeoutSecs(),
       );
+      final ok = d.accepted;
       final found = await DaemonService.sendConfirm(token, ok);
       if (!found) {
         final sctx = ShareReceiveService.navigatorKey.currentContext;

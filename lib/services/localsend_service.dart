@@ -584,14 +584,16 @@ class LocalSendService {
       );
     }
 
-    // 合并确认（复用微密飞传的信任/确认/批次豁免逻辑）
+    // 合并确认（复用微密飞传的信任/确认/批次授权逻辑）
     final names = files.values.map((f) => f.fileName).take(3).join('、');
     final more = files.length > 3 ? ' 等 ${files.length} 个' : '';
     final accepted = await LanTransferService.instance.decideAccept(
       senderId: senderId,
       ask: () async {
         final handler = LanTransferService.instance.confirmHandler;
-        if (handler == null) return false;
+        if (handler == null) {
+          return const IncomingDecision(accepted: false, batchDefault: true);
+        }
         return handler(IncomingRequest(
           senderId: senderId,
           senderName: senderName,

@@ -108,7 +108,9 @@ void main(List<String> args) async {
       // 超时由 _decideAccept 的 timeout 兜底自动拒收。
       LanTransferService.instance.confirmHandler = (req) async {
         final ctx = ShareReceiveService.navigatorKey.currentContext;
-        if (ctx == null) return false;
+        if (ctx == null) {
+          return const IncomingDecision(accepted: false, batchDefault: true);
+        }
         return showIncomingConfirmDialog(
           ctx,
           senderName: req.senderName,

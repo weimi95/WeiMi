@@ -87,7 +87,9 @@ class LanTransferService {
 
   /// 收到传入请求时的确认回调（UI 弹窗），返回 true 才接收。
   /// 仅前台且对方未信任时调用；信任设备与后台模式不经过此回调。
-  Future<bool> Function(IncomingRequest request)? confirmHandler;
+  /// 返回 IncomingDecision：accepted=本次是否接收；batchDefault=用户勾选了
+  /// 「同批后续文件也按此处理」（确认框复选框，默认勾选）。
+  Future<IncomingDecision> Function(IncomingRequest request)? confirmHandler;
 
   /// 最近一次发送失败的错误详情（诊断用）
   String lastSendError = '';
@@ -606,35 +608,80 @@ class LanTransferService {
   /// 未信任设备按设置 lan_untrusted_mode：
   /// - confirm（默认）：弹确认框等待 lan_untrusted_timeout 秒，超时自动拒收
   /// - reject：直接拒收
-  /// 未信任批次豁免：同一设备确认通过后 2 分钟内的后续文件免再确认
-  /// （手机一次共享多文件 = 逐个 POST，同批只该确认一次）
+  /// 未信任批次授权（双向，老板拍板）：
+  /// - 接收：确认通过且用户勾选「同批后续也按此处理」后 2 分钟内同设备免再确认
+  /// - 拒收：用户勾选后拒收的，2 分钟内同设备直接拒、不再弹框打扰
+  /// （手机一次共享多文件 = 逐个/并发 POST，同批只该确认一次）
   final Map<String, DateTime> _batchGrantedUntil = {};
+  final Map<String, DateTime> _batchRejectedUntil = {};
+
+  /// single-flight：同设备并发连发多个文件时复用同一次确认。
+  /// 手机分享 N 个文件 = N 个 POST 几乎同时到达，只弹一个框，
+  /// 全部文件共用用户的这一次决定（=「这一批」的语义）。
+  final Map<String, Future<bool>> _pendingAsks = {};
 
   Future<bool> decideAccept(
       {required String senderId,
-      required Future<bool> Function() ask}) async {
+      required Future<IncomingDecision> Function() ask}) async {
     if (TrustedDevices.instance.isTrustedSync(senderId)) return true;
+    final now = DateTime.now();
+    // 顺手清过期项，防长期膨胀
+    _batchGrantedUntil.removeWhere((_, v) => now.isAfter(v));
+    _batchRejectedUntil.removeWhere((_, v) => now.isAfter(v));
+    final rejected = _batchRejectedUntil[senderId];
+    if (rejected != null && now.isBefore(rejected)) return false;
     final granted = _batchGrantedUntil[senderId];
-    if (granted != null && DateTime.now().isBefore(granted)) return true;
+    if (granted != null && now.isBefore(granted)) return true;
     final mode = SettingStore.get<String>('lan_untrusted_mode', 'confirm');
     if (mode == 'reject') return false;
-    bool accepted = false;
+    // single-flight：同设备已有一个请求在等用户确认时，后续请求复用其结果
+    final pending = _pendingAsks[senderId];
+    if (pending != null) return pending;
+    final fut = _askOnce(senderId, ask);
+    _pendingAsks[senderId] = fut;
     try {
-      accepted = await ask()
-          .timeout(Duration(seconds: confirmTimeoutSecs()),
-              onTimeout: () => false);
+      return await fut;
+    } finally {
+      if (_pendingAsks[senderId] == fut) _pendingAsks.remove(senderId);
+    }
+  }
+
+  Future<bool> _askOnce(
+      String senderId, Future<IncomingDecision> Function() ask) async {
+    IncomingDecision decision;
+    try {
+      decision = await ask().timeout(
+          Duration(seconds: confirmTimeoutSecs()),
+          onTimeout: () =>
+              const IncomingDecision(accepted: false, batchDefault: true));
     } catch (_) {
-      accepted = false;
+      decision = const IncomingDecision(accepted: false, batchDefault: true);
     }
-    if (accepted) {
-      _batchGrantedUntil[senderId] =
-          DateTime.now().add(const Duration(minutes: 2));
-      // 顺手清过期项，防长期膨胀
-      final now = DateTime.now();
-      _batchGrantedUntil
-          .removeWhere((_, v) => now.isAfter(v));
+    if (decision.batchDefault) {
+      final until = DateTime.now().add(const Duration(minutes: 2));
+      if (decision.accepted) {
+        _batchGrantedUntil[senderId] = until;
+      } else {
+        _batchRejectedUntil[senderId] = until;
+      }
     }
-    return accepted;
+    return decision.accepted;
+  }
+
+  /// 某设备当前是否还有进行中的文件接收（按 senderName 计数）。
+  /// 供接收完成通知做整批聚合：一批文件的最后一个完成后才汇总提示。
+  final Map<String, int> _activeIncomingByName = {};
+
+  bool hasActiveIncomingByName(String senderName) =>
+      (_activeIncomingByName[senderName] ?? 0) > 0;
+
+  void _decActiveIncomingByName(String senderName) {
+    final n = (_activeIncomingByName[senderName] ?? 1) - 1;
+    if (n <= 0) {
+      _activeIncomingByName.remove(senderName);
+    } else {
+      _activeIncomingByName[senderName] = n;
+    }
   }
 
   Future<void> _handleIncomingFile(HttpRequest req) async {
@@ -682,6 +729,8 @@ class LanTransferService {
     }
 
     final savePath = await resolveSavePath(request.fileName);
+    _activeIncomingByName[request.senderName] =
+        (_activeIncomingByName[request.senderName] ?? 0) + 1;
     _events.add(LanEvent(LanEventType.incomingStarted,
         name: request.fileName, from: request.senderName));
 
@@ -699,6 +748,7 @@ class LanTransferService {
       req.response.statusCode = HttpStatus.ok;
       req.response.write(json.encode({'ok': true, 'path': savePath}));
       await req.response.close();
+      _decActiveIncomingByName(request.senderName);
       _events.add(LanEvent(LanEventType.incomingDone,
           name: request.fileName, from: request.senderName, path: savePath));
       ReceiveNotifyService.instance
@@ -715,6 +765,7 @@ class LanTransferService {
         ok: true,
       ));
     } catch (e) {
+      _decActiveIncomingByName(request.senderName);
       try {
         final f = File(savePath);
         if (await f.exists()) await f.delete();
@@ -728,9 +779,11 @@ class LanTransferService {
   }
 
   /// 走 UI 确认弹窗（仅前台未信任设备）
-  Future<bool> handlerAsk(IncomingRequest request) async {
+  Future<IncomingDecision> handlerAsk(IncomingRequest request) async {
     final handler = confirmHandler;
-    if (handler == null) return false;
+    if (handler == null) {
+      return const IncomingDecision(accepted: false, batchDefault: true);
+    }
     return handler(request);
   }
 
@@ -749,7 +802,9 @@ class LanTransferService {
       senderId: senderId,
       ask: () async {
         final handler = confirmHandler;
-        if (handler == null) return false;
+        if (handler == null) {
+          return const IncomingDecision(accepted: false, batchDefault: true);
+        }
         return handler(IncomingRequest(
           senderId: senderId,
           senderName: senderName,
@@ -820,6 +875,7 @@ class LanTransferService {
     final name = _safeFileName(req.uri.queryParameters['name'] ?? 'unnamed');
     try {
       final savePath = await resolveSavePath(name);
+      _activeIncomingByName[from] = (_activeIncomingByName[from] ?? 0) + 1;
       _events.add(LanEvent(LanEventType.incomingStarted,
           name: name, from: from));
       final sink = File(savePath).openWrite();
@@ -835,6 +891,7 @@ class LanTransferService {
       req.response.statusCode = HttpStatus.ok;
       req.response.write(json.encode({'ok': true, 'path': savePath}));
       await req.response.close();
+      _decActiveIncomingByName(from);
       _events.add(LanEvent(LanEventType.incomingDone,
           name: name, from: from, path: savePath));
       ReceiveNotifyService.instance.fileDone(name, from, savePath);
@@ -850,6 +907,7 @@ class LanTransferService {
         ok: true,
       ));
     } catch (e) {
+      _decActiveIncomingByName(from);
       req.response.statusCode = HttpStatus.internalServerError;
       req.response.write(json.encode({'ok': false, 'error': '$e'}));
       await req.response.close();
@@ -1837,6 +1895,12 @@ class LanPeer {
         lsHttps: lsHttps ?? this.lsHttps,
       );
 }
+
+/// 接收确认结果（确认框返回值）。
+/// - accepted：本次是否接收
+/// - batchDefault：用户勾选了「同批后续文件也按此处理」（复选框默认勾选），
+///   service 据此为同一设备记 2 分钟双向批次授权（收/拒都不再逐条打扰）
+typedef IncomingDecision = ({bool accepted, bool batchDefault});
 
 class IncomingRequest {
   final String senderId;
