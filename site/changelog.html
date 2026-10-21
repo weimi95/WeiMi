@@ -131,7 +131,7 @@ footer { margin-top: 2.6rem; color: var(--muted); font-size: 0.88rem; }
 <main>
   <a class="back" href="/weimi/">← 返回官网首页</a>
   <header>
-    <h1>微密文件 <span class="grad">WeiMi</span> · 更新日志<span class="badge">v1.1.00</span></h1>
+    <h1>微密文件 <span class="grad">WeiMi</span> · 更新日志<span class="badge">v1.1.01</span></h1>
     <p class="sub">
       按时间倒序记录每一版改了什么，方便日后回看「某个功能是哪一版加的」。
       下载最新版见<a href="/weimi/">官网首页</a>。
@@ -140,6 +140,15 @@ footer { margin-top: 2.6rem; color: var(--muted); font-size: 0.88rem; }
 
   <ul class="log">
     <li class="current">
+      <span class="ver">v1.1.01</span><span class="date">2026-10-21</span>
+      <ul class="changes">
+        <li><strong>同批传输只确认一次</strong>：一次分享多个文件时，确认框新增「同批后续文件也按此处理」（默认勾选）——这次点接收/拒收，同一设备紧接着发来的文件就按此办理，不再逐个弹窗打扰；勾选拒收则后续直接拒，勾选接收则 2 分钟内直达</li>
+        <li><strong>连发不再连环弹窗</strong>：手机多文件并发发出时多个请求同时到达，现在只弹一个框、共用这一次决定（此前每个文件都会弹一次）</li>
+        <li><strong>整批收完只开一次目录</strong>：同一批多个文件接收完成后，只发一条汇总通知、只打开一次目标文件夹（此前每收一个文件就弹一次文件夹）；单个文件仍提示文件名，点击通知可在文件管理器中定位</li>
+        <li><strong>拒收提示也聚合</strong>：一批连拒多个文件只提示一次，可在 设置-微密飞传-信任设备 添加后请对方重发</li>
+      </ul>
+    </li>
+    <li>
       <span class="ver">v1.1.00</span><span class="date">2026-10-20</span>
       <ul class="changes">
         <li><strong>文件夹加密（单文件归档）</strong>：把整个文件夹打包成一个加密归档（扩展名 <code>.wemi</code>，容器格式 <code>WEMI_FARC</code> v1），用同一个口令保护；归档内的<strong>文件名与目录结构也加密</strong>（AES-256-GCM），外人拿到归档看不到里面有什么</li>
