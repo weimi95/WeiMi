@@ -1900,7 +1900,13 @@ class LanPeer {
 /// - accepted：本次是否接收
 /// - batchDefault：用户勾选了「同批后续文件也按此处理」（复选框默认勾选），
 ///   service 据此为同一设备记 2 分钟双向批次授权（收/拒都不再逐条打扰）
-typedef IncomingDecision = ({bool accepted, bool batchDefault});
+/// 注：不能用 record typedef（Dart record 无命名构造函数，编译期报
+/// Couldn't find constructor），必须用 class。
+class IncomingDecision {
+  final bool accepted;
+  final bool batchDefault;
+  const IncomingDecision({required this.accepted, required this.batchDefault});
+}
 
 class IncomingRequest {
   final String senderId;
