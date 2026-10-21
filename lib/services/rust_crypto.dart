@@ -941,4 +941,326 @@ class RustCrypto {
     >('archive_free_string');
     freeFunc(ptr);
   }
-}
+
+  // ==================== LANDrop v2 加密原语 ====================
+  //
+  // 对应 rust_crypto/src/landrop.rs，全部经 libsodium 官方实现对拍。
+  // Dart 侧（landrop_service.dart）负责 UDP 发现/TCP 握手/帧/文件流，
+  // 这里只做无状态原语调用，nonce 由调用方持有并按记录递增。
+
+  /// calloc 复制（空列表也保底 1 字节，避免 malloc(0) 返回 null 触发 Rust 侧空指针保护）
+  static ffi.Pointer<ffi.Uint8> _ldBytes(Uint8List list) {
+    final ptr = calloc<ffi.Uint8>(list.isEmpty ? 1 : list.length);
+    for (var i = 0; i < list.length; i++) {
+      ptr[i] = list[i];
+    }
+    return ptr;
+  }
+
+  /// 单记录明文上限（LANDrop maxBlockSize = 65518）
+  static int get landropMaxBlockSize {
+    _loadLibrary();
+    final f = _lib!.lookupFunction<ffi.Size Function(), int Function()>(
+        'landrop_max_block_size');
+    return f();
+  }
+
+  /// BLAKE2b 任意输出（outLen 1..=64）
+  static Uint8List landropBlake2b(int outLen, Uint8List data) {
+    _loadLibrary();
+    final f = _lib!.lookupFunction<
+        ffi.Int32 Function(
+            ffi.Pointer<ffi.Uint8> outPtr,
+            ffi.Size outLen,
+            ffi.Pointer<ffi.Uint8> dataPtr,
+            ffi.Size dataLen),
+        int Function(ffi.Pointer<ffi.Uint8> outPtr, int outLen,
+            ffi.Pointer<ffi.Uint8> dataPtr, int dataLen)>('landrop_blake2b');
+    final out = calloc<ffi.Uint8>(outLen);
+    final dataPtr = _ldBytes(data);
+    try {
+      final rc = f(out, outLen, dataPtr, data.length);
+      if (rc != 0) throw Exception('landrop_blake2b failed: $rc');
+      return out.asTypedList(outLen).toList(); // 拷贝，calloc 内存随后释放
+    } finally {
+      calloc.free(out);
+      calloc.free(dataPtr);
+    }
+  }
+
+  /// 生成 X25519 密钥对：返回 (pk, sk)
+  static ({Uint8List pk, Uint8List sk}) landropKxKeypair() {
+    _loadLibrary();
+    final f = _lib!.lookupFunction<
+        ffi.Int32 Function(ffi.Pointer<ffi.Uint8> pk, ffi.Pointer<ffi.Uint8> sk),
+        int Function(ffi.Pointer<ffi.Uint8> pk, ffi.Pointer<ffi.Uint8> sk)>(
+        'landrop_kx_keypair');
+    final pk = calloc<ffi.Uint8>(32);
+    final sk = calloc<ffi.Uint8>(32);
+    try {
+      final rc = f(pk, sk);
+      if (rc != 0) throw Exception('landrop_kx_keypair failed: $rc');
+      return (pk: pk.asTypedList(32).toList(), sk: sk.asTypedList(32).toList());
+    } finally {
+      calloc.free(pk);
+      calloc.free(sk);
+    }
+  }
+
+  /// 计算 kx 会话密钥。isClient=true 表示本方是连接发起方。
+  /// 返回 (rx, tx)：rx 用于解密收到的记录，tx 用于加密发出的记录。
+  static ({Uint8List rx, Uint8List tx}) landropKxSessionKeys({
+    required bool isClient,
+    required Uint8List ownSk,
+    required Uint8List ownPk,
+    required Uint8List peerPk,
+  }) {
+    _loadLibrary();
+    final f = _lib!.lookupFunction<
+        ffi.Int32 Function(
+            ffi.Bool isClient,
+            ffi.Pointer<ffi.Uint8> ownSk,
+            ffi.Pointer<ffi.Uint8> ownPk,
+            ffi.Pointer<ffi.Uint8> peerPk,
+            ffi.Pointer<ffi.Uint8> rx,
+            ffi.Pointer<ffi.Uint8> tx),
+        int Function(
+            bool isClient,
+            ffi.Pointer<ffi.Uint8> ownSk,
+            ffi.Pointer<ffi.Uint8> ownPk,
+            ffi.Pointer<ffi.Uint8> peerPk,
+            ffi.Pointer<ffi.Uint8> rx,
+            ffi.Pointer<ffi.Uint8> tx)>('landrop_kx_session_keys');
+    final skPtr = _ldBytes(ownSk);
+    final pkPtr = _ldBytes(ownPk);
+    final peerPtr = _ldBytes(peerPk);
+    final rx = calloc<ffi.Uint8>(32);
+    final tx = calloc<ffi.Uint8>(32);
+    try {
+      final rc = f(isClient, skPtr, pkPtr, peerPtr, rx, tx);
+      if (rc == -1) throw Exception('landrop_kx_session_keys: weak peer key');
+      if (rc != 0) throw Exception('landrop_kx_session_keys failed: $rc');
+      return (rx: rx.asTypedList(32).toList(), tx: tx.asTypedList(32).toList());
+    } finally {
+      calloc.free(skPtr);
+      calloc.free(pkPtr);
+      calloc.free(peerPtr);
+      calloc.free(rx);
+      calloc.free(tx);
+    }
+  }
+
+  /// 6 位 verifCode（TOFU 核对用）。kSc/kCs 按角色：client 的 kSc=rx/kCs=tx；server 反之。
+  static String landropVerifCode({
+    required Uint8List kSc,
+    required Uint8List kCs,
+  }) {
+    _loadLibrary();
+    final f = _lib!.lookupFunction<
+        ffi.Int32 Function(
+            ffi.Pointer<ffi.Uint8> kSc,
+            ffi.Pointer<ffi.Uint8> kCs,
+            ffi.Pointer<ffi.Char> out),
+        int Function(ffi.Pointer<ffi.Uint8> kSc, ffi.Pointer<ffi.Uint8> kCs,
+            ffi.Pointer<ffi.Char> out)>('landrop_verif_code');
+    final kScPtr = _ldBytes(kSc);
+    final kCsPtr = _ldBytes(kCs);
+    final out = calloc<ffi.Char>(7); // 6 位 + NUL
+    try {
+      final rc = f(kScPtr, kCsPtr, out);
+      if (rc != 0) throw Exception('landrop_verif_code failed: $rc');
+      return out.cast<ffi.Utf8>().toDartString();
+    } finally {
+      calloc.free(kScPtr);
+      calloc.free(kCsPtr);
+      calloc.free(out);
+    }
+  }
+
+  /// 生成 secp256k1 身份密钥对：返回 (pk 压缩33B, sk 32B)
+  static ({Uint8List pk, Uint8List sk}) landropSecpKeypair() {
+    _loadLibrary();
+    final f = _lib!.lookupFunction<
+        ffi.Int32 Function(ffi.Pointer<ffi.Uint8> pk, ffi.Pointer<ffi.Uint8> sk),
+        int Function(ffi.Pointer<ffi.Uint8> pk, ffi.Pointer<ffi.Uint8> sk)>(
+        'landrop_secp_keypair');
+    final pk = calloc<ffi.Uint8>(33);
+    final sk = calloc<ffi.Uint8>(32);
+    try {
+      final rc = f(pk, sk);
+      if (rc != 0) throw Exception('landrop_secp_keypair failed: $rc');
+      return (pk: pk.asTypedList(33).toList(), sk: sk.asTypedList(32).toList());
+    } finally {
+      calloc.free(pk);
+      calloc.free(sk);
+    }
+  }
+
+  /// 由 sk 恢复压缩公钥（信任列表按公钥持久化，启动时反查）
+  static Uint8List landropSecpPkFromSk(Uint8List sk) {
+    _loadLibrary();
+    final f = _lib!.lookupFunction<
+        ffi.Int32 Function(ffi.Pointer<ffi.Uint8> sk, ffi.Pointer<ffi.Uint8> pk),
+        int Function(ffi.Pointer<ffi.Uint8> sk, ffi.Pointer<ffi.Uint8> pk)>(
+        'landrop_secp_pk_from_sk');
+    final skPtr = _ldBytes(sk);
+    final pk = calloc<ffi.Uint8>(33);
+    try {
+      final rc = f(skPtr, pk);
+      if (rc != 0) throw Exception('landrop_secp_pk_from_sk failed: $rc');
+      return pk.asTypedList(33).toList();
+    } finally {
+      calloc.free(skPtr);
+      calloc.free(pk);
+    }
+  }
+
+  /// secp256k1 签名（内部先 blake2b-256(msg)），返回 64B compact（低 S）
+  static Uint8List landropSecpSign(Uint8List msg, Uint8List sk) {
+    _loadLibrary();
+    final f = _lib!.lookupFunction<
+        ffi.Int32 Function(ffi.Pointer<ffi.Uint8> msg, ffi.Size msgLen,
+            ffi.Pointer<ffi.Uint8> sk, ffi.Pointer<ffi.Uint8> sig),
+        int Function(ffi.Pointer<ffi.Uint8> msg, int msgLen,
+            ffi.Pointer<ffi.Uint8> sk, ffi.Pointer<ffi.Uint8> sig)>(
+        'landrop_secp_sign');
+    final msgPtr = _ldBytes(msg);
+    final skPtr = _ldBytes(sk);
+    final sig = calloc<ffi.Uint8>(64);
+    try {
+      final rc = f(msgPtr, msg.length, skPtr, sig);
+      if (rc != 0) throw Exception('landrop_secp_sign failed: $rc');
+      return sig.asTypedList(64).toList();
+    } finally {
+      calloc.free(msgPtr);
+      calloc.free(skPtr);
+      calloc.free(sig);
+    }
+  }
+
+  /// secp256k1 验签（内部 blake2b-256 + normalize_s，兼容高 S）
+  static bool landropSecpVerify(Uint8List sig, Uint8List msg, Uint8List pk) {
+    _loadLibrary();
+    final f = _lib!.lookupFunction<
+        ffi.Int32 Function(ffi.Pointer<ffi.Uint8> sig, ffi.Pointer<ffi.Uint8> msg,
+            ffi.Size msgLen, ffi.Pointer<ffi.Uint8> pk),
+        int Function(ffi.Pointer<ffi.Uint8> sig, ffi.Pointer<ffi.Uint8> msg,
+            int msgLen, ffi.Pointer<ffi.Uint8> pk)>('landrop_secp_verify');
+    final sigPtr = _ldBytes(sig);
+    final msgPtr = _ldBytes(msg);
+    final pkPtr = _ldBytes(pk);
+    try {
+      final rc = f(sigPtr, msgPtr, msg.length, pkPtr);
+      if (rc == 0) return true;
+      if (rc == -1) return false;
+      throw Exception('landrop_secp_verify failed: $rc');
+    } finally {
+      calloc.free(sigPtr);
+      calloc.free(msgPtr);
+      calloc.free(pkPtr);
+    }
+  }
+
+  /// ChaCha20-Poly1305-IETF 加密。返回 ct || tag（长度 = pt.len + 16）。
+  static Uint8List landropSeal(
+      Uint8List key, Uint8List nonce, Uint8List plaintext) {
+    _loadLibrary();
+    final f = _lib!.lookupFunction<
+        ffi.Int32 Function(
+            ffi.Pointer<ffi.Uint8> key,
+            ffi.Pointer<ffi.Uint8> nonce,
+            ffi.Pointer<ffi.Uint8> pt,
+            ffi.Size ptLen,
+            ffi.Pointer<ffi.Uint8> out,
+            ffi.Pointer<ffi.Size> outLen),
+        int Function(
+            ffi.Pointer<ffi.Uint8> key,
+            ffi.Pointer<ffi.Uint8> nonce,
+            ffi.Pointer<ffi.Uint8> pt,
+            int ptLen,
+            ffi.Pointer<ffi.Uint8> out,
+            ffi.Pointer<ffi.Size> outLen)>('landrop_seal');
+    final keyPtr = _ldBytes(key);
+    final noncePtr = _ldBytes(nonce);
+    final ptPtr = _ldBytes(plaintext);
+    final outLen = calloc<ffi.Size>();
+    try {
+      // 第一次调用取长度
+      var rc = f(keyPtr, noncePtr, ptPtr, plaintext.length, ffi.nullptr, outLen);
+      if (rc != 0) throw Exception('landrop_seal failed: $rc');
+      final len = outLen.value;
+      final out = calloc<ffi.Uint8>(len);
+      try {
+        rc = f(keyPtr, noncePtr, ptPtr, plaintext.length, out, outLen);
+        if (rc != 0) throw Exception('landrop_seal failed: $rc');
+        return out.asTypedList(len).toList();
+      } finally {
+        calloc.free(out);
+      }
+    } finally {
+      calloc.free(keyPtr);
+      calloc.free(noncePtr);
+      calloc.free(ptPtr);
+      calloc.free(outLen);
+    }
+  }
+
+  /// ChaCha20-Poly1305-IETF 解密。认证失败抛异常。
+  static Uint8List landropOpen(
+      Uint8List key, Uint8List nonce, Uint8List ciphertext) {
+    _loadLibrary();
+    final f = _lib!.lookupFunction<
+        ffi.Int32 Function(
+            ffi.Pointer<ffi.Uint8> key,
+            ffi.Pointer<ffi.Uint8> nonce,
+            ffi.Pointer<ffi.Uint8> ct,
+            ffi.Size ctLen,
+            ffi.Pointer<ffi.Uint8> out,
+            ffi.Pointer<ffi.Size> outLen),
+        int Function(
+            ffi.Pointer<ffi.Uint8> key,
+            ffi.Pointer<ffi.Uint8> nonce,
+            ffi.Pointer<ffi.Uint8> ct,
+            int ctLen,
+            ffi.Pointer<ffi.Uint8> out,
+            ffi.Pointer<ffi.Size> outLen)>('landrop_open');
+    final keyPtr = _ldBytes(key);
+    final noncePtr = _ldBytes(nonce);
+    final ctPtr = _ldBytes(ciphertext);
+    final outLen = calloc<ffi.Size>();
+    try {
+      var rc = f(keyPtr, noncePtr, ctPtr, ciphertext.length, ffi.nullptr, outLen);
+      if (rc != 0) throw Exception('landrop_open failed: $rc');
+      final len = outLen.value;
+      final out = calloc<ffi.Uint8>(len);
+      try {
+        rc = f(keyPtr, noncePtr, ctPtr, ciphertext.length, out, outLen);
+        if (rc == -2) throw Exception('landrop_open: auth failed');
+        if (rc != 0) throw Exception('landrop_open failed: $rc');
+        return out.asTypedList(len).toList();
+      } finally {
+        calloc.free(out);
+      }
+    } finally {
+      calloc.free(keyPtr);
+      calloc.free(noncePtr);
+      calloc.free(ctPtr);
+      calloc.free(outLen);
+    }
+  }
+
+  /// 12B 小端 nonce +1（sodium_increment 语义），原地修改
+  static void landropNonceIncrement(Uint8List nonce12) {
+    _loadLibrary();
+    final f = _lib!.lookupFunction<
+        ffi.Void Function(ffi.Pointer<ffi.Uint8> nonce),
+        void Function(ffi.Pointer<ffi.Uint8> nonce)>('landrop_nonce_increment');
+    final ptr = _ldBytes(nonce12);
+    try {
+      f(ptr);
+      nonce12.setAll(0, ptr.asTypedList(12));
+    } finally {
+      calloc.free(ptr);
+    }
+  }
+}

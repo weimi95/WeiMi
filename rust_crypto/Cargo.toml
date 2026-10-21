@@ -17,6 +17,11 @@ argon2 = "0.5"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }
+# LANDrop 兼容（v1.2.0）：x25519 kx / ChaCha20-Poly1305-IETF / secp256k1 / BLAKE2b
+x25519-dalek = { version = "2", default-features = false, features = ["static_secrets"] }
+chacha20poly1305 = "0.10"
+secp256k1 = "0.29"
+blake2 = "0.10"
 
 [profile.release]
 opt-level = 3
