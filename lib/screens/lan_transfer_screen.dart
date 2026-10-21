@@ -6,6 +6,7 @@ import 'package:flutter/services.dart';
 import 'package:file_picker/file_picker.dart';
 import 'package:path/path.dart' as p;
 import '../services/firewall_service.dart';
+import '../services/landrop_service.dart';
 import '../services/lan_transfer_service.dart';
 import '../services/localsend_service.dart';
 import '../services/transfer_history_service.dart';
@@ -38,6 +39,7 @@ class _LanTransferScreenState extends State<LanTransferScreen> {
   bool _selfWebShare = true;
   bool _fwMissing = false; // Windows 防火墙入站规则缺失（微密飞传）
   bool _fwLsMissing = false; // LocalSend 兼容层规则缺失（UDP/TCP 53317）
+  bool _fwLdMissing = false; // LANDrop 兼容层规则缺失（UDP/TCP 52637）
   bool _fwBusy = false;
   Timer? _pollTimer;
   String? _pendingText;
@@ -62,18 +64,20 @@ class _LanTransferScreenState extends State<LanTransferScreen> {
 
   /// Windows：检查防火墙入站规则是否放行（热点/公用网络下默认拦入站，
   /// 会导致对端搜不到本机或发送超时）。只查一次，放行成功后不再提示。
-  /// 微密飞传规则与 LocalSend 兼容层规则分开查：老用户只装了前者，
-  /// 不应被 LocalSend 缺失误报（反之同理）。
+  /// 微密飞传规则 / LocalSend / LANDrop 兼容层规则分开查：老用户只装了
+  /// 前者，不应被后两者缺失误报（反之同理）。
   Future<void> _checkFirewall() async {
     if (!Platform.isWindows) return;
     final results = await Future.wait([
       FirewallService.rulesPresent(),
       FirewallService.lsRulesPresent(),
+      FirewallService.landropRulesPresent(),
     ]);
     if (!mounted) return;
     setState(() {
       _fwMissing = !results[0];
       _fwLsMissing = !results[1];
+      _fwLdMissing = !results[2];
     });
   }
 
@@ -85,9 +89,10 @@ class _LanTransferScreenState extends State<LanTransferScreen> {
       _fwBusy = false;
       _fwMissing = !ok;
       _fwLsMissing = !ok;
+      _fwLdMissing = !ok;
     });
     ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-      content: Text(ok ? '已放行，飞传/LocalSend 可正常收发' : '放行未成功，请点「手动命令」以管理员身份执行'),
+      content: Text(ok ? '已放行，飞传/LocalSend/LANDrop 可正常收发' : '放行未成功，请点「手动命令」以管理员身份执行'),
     ));
   }
 
@@ -135,12 +140,11 @@ class _LanTransferScreenState extends State<LanTransferScreen> {
   }
 
   Widget _buildFirewallCard() {
-    final both = _fwMissing && _fwLsMissing;
-    final title = both
-        ? 'Windows 防火墙未放行飞传/LocalSend'
-        : _fwMissing
-            ? 'Windows 防火墙未放行飞传'
-            : 'Windows 防火墙未放行 LocalSend';
+    final missing = <String>[
+      if (_fwMissing) '微密飞传（52345-52365/52346）',
+      if (_fwLsMissing) 'LocalSend（53317）',
+      if (_fwLdMissing) 'LANDrop（52637）',
+    ];
     return Container(
       margin: const EdgeInsets.only(bottom: 16),
       padding: const EdgeInsets.all(14),
@@ -157,7 +161,7 @@ class _LanTransferScreenState extends State<LanTransferScreen> {
               const Icon(Icons.shield_outlined, size: 20, color: Colors.orange),
               const SizedBox(width: 8),
               Expanded(
-                child: Text(title,
+                child: Text('Windows 防火墙未放行：${missing.join('、')}',
                     style:
                         TextStyle(fontSize: 14, fontWeight: FontWeight.w600)),
               ),
@@ -165,15 +169,8 @@ class _LanTransferScreenState extends State<LanTransferScreen> {
           ),
           const SizedBox(height: 6),
           Text(
-            both
-                ? '当前网络若为「公用」（如手机热点），系统默认拦截所有入站连接，'
-                    '对端将搜不到本机或发送超时。放行后即可正常互传。'
-                    '（微密飞传 52345-52365/52346 + LocalSend 53317）'
-                : _fwMissing
-                    ? '当前网络若为「公用」（如手机热点），系统默认拦截所有入站连接，'
-                        '对端将搜不到本机或发送超时。放行后即可正常互传。'
-                    : '与 LocalSend App 互传需要放行 53317 端口（组播发现 + HTTP 传输），'
-                        '否则对端搜不到本机或发送失败。',
+            '当前网络若为「公用」（如手机热点），系统默认拦截所有入站连接，'
+                '对端将搜不到本机或发送超时。放行后即可正常互传。',
             style: TextStyle(fontSize: 12, color: Colors.grey.shade700),
           ),
           const SizedBox(height: 10),
@@ -207,13 +204,45 @@ class _LanTransferScreenState extends State<LanTransferScreen> {
     if (!mounted) return;
     final ips = await _svc.localIPv4s();
     if (!mounted) return;
+    // LANDrop 兼容层设备按 IP 合并：已有微密/LocalSend 条目的物理设备
+    // 只挂链路信息（ldPort/ldPkB64），纯 LANDrop 设备才单独立项。
+    final peers = <LanPeer>[..._svc.peers];
+    for (final d in LandropService.instance.devices) {
+      final idx = peers.indexWhere((p) => p.ip == d.address);
+      if (idx >= 0) {
+        final old = peers[idx];
+        peers[idx] = LanPeer(
+          id: old.id,
+          name: old.name,
+          ip: old.ip,
+          httpPort: old.httpPort,
+          trusted: old.trusted,
+          lastSeen: old.lastSeen,
+          protocol: old.protocol,
+          https: old.https,
+          lsPort: old.lsPort,
+          lsHttps: old.lsHttps,
+          ldPort: d.port,
+          ldPkB64: d.publicKey,
+        );
+      } else {
+        peers.add(LanPeer(
+          id: d.publicKey, // LANDrop 信任按身份公钥持久化
+          name: d.name,
+          ip: d.address,
+          httpPort: d.port,
+          trusted: d.trusted,
+          lastSeen: d.lastSeen,
+          protocol: 'landrop',
+        ));
+      }
+    }
     setState(() {
-      // 服务层已按 IP 归一（微密项优先、LocalSend 只挂链路）；
-      // 这里再按协议排序兜底：微密设备永远排在 LocalSend 设备前面。
-      _peers = [..._svc.peers]..sort((a, b) {
-        if (a.isLocalSend != b.isLocalSend) return a.isLocalSend ? 1 : -1;
-        return 0;
-      });
+      // 排序兜底：微密设备永远排在 LocalSend / LANDrop 设备前面
+      int rank(LanPeer p) =>
+          p.protocol == 'weimi' ? 0 : (p.isLocalSend ? 1 : 2);
+      peers.sort((a, b) => rank(a).compareTo(rank(b)));
+      _peers = peers;
       _webPeers = _svc.webPeers;
       _selfName = _svc.selfName.isEmpty ? '本机' : _svc.selfName;
       _selfIps = ips;
@@ -312,13 +341,17 @@ class _LanTransferScreenState extends State<LanTransferScreen> {
                 leading: Icon(
                   d.isLocalSend
                       ? Icons.swap_horiz
-                      : (d.trusted ? Icons.verified_user : Icons.devices),
+                      : (d.isLandrop
+                          ? Icons.public
+                          : (d.trusted ? Icons.verified_user : Icons.devices)),
                   color: d.isLocalSend
-                          ? Colors.blue
-                          : (d.trusted ? Colors.green : null),
+                      ? Colors.blue
+                      : (d.isLandrop
+                          ? Colors.indigo
+                          : (d.trusted ? Colors.green : null)),
                 ),
                 title: Text(d.name),
-                subtitle: Text('${d.ip} · ${_peerProtocolLabel(d)}'),
+                subtitle: Text('${d.ip}:${d.httpPort} · ${_peerProtocolLabel(d)}'),
               ),
             ),
         ],
@@ -326,11 +359,16 @@ class _LanTransferScreenState extends State<LanTransferScreen> {
     );
   }
 
-  /// 设备协议标注：纯 LocalSend 设备 / 微密设备 / 合并条目（微密+LocalSend 双链路）。
+  /// 设备协议标注：纯 LocalSend 设备 / 纯 LANDrop 设备 / 微密设备 /
+  /// 合并条目（微密+LocalSend / 微密+LANDrop 双链路）。
   String _peerProtocolLabel(LanPeer d) {
-    if (d.isLocalSend) return ' · LocalSend';
-    if (d.hasLocalSendLink) return ' · 微密+LocalSend';
-    return '';
+    if (d.isLocalSend) return 'LocalSend';
+    if (d.isLandrop) return 'LANDrop';
+    final links = <String>[];
+    if (d.hasLocalSendLink) links.add('LocalSend');
+    if (d.hasLandropLink) links.add('LANDrop');
+    if (links.isEmpty) return '微密';
+    return '微密+${links.join('+')}';
   }
 
   Future<void> _startSendFiles() async {
@@ -395,6 +433,11 @@ class _LanTransferScreenState extends State<LanTransferScreen> {
         return;
       }
       await _sendFilesToLocalSend(peer, files);
+      return;
+    }
+    if (peer.isLandrop) {
+      // LANDrop v2：filename 支持 '/' 相对路径，文件夹传输保留层级
+      await _sendFilesToLandrop(peer, entries);
       return;
     }
     int okCount = 0;
@@ -525,6 +568,86 @@ class _LanTransferScreenState extends State<LanTransferScreen> {
     }
   }
 
+  /// 由 LanPeer（合并条目或纯 LANDrop 条目）构造发送目标
+  LandropDevice _landropDeviceOf(LanPeer peer) => LandropDevice(
+        publicKey: peer.ldPkB64 ?? peer.id,
+        name: peer.name,
+        type: '',
+        address: peer.ip,
+        port: peer.ldPort ?? peer.httpPort,
+        lastSeen: peer.lastSeen,
+      );
+
+  /// 发送到 LANDrop 设备（v2 协议：握手 → file_send_request → 流式记录）。
+  /// 未信任设备：握手成功后立即在进度框显示 6 位 verifCode 供与对方核对。
+  Future<void> _sendFilesToLandrop(LanPeer peer, List<_SendEntry> entries) async {
+    final device = _landropDeviceOf(peer);
+    final files = entries
+        .map((e) => LandropSendFile(path: e.absPath, filename: e.relativeName))
+        .toList();
+    if (mounted) {
+      ProgressDialog.show(
+        context,
+        title: '正在发送（LANDrop）',
+        currentProgress: 0,
+        totalProgress: entries.length,
+        currentFileName: entries.first.relativeName,
+      );
+    }
+    // onProgress 节流：对话框 pop+show 重建代价高，≥400ms 或 ≥8MB 才刷一次
+    var lastUi = DateTime.fromMillisecondsSinceEpoch(0);
+    var lastSent = -1;
+    var verifCode = '';
+    final result = await LandropService.instance.sendFilesToDevice(
+      device,
+      files,
+      onVerifCode: (code) {
+        verifCode = code;
+        if (!mounted) return;
+        ProgressDialog.update(
+          context,
+          title: '正在发送（LANDrop）· 验证码 $code',
+          currentProgress: 0,
+          totalProgress: entries.length,
+          currentFileName: entries.first.relativeName,
+        );
+      },
+      onProgress: (fileName, sent, total) {
+        if (!mounted) return;
+        final now = DateTime.now();
+        if (now.difference(lastUi).inMilliseconds < 400 &&
+            sent - lastSent < 8 * 1024 * 1024) {
+          return;
+        }
+        lastUi = now;
+        lastSent = sent;
+        final codePart = verifCode.isEmpty ? '' : ' · 验证码 $verifCode';
+        ProgressDialog.update(
+          context,
+          title: '正在发送 $fileName'
+              '（${(sent / 1048576).toStringAsFixed(1)}/${(total / 1048576).toStringAsFixed(1)} MB）$codePart',
+          currentProgress: 0,
+          totalProgress: entries.length,
+          currentFileName: fileName,
+        );
+      },
+    );
+    if (mounted) {
+      ProgressDialog.hide(context);
+      final msg = result.ok
+          ? '发送完成：${entries.length} 个文件（发给 ${peer.name}）'
+          : result.rejected
+              ? '对方拒收了本次发送（${peer.name}）'
+              : '发送失败：${result.error}';
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+        content: Text(msg),
+        backgroundColor:
+            result.ok ? Colors.green : (result.rejected ? Colors.orange : Colors.red),
+        duration: const Duration(seconds: 6),
+      ));
+    }
+  }
+
   Future<void> _startSendText() async {
     final controller = TextEditingController();
     final text = await showDialog<String>(
@@ -560,6 +683,28 @@ class _LanTransferScreenState extends State<LanTransferScreen> {
         content: Text('LocalSend 设备只支持文件发送，不支持文本'),
         backgroundColor: Colors.orange,
       ));
+      return;
+    }
+    if (peer.isLandrop) {
+      if (mounted) {
+        ProgressDialog.show(
+          context,
+          title: '正在发送文本（LANDrop）',
+          currentProgress: 1,
+          totalProgress: 1,
+        );
+      }
+      final result = await LandropService.instance
+          .sendTextToDevice(_landropDeviceOf(peer), text);
+      if (mounted) {
+        ProgressDialog.hide(context);
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+          content: Text(result.ok
+              ? '文本已发送给 ${peer.name}'
+              : '发送失败：${result.error}'),
+          backgroundColor: result.ok ? Colors.green : Colors.red,
+        ));
+      }
       return;
     }
     if (mounted) {
@@ -840,7 +985,7 @@ class _LanTransferScreenState extends State<LanTransferScreen> {
           ),
           // Windows 防火墙未放行警示（热点/公用网络下默认拦所有入站，
           // 对端会搜不到本机或发送超时）
-          if (_fwMissing || _fwLsMissing) _buildFirewallCard(),
+          if (_fwMissing || _fwLsMissing || _fwLdMissing) _buildFirewallCard(),
           const SizedBox(height: 16),
           // 分享直达：待发送内容卡
           if (_pendingText != null || _pendingFiles.isNotEmpty)
@@ -968,7 +1113,8 @@ class _LanTransferScreenState extends State<LanTransferScreen> {
                   Icon(Icons.wifi_find, size: 40, color: Colors.grey.shade400),
                   const SizedBox(height: 10),
                   Text(
-                    '正在搜索同一 WiFi 下的设备…\n对方需打开微密文件的「微密飞传」页',
+                    '正在搜索同一 WiFi 下的设备…\n对方需打开微密文件的「微密飞传」页，'
+                        '或与 LANDrop App 同网',
                     textAlign: TextAlign.center,
                     style: TextStyle(fontSize: 13, color: Colors.grey.shade600),
                   ),
@@ -979,6 +1125,7 @@ class _LanTransferScreenState extends State<LanTransferScreen> {
             ..._peers.map((d) {
               final trusted = d.trusted;
               final isLs = d.isLocalSend;
+              final isLd = d.isLandrop;
               return Container(
                 margin: const EdgeInsets.only(bottom: 8),
                 decoration: BoxDecoration(
@@ -987,22 +1134,29 @@ class _LanTransferScreenState extends State<LanTransferScreen> {
                   border: Border.all(
                       color: trusted
                           ? Colors.green.shade300
-                          : (isLs ? Colors.blue.shade200 : Colors.grey.shade300)),
+                          : (isLs
+                              ? Colors.blue.shade200
+                              : (isLd
+                                  ? Colors.indigo.shade200
+                                  : Colors.grey.shade300))),
                 ),
                 child: ListTile(
                   leading: Icon(
                     isLs
                         ? Icons.swap_horiz
-                        : (trusted ? Icons.verified_user : Icons.devices),
+                        : (isLd
+                            ? Icons.public
+                            : (trusted ? Icons.verified_user : Icons.devices)),
                     color: isLs
                         ? Colors.blue
-                        : (trusted ? Colors.green : Colors.teal),
+                        : (isLd
+                            ? Colors.indigo
+                            : (trusted ? Colors.green : Colors.teal)),
                   ),
                   title: Text(d.name,
                       style: const TextStyle(fontWeight: FontWeight.w500)),
                   subtitle: Text(
-                      '${d.ip}:${d.httpPort}'
-                      '${_peerProtocolLabel(d)}'
+                      '${d.ip}:${d.httpPort} · ${_peerProtocolLabel(d)}'
                       '${trusted ? ' · 已信任' : ''}',
                       style: const TextStyle(fontSize: 12)),
                   trailing: PopupMenuButton<String>(

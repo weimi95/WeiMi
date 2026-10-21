@@ -163,5 +163,32 @@ section('测试 C：verifCode 两端一致');
   session.close();
 }
 
+// ==================== 测试 D：拒收链路（真实 LANDrop client → 我方拒收） ====================
+section('测试 D：拒收（真实 LANDrop client 发送 → 微密规范服务端拒收）');
+{
+  const receiver = new SpecReceiver({
+    identitySk: Buffer.from(LD.identity.kp.sk),
+    identityPkB64: LD.identity.kp.pkBase64,
+    declineAll: true,
+  });
+  const port = await receiver.start(0);
+  let clientErr = '';
+  try {
+    const session = await LD.SessionHandler.connect('127.0.0.1', port);
+    await session.exchangeSupportedMessageTypes();
+    await session.exchangeDeviceInfo();
+    await session.sendFiles([{
+      path: f1,
+      abstractFilename: path.basename(f1),
+    }]);
+    clientErr = '';
+  } catch (e) {
+    clientErr = e.message || String(e);
+  }
+  await new Promise((r) => setTimeout(r, 300));
+  ok(clientErr.length > 0, `真实客户端收到拒收反馈并报错（${clientErr.slice(0, 60)}）`);
+  ok(receiver.received.length === 0, '拒收后无文件落盘');
+}
+
 console.log(`\n${failures === 0 ? '全部通过' : `${failures} 项失败`}`);
 process.exit(failures === 0 ? 0 : 1);

@@ -223,10 +223,11 @@ export class SpecSession {
 // ==================== 规范服务端（= 我方接收端） ====================
 
 export class SpecReceiver {
-  constructor({ identitySk, identityPkB64, deviceName = '微密文件' }) {
+  constructor({ identitySk, identityPkB64, deviceName = '微密文件', declineAll = false }) {
     this.identitySk = identitySk;
     this.identityPkB64 = identityPkB64;
     this.deviceName = deviceName;
+    this.declineAll = declineAll; // 测试 D：一律拒收
     this.received = []; // {filename, path, size}
   }
 
@@ -279,7 +280,7 @@ export class SpecReceiver {
   }
 
   async _onFileSendRequest(s, files) {
-    if (!files.length) {
+    if (!files.length || this.declineAll) {
       await s.sendJson({ type: 'file_send_request_reply', data: { accept: false, compression: 'none' } });
       return;
     }

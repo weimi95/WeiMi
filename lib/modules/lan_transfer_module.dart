@@ -7,12 +7,14 @@ import 'package:flutter/material.dart';
 import '../framework/module_registry.dart';
 import '../framework/setting_store.dart';
 import '../services/daemon_service.dart';
+import '../services/landrop_service.dart';
 import '../services/lan_transfer_service.dart';
 import '../services/localsend_service.dart';
 import '../services/receive_notify_service.dart';
 import '../services/trusted_devices_service.dart';
 
-/// 微密飞传模块：网页快传 / 可被发现 / 接收通知 / 接收目录 / 本机名称 / 信任设备。
+/// 微密飞传模块：网页快传 / 可被发现 / 接收通知 / 接收目录 / 本机名称 /
+/// 信任设备 / LocalSend 兼容 / LANDrop 兼容。
 class LanTransferModule extends FeatureModule {
   LanTransferModule();
 
@@ -74,6 +76,26 @@ class LanTransferModule extends FeatureModule {
                 content: Text(v == true
                     ? '已开启：可与 LocalSend 设备互传'
                     : '已关闭：不再发现/连接 LocalSend 设备'),
+                duration: const Duration(seconds: 2),
+              ));
+            }
+          },
+        ),
+        SettingDef(
+          key: 'lan_landrop_enabled',
+          title: 'LANDrop 兼容',
+          icon: Icons.public,
+          subtitle: '与 LANDrop App 互收互发文件/文本（UDP 52637 发现 + TCP 加密传输）。'
+              '首次接收需核对 6 位验证码，可勾选信任后免确认；关闭后不再广播/连接 LANDrop 设备',
+          type: SettingType.boolean,
+          defaultValue: true,
+          onChanged: (ctx, v) async {
+            await LandropService.instance.setEnabled(v as bool);
+            if (ctx.mounted) {
+              ScaffoldMessenger.of(ctx).showSnackBar(SnackBar(
+                content: Text(v == true
+                    ? '已开启：可发现并连接 LANDrop 设备（含真 LANDrop App）'
+                    : '已关闭：不再发现/连接 LANDrop 设备'),
                 duration: const Duration(seconds: 2),
               ));
             }
@@ -385,13 +407,15 @@ class _TrustedDevicesTileState extends State<_TrustedDevicesTile> {
         ListTile(
           leading: const Icon(Icons.verified_user_outlined),
           title: const Text('信任设备', style: TextStyle(fontSize: 14)),
-          subtitle: Text('${_trusted.length} 台 · 信任过的设备发来文件/文本免确认直接接收',
+          subtitle: Text('${_trusted.length} 台 · 信任过的设备发来文件/文本免确认直接接收'
+              '（微密设备在飞传页右键「添加信任」；LANDrop 设备在首次接收确认框勾选）',
               style: const TextStyle(fontSize: 12)),
         ),
         if (_trusted.isEmpty)
           const Padding(
             padding: EdgeInsets.only(left: 56, right: 16, bottom: 8),
-            child: Text('暂无信任设备。在飞传页点设备右侧菜单「添加信任」。',
+            child: Text('暂无信任设备。在飞传页点设备右侧菜单「添加信任」，'
+                '或在 LANDrop 首次接收的确认框里勾选信任。',
                 style: TextStyle(fontSize: 12)),
           )
         else

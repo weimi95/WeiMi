@@ -1881,9 +1881,11 @@ class LanPeer {
   final int httpPort;
   final bool trusted;
   DateTime lastSeen;
-  /// 协议：'weimi'=微密自研飞传；'localsend'=LocalSend v2 兼容设备。
+  /// 协议：'weimi'=微密自研飞传；'localsend'=LocalSend v2 兼容设备；
+  /// 'landrop'=LANDrop v2 兼容设备（纯 LANDrop 物理设备才单独立项）。
   /// 合并显示后一台物理设备只有一条记录：同 IP 同时跑着微密+LocalSend 的
-  /// 设备以 weimi 条目为主，LocalSend 链路信息挂在 [lsPort]/[lsHttps] 上。
+  /// 设备以 weimi 条目为主，LocalSend 链路信息挂在 [lsPort]/[lsHttps] 上；
+  /// LANDrop 链路信息（如有）挂在 [ldPort]/[ldPkB64] 上。
   final String protocol;
   /// LocalSend 设备的传输 scheme（App 默认 HTTPS only，自签证书）。
   /// 微密设备用不到（恒 false）。
@@ -1893,6 +1895,10 @@ class LanPeer {
   final int? lsPort;
   /// LocalSend 链路是否走 HTTPS（对端 App 默认开）。
   final bool lsHttps;
+  /// 该设备（IP）上的 LANDrop 链路 TCP 端口；null=没有 LANDrop 链路。
+  final int? ldPort;
+  /// LANDrop 设备身份公钥 base64（= 信任列表 key；LANDrop 信任按它持久化）。
+  final String? ldPkB64;
 
   LanPeer({
     required this.id,
@@ -1905,12 +1911,20 @@ class LanPeer {
     this.https = false,
     this.lsPort,
     this.lsHttps = false,
+    this.ldPort,
+    this.ldPkB64,
   });
 
   bool get isLocalSend => protocol == 'localsend';
 
   /// 是否同时具备 LocalSend 链路（合并条目：主链路微密 + LocalSend 兜底）。
   bool get hasLocalSendLink => lsPort != null;
+
+  /// 纯 LANDrop 设备条目（无微密/LocalSend 主链路的物理设备）。
+  bool get isLandrop => protocol == 'landrop';
+
+  /// 是否同时具备 LANDrop 链路（合并条目附加信息）。
+  bool get hasLandropLink => ldPort != null;
 
   LanPeer copyWith({bool? trusted, int? lsPort, bool? lsHttps}) => LanPeer(
         id: id,
@@ -1923,6 +1937,8 @@ class LanPeer {
         https: https,
         lsPort: lsPort ?? this.lsPort,
         lsHttps: lsHttps ?? this.lsHttps,
+        ldPort: ldPort,
+        ldPkB64: ldPkB64,
       );
 }
 

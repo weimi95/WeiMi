@@ -13,7 +13,7 @@ import 'rust_crypto.dart';
 import 'transfer_history_service.dart';
 import 'trusted_devices_service.dart';
 
-/// LANDrop v2 兼容层（接收端；发送端在阶段 3）。
+/// LANDrop v2 兼容层（收发双端）。
 ///
 /// 协议逆向自 LANDrop 2.7.2（electron asar 主进程 JS 完整可读 + Qt 版常量佐证）：
 /// - 发现：UDP 52637。组播 239.192.52.63 + 广播 255.255.255.255 双发 announce；
@@ -515,6 +515,216 @@ class LandropService {
     } catch (_) {}
   }
 
+  // ============ 发送端 ============
+
+  /// 发送文件到一台 LANDrop 设备。
+  /// 流程（与 specSendFiles/LANDrop class p 一致）：
+  /// TCP 连接 → ClientHello/ServerHello → 交换 supported_message_types/
+  /// device_info → file_send_request → 等 reply → 按序流式发文件记录。
+  /// [files] 的 filename 可含 '/'（文件夹传输的相对路径）。
+  /// [onVerifCode] 握手成功后回调（未信任设备时调用方应立即展示供双方核对）；
+  /// [onProgress] 回调 (当前文件名, 已发总字节, 总字节)。
+  Future<LandropSendResult> sendFilesToDevice(
+    LandropDevice device,
+    List<LandropSendFile> files, {
+    void Function(String verifCode)? onVerifCode,
+    void Function(String currentFile, int sentTotal, int totalBytes)?
+        onProgress,
+  }) async {
+    await _ensureIdentity();
+    if (files.isEmpty) {
+      return const LandropSendResult(ok: false, error: '没有可发送的文件');
+    }
+    // 预检并汇总元信息（file_send_request 要带全部文件属性）
+    final metas = <_SendFileMeta>[];
+    var totalBytes = 0;
+    for (final f in files) {
+      final file = File(f.path);
+      if (!await file.exists()) {
+        return LandropSendResult(ok: false, error: '文件不存在：${f.path}');
+      }
+      final st = await file.stat();
+      metas.add(_SendFileMeta(
+        path: f.path,
+        filename: f.filename,
+        size: st.size,
+        lastModified: st.modified.millisecondsSinceEpoch ~/ 1000,
+        permissions: _octalMode(st.mode),
+      ));
+      totalBytes += st.size;
+    }
+
+    Socket socket;
+    try {
+      socket = await Socket.connect(device.address, device.port,
+          timeout: const Duration(seconds: 10));
+    } catch (e) {
+      return LandropSendResult(ok: false, error: '连接失败：$e');
+    }
+    final session = _LandropSession(socket, isClient: true);
+    try {
+      await session.handshakeAsClient();
+      onVerifCode?.call(session.verifCode);
+      await session.exchangeSupportedMessageTypes();
+      await session.exchangeDeviceInfo();
+      await session.sendJson({
+        'type': 'file_send_request',
+        'data': {
+          'files': [
+            for (final m in metas)
+              {
+                'filename': m.filename,
+                'size': m.size,
+                'last_modified': m.lastModified,
+                'permissions': m.permissions,
+              }
+          ],
+          'supported_compressions': ['none'],
+          'ios_live_photos': [],
+        },
+      });
+      final reply = await session.recvJson();
+      if (reply == null) {
+        return LandropSendResult(
+            ok: false,
+            error: '对端无响应',
+            verifCode: session.verifCode,
+            peerName: session.peerDeviceName);
+      }
+      if (reply['type'] != 'file_send_request_reply' ||
+          (reply['data'] as Map<String, dynamic>?)?['accept'] != true) {
+        // 对端拒收：记账留痕
+        for (final m in metas) {
+          await _recordOut(m, ok: false, note: '对方拒收', peerName: device.name);
+        }
+        return LandropSendResult(
+            ok: false,
+            rejected: true,
+            error: '对方拒收',
+            verifCode: session.verifCode,
+            peerName: session.peerDeviceName);
+      }
+      // 逐文件流式发送（≤65518/条自动分片，末片 push=1；空文件不发记录）
+      var sent = 0;
+      for (final m in metas) {
+        final raf = await File(m.path).open();
+        try {
+          var remaining = m.size;
+          while (remaining > 0) {
+            final chunk = await raf.read(
+                remaining < LandropService.maxBlockSize
+                    ? remaining
+                    : LandropService.maxBlockSize);
+            if (chunk.isEmpty) throw Exception('文件读取中断：${m.filename}');
+            await session.sendBytes(chunk);
+            sent += chunk.length;
+            remaining -= chunk.length;
+            onProgress?.call(m.filename, sent, totalBytes);
+          }
+        } finally {
+          await raf.close();
+        }
+        await _recordOut(m, ok: true, peerName: session.peerDeviceName);
+      }
+      // 等对端读完关闭（LANDrop 收完即 FIN；最多等 3s）
+      await session.waitPeerClose(const Duration(seconds: 3));
+      return LandropSendResult(
+          ok: true, verifCode: session.verifCode, peerName: session.peerDeviceName);
+    } catch (e) {
+      return LandropSendResult(
+          ok: false,
+          error: '$e',
+          verifCode: session.verifCode,
+          peerName: session.peerDeviceName);
+    } finally {
+      try {
+        socket.destroy();
+      } catch (_) {}
+    }
+  }
+
+  /// 发送文本到一台 LANDrop 设备（text_send + 等 ack）。
+  Future<LandropSendResult> sendTextToDevice(
+    LandropDevice device,
+    String text, {
+    void Function(String verifCode)? onVerifCode,
+  }) async {
+    await _ensureIdentity();
+    if (text.trim().isEmpty) {
+      return const LandropSendResult(ok: false, error: '空文本');
+    }
+    Socket socket;
+    try {
+      socket = await Socket.connect(device.address, device.port,
+          timeout: const Duration(seconds: 10));
+    } catch (e) {
+      return LandropSendResult(ok: false, error: '连接失败：$e');
+    }
+    final session = _LandropSession(socket, isClient: true);
+    try {
+      await session.handshakeAsClient();
+      onVerifCode?.call(session.verifCode);
+      await session.exchangeSupportedMessageTypes();
+      await session.exchangeDeviceInfo();
+      await session.sendJson({'type': 'text_send', 'data': {'text': text}});
+      final ack = await session.recvJson();
+      final ok = ack != null &&
+          ack['type'] == 'ack' &&
+          (ack['data'] as Map<String, dynamic>?)?['ack'] == true;
+      if (ok) {
+        await TransferHistoryService.instance.add(TransferRecord(
+          id: '${DateTime.now().microsecondsSinceEpoch}_ldouttxt',
+          kind: 'text',
+          direction: 'out',
+          name: '发送给 ${device.name} 的文本',
+          text: text.length > 2000 ? '${text.substring(0, 2000)}…' : text,
+          size: text.length,
+          peerName: device.name,
+          time: DateTime.now(),
+          ok: true,
+        ));
+      }
+      return LandropSendResult(
+          ok: ok,
+          error: ok ? '' : '对端未确认',
+          verifCode: session.verifCode,
+          peerName: session.peerDeviceName);
+    } catch (e) {
+      return LandropSendResult(
+          ok: false,
+          error: '$e',
+          verifCode: session.verifCode,
+          peerName: session.peerDeviceName);
+    } finally {
+      try {
+        socket.destroy();
+      } catch (_) {}
+    }
+  }
+
+  Future<void> _recordOut(_SendFileMeta m,
+      {required bool ok, String? note, required String peerName}) async {
+    await TransferHistoryService.instance.add(TransferRecord(
+      id: '${DateTime.now().microsecondsSinceEpoch}_ldout',
+      kind: 'file',
+      direction: 'out',
+      name: m.filename,
+      size: m.size,
+      peerName: peerName,
+      time: DateTime.now(),
+      ok: ok,
+      note: note,
+    ));
+  }
+
+  /// 文件 mode → 八进制权限串（LANDrop permissions 字段）。
+  /// Windows 的 stat mode 无意义，统一 '644'（对端 Windows 也忽略该字段）。
+  String _octalMode(int mode) {
+    if (Platform.isWindows || mode == 0) return '644';
+    final s = (mode & 0xFFF).toRadixString(8);
+    return s.isEmpty ? '644' : s;
+  }
+
   /// 文件名净化：去路径穿越（'..'）、去前导 '/'、统一正斜杠。
   /// LANDrop 文件夹传输的 filename 形如 "文件夹/子目录/文件.txt"。
   String _safeName(String raw) {
@@ -717,6 +927,97 @@ class _LandropSession {
     _verifCode = RustCrypto.landropVerifCode(kSc: _txKey, kCs: _rxKey);
   }
 
+  /// 客户端握手：发 ClientHello → 收 ServerHello 验签 → 派生会话密钥
+  /// （与 LANDrop class p.connect 完全一致；specSendFiles 对拍通过）
+  Future<void> handshakeAsClient() async {
+    final kx = RustCrypto.landropKxKeypair();
+    final mySig = RustCrypto.landropSecpSign(
+        kx.pk, LandropService.instance.identitySkBytes);
+    final clientHello = {
+      'supported_versions': ['v2'],
+      'public_key': LandropService.instance.identityPkB64,
+      'ecdhe': {
+        'public_key': base64.encode(kx.pk),
+        'sig': base64.encode(mySig),
+      },
+    };
+    await _writeRaw(utf8.encode(json.encode(clientHello)) as Uint8List);
+    final helloBytes = await _readRaw();
+    if (helloBytes == null) throw Exception('ServerHello 未到达');
+    final hello = json.decode(utf8.decode(helloBytes)) as Map<String, dynamic>;
+    if (hello['version'] != 'v2') throw Exception('对端不支持 v2');
+    final pkB64 = (hello['public_key'] as String?) ?? '';
+    if (pkB64.isEmpty) throw Exception('ServerHello 缺 public_key');
+    final ecdhe = (hello['ecdhe'] as Map<String, dynamic>?) ?? {};
+    final ecdhePk = base64.decode((ecdhe['public_key'] as String?) ?? '');
+    final sig = base64.decode((ecdhe['sig'] as String?) ?? '');
+    if (ecdhePk.length != 32 || sig.length != 64) {
+      throw Exception('ServerHello ecdhe 字段异常');
+    }
+    // 验签：sig = secp256k1_sign(blake2b-256(ecdhe.pk), 对端 sk)
+    if (!RustCrypto.landropSecpVerify(sig, ecdhePk, base64.decode(pkB64))) {
+      throw Exception('ServerHello 验签失败');
+    }
+    final keys = RustCrypto.landropKxSessionKeys(
+      isClient: true,
+      ownSk: kx.sk,
+      ownPk: kx.pk,
+      peerPk: ecdhePk,
+    );
+    _rxKey = keys.rx;
+    _txKey = keys.tx;
+    peerPkB64 = pkB64;
+    // client 角色：kSc=rx, kCs=tx（与 LANDrop class p 一致）
+    _verifCode = RustCrypto.landropVerifCode(kSc: _rxKey, kCs: _txKey);
+  }
+
+  /// 客户端：交换 supported_message_types（先发后收）
+  Future<void> exchangeSupportedMessageTypes() async {
+    await sendJson({
+      'type': 'supported_message_types',
+      'data': {
+        'types': [
+          'ack',
+          'supported_message_types',
+          'device_info',
+          'file_send_request',
+          'file_send_request_reply',
+          'text_send',
+        ]
+      },
+    });
+    final mt = await recvJson();
+    if (mt == null || mt['type'] != 'supported_message_types') {
+      throw Exception('对端不回 supported_message_types');
+    }
+  }
+
+  /// 客户端：交换 device_info（先发后收，存对端名字）
+  Future<void> exchangeDeviceInfo() async {
+    await sendJson({
+      'type': 'device_info',
+      'data': {
+        'name': LandropService.instance.selfDeviceName,
+        'type': LandropService.instance.selfDeviceType,
+      },
+    });
+    final di = await recvJson();
+    if (di == null || di['type'] != 'device_info') {
+      throw Exception('对端不回 device_info');
+    }
+    final data = (di['data'] as Map<String, dynamic>?) ?? {};
+    peerDeviceName = (data['name'] as String?) ?? 'LANDrop 设备';
+    peerDeviceType = (data['type'] as String?) ?? '';
+  }
+
+  /// 等待对端关闭连接（收完即关）或超时（LANDrop 服务端读完所有
+  /// 文件记录后主动 FIN；异常路径下靠超时兜底，不阻塞返回）。
+  Future<void> waitPeerClose(Duration timeout) async {
+    try {
+      await socket.done.timeout(timeout);
+    } catch (_) {}
+  }
+
   // ---------- 消息循环（服务端） ----------
 
   Future<void> listen() async {
@@ -835,4 +1136,47 @@ class LandropEvent {
   LandropEvent(this.kind, {this.name, this.from, this.path});
 
   static final devicesChanged = LandropEvent('devicesChanged');
+}
+
+/// 待发送文件（filename 可含 '/' = 文件夹相对路径，LANDrop 协议支持）
+class LandropSendFile {
+  final String path;
+  final String filename;
+  const LandropSendFile({required this.path, required this.filename});
+}
+
+/// 发送元信息（file_send_request 用）
+class _SendFileMeta {
+  final String path;
+  final String filename;
+  final int size;
+  final int lastModified;
+  final String permissions;
+  const _SendFileMeta({
+    required this.path,
+    required this.filename,
+    required this.size,
+    required this.lastModified,
+    required this.permissions,
+  });
+}
+
+/// 发送结果
+class LandropSendResult {
+  final bool ok;
+  /// 对端明确拒收（区别于连接失败等错误）
+  final bool rejected;
+  final String error;
+  /// 6 位 verifCode（未信任设备时调用方应展示供双方核对）
+  final String verifCode;
+  /// 对端设备名（device_info 交换得来）
+  final String peerName;
+
+  const LandropSendResult({
+    required this.ok,
+    this.rejected = false,
+    this.error = '',
+    this.verifCode = '',
+    this.peerName = '',
+  });
 }
