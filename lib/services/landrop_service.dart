@@ -197,10 +197,17 @@ class LandropService {
     _udpPort = socket.port;
     socket.broadcastEnabled = true;
     socket.listen(_onDiscoveryDatagram);
-    // 加入组播组（Android 无 MulticastLock 会失败，忽略——靠广播查询+单播应答）
+    // 加入组播组（Android 无 MulticastLock 会失败，忽略——靠广播查询+单播应答）。
+    // 注意 API 名是 joinMulticast（无 Group 后缀），第二参是 NetworkInterface，
+    // 逐网卡 join，多网卡/虚拟网卡环境都能收。
     if (!Platform.isAndroid) {
       try {
-        socket.joinMulticastGroup(InternetAddress(multicastGroup));
+        final ifaces = await NetworkInterface.list();
+        for (final iface in ifaces) {
+          try {
+            socket.joinMulticast(InternetAddress(multicastGroup), iface);
+          } catch (_) {}
+        }
       } catch (e) {
         debugPrint('LANDrop: 加入组播组失败（不影响广播链路）: $e');
       }
@@ -742,7 +749,7 @@ class LandropService {
 class _LandropSession {
   final Socket socket;
   final bool isClient;
-  final Uint8List _recvBuf = Uint8List(0);
+  Uint8List _recvBuf = Uint8List(0);
 
   late Uint8List _rxKey;
   late Uint8List _txKey;

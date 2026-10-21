@@ -981,7 +981,7 @@ class RustCrypto {
     try {
       final rc = f(out, outLen, dataPtr, data.length);
       if (rc != 0) throw Exception('landrop_blake2b failed: $rc');
-      return out.asTypedList(outLen).toList(); // 拷贝，calloc 内存随后释放
+      return Uint8List.fromList(out.asTypedList(outLen)); // 拷贝，calloc 内存随后释放
     } finally {
       calloc.free(out);
       calloc.free(dataPtr);
@@ -1000,7 +1000,8 @@ class RustCrypto {
     try {
       final rc = f(pk, sk);
       if (rc != 0) throw Exception('landrop_kx_keypair failed: $rc');
-      return (pk: pk.asTypedList(32).toList(), sk: sk.asTypedList(32).toList());
+      return (pk: Uint8List.fromList(pk.asTypedList(32)),
+              sk: Uint8List.fromList(sk.asTypedList(32)));
     } finally {
       calloc.free(pk);
       calloc.free(sk);
@@ -1040,7 +1041,8 @@ class RustCrypto {
       final rc = f(isClient, skPtr, pkPtr, peerPtr, rx, tx);
       if (rc == -1) throw Exception('landrop_kx_session_keys: weak peer key');
       if (rc != 0) throw Exception('landrop_kx_session_keys failed: $rc');
-      return (rx: rx.asTypedList(32).toList(), tx: tx.asTypedList(32).toList());
+      return (rx: Uint8List.fromList(rx.asTypedList(32)),
+              tx: Uint8List.fromList(tx.asTypedList(32)));
     } finally {
       calloc.free(skPtr);
       calloc.free(pkPtr);
@@ -1069,7 +1071,7 @@ class RustCrypto {
     try {
       final rc = f(kScPtr, kCsPtr, out);
       if (rc != 0) throw Exception('landrop_verif_code failed: $rc');
-      return out.cast<ffi.Utf8>().toDartString();
+      return out.cast<Utf8>().toDartString();
     } finally {
       calloc.free(kScPtr);
       calloc.free(kCsPtr);
@@ -1089,7 +1091,8 @@ class RustCrypto {
     try {
       final rc = f(pk, sk);
       if (rc != 0) throw Exception('landrop_secp_keypair failed: $rc');
-      return (pk: pk.asTypedList(33).toList(), sk: sk.asTypedList(32).toList());
+      return (pk: Uint8List.fromList(pk.asTypedList(33)),
+              sk: Uint8List.fromList(sk.asTypedList(32)));
     } finally {
       calloc.free(pk);
       calloc.free(sk);
@@ -1108,7 +1111,7 @@ class RustCrypto {
     try {
       final rc = f(skPtr, pk);
       if (rc != 0) throw Exception('landrop_secp_pk_from_sk failed: $rc');
-      return pk.asTypedList(33).toList();
+      return Uint8List.fromList(pk.asTypedList(33));
     } finally {
       calloc.free(skPtr);
       calloc.free(pk);
@@ -1130,7 +1133,7 @@ class RustCrypto {
     try {
       final rc = f(msgPtr, msg.length, skPtr, sig);
       if (rc != 0) throw Exception('landrop_secp_sign failed: $rc');
-      return sig.asTypedList(64).toList();
+      return Uint8List.fromList(sig.asTypedList(64));
     } finally {
       calloc.free(msgPtr);
       calloc.free(skPtr);
@@ -1193,7 +1196,7 @@ class RustCrypto {
       try {
         rc = f(keyPtr, noncePtr, ptPtr, plaintext.length, out, outLen);
         if (rc != 0) throw Exception('landrop_seal failed: $rc');
-        return out.asTypedList(len).toList();
+        return Uint8List.fromList(out.asTypedList(len));
       } finally {
         calloc.free(out);
       }
@@ -1237,7 +1240,7 @@ class RustCrypto {
         rc = f(keyPtr, noncePtr, ctPtr, ciphertext.length, out, outLen);
         if (rc == -2) throw Exception('landrop_open: auth failed');
         if (rc != 0) throw Exception('landrop_open failed: $rc');
-        return out.asTypedList(len).toList();
+        return Uint8List.fromList(out.asTypedList(len));
       } finally {
         calloc.free(out);
       }
@@ -1263,4 +1266,4 @@ class RustCrypto {
       calloc.free(ptr);
     }
   }
-}
+}
