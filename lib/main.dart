@@ -57,6 +57,10 @@ void main(List<String> args) async {
   // 窗口要不要 show——冷启浮窗若先 show 再 hide，就会闪一下空白大窗。
   final deepPopupStart = args.contains('--page=popup');
 
+  // 开机自启「进托盘不进窗口」（设置→通用→桌面端）：注册表自启条目带
+  // --tray 参数，与用户手动双击（无参数，正常出窗口）区分。
+  final trayStart = args.contains('--tray');
+
   if (deepPopupStart) {
     // ===== 冷启浮窗极简路径（秒开，v1.0.69）=====
     // 守护进程代听双击 Ctrl 拉起的临时会话：只做浮窗必需的初始化，
@@ -144,7 +148,7 @@ void main(List<String> args) async {
     if (!Platform.isAndroid && !Platform.isIOS) {
       try {
         await TrayService.instance
-            .initDesktop(startHidden: false);
+            .initDesktop(startHidden: trayStart);
       } catch (e) {
         debugPrint('desktop init failed: $e');
       }

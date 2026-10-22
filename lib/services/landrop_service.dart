@@ -17,6 +17,8 @@ import 'trusted_devices_service.dart';
 ///
 /// 协议逆向自 LANDrop 2.7.2（electron asar 主进程 JS 完整可读 + Qt 版常量佐证）：
 /// - 发现：UDP 52637。组播 239.192.52.63 + 广播 255.255.255.255 双发 announce；
+///   同时双发 request 查询包（LANDrop 被动设计：平时不周期重播，收到查询
+///   才单播应答——不主动查就发现不了先启动的对方/同机并存场景）；
 ///   收到 request=true 的查询包时单播应答。设备 20s 过期，我方每 10s 重播保活。
 /// - 传输：裸 TCP（端口=发现包里的 port，优先 52637，被占自动换）。握手后
 ///   交换 supported_message_types / device_info，之后走 JSON 消息
@@ -70,6 +72,15 @@ class LandropService {
   final Map<String, LandropDevice> _devices = {};
   List<LandropDevice> get devices => _devices.values.toList();
 
+  /// true = 52637 被占（同机装着真 LANDrop）已降级临时端口。
+  /// 降级期间收不到目的端口 52637 的组播/广播包，唯一入向通路是
+  /// 「我方 query → 对方单播应答到临时端口」——LANDrop 满足（被动设计
+  /// 恰好在这里帮我们），故功能不受影响；周期重试 bind 抢回 52637
+  /// （对方退出后恢复完整发现能力，见 _tryRebind）。
+  bool _degraded = false;
+  bool get isDegraded => _degraded;
+  Timer? _rebindTimer;
+
   Timer? _announceTimer;
   Timer? _pruneTimer;
 
@@ -120,6 +131,9 @@ class LandropService {
     _announceTimer = null;
     _pruneTimer?.cancel();
     _pruneTimer = null;
+    _rebindTimer?.cancel();
+    _rebindTimer = null;
+    _degraded = false;
     for (final c in _liveConns) {
       try {
         c.destroy();
@@ -187,6 +201,11 @@ class LandropService {
           0,
           reuseAddress: false,
         );
+        _degraded = true;
+        _rebindTimer ??= Timer.periodic(
+            const Duration(seconds: 5), (_) => _tryRebind());
+        debugPrint('LANDrop: 52637 被占，降级临时端口 ${socket.port}'
+            '（5s 后重试抢回）');
       } catch (e) {
         lastError = 'UDP 绑定失败: $e';
         debugPrint('LANDrop: $lastError');
@@ -197,21 +216,52 @@ class LandropService {
     _udpPort = socket.port;
     socket.broadcastEnabled = true;
     socket.listen(_onDiscoveryDatagram);
-    // 加入组播组（Android 无 MulticastLock 会失败，忽略——靠广播查询+单播应答）。
-    // 注意 API 名是 joinMulticast（无 Group 后缀），第二参是 NetworkInterface，
-    // 逐网卡 join，多网卡/虚拟网卡环境都能收。
-    if (!Platform.isAndroid) {
-      try {
-        final ifaces = await NetworkInterface.list();
-        for (final iface in ifaces) {
-          try {
-            socket.joinMulticast(InternetAddress(multicastGroup), iface);
-          } catch (_) {}
-        }
-      } catch (e) {
-        debugPrint('LANDrop: 加入组播组失败（不影响广播链路）: $e');
+    await _joinMulticast(socket);
+  }
+
+  /// 逐网卡加入组播组（Android 无 MulticastLock 会失败，忽略——靠广播查询
+  /// + 单播应答）。API 名是 joinMulticast（无 Group 后缀），第二参是
+  /// NetworkInterface，逐网卡 join，多网卡/虚拟网卡环境都能收。
+  Future<void> _joinMulticast(RawDatagramSocket sock) async {
+    if (Platform.isAndroid) return;
+    try {
+      final ifaces = await NetworkInterface.list();
+      for (final iface in ifaces) {
+        try {
+          sock.joinMulticast(InternetAddress(multicastGroup), iface);
+        } catch (_) {}
       }
+    } catch (e) {
+      debugPrint('LANDrop: 加入组播组失败（不影响广播链路）: $e');
     }
+  }
+
+  /// 降级期间每 5s 重试 bind 52637：同机的真 LANDrop 退出后会释放端口，
+  /// 抢回来即恢复完整发现能力（收组播/广播 announce + 被对方 query 发现）。
+  /// 成功则热切换 socket（旧 socket 上无在途状态，安全）。
+  void _tryRebind() {
+    if (!_running || !_degraded) return;
+    RawDatagramSocket.bind(InternetAddress.anyIPv4, port, reuseAddress: false)
+        .then((sock) {
+      if (!_running) {
+        sock.close();
+        return;
+      }
+      final old = _udpSocket;
+      _udpSocket = sock;
+      _udpPort = sock.port;
+      _degraded = false;
+      _rebindTimer?.cancel();
+      _rebindTimer = null;
+      sock.broadcastEnabled = true;
+      sock.listen(_onDiscoveryDatagram);
+      unawaited(_joinMulticast(sock));
+      try {
+        old?.close();
+      } catch (_) {}
+      debugPrint('LANDrop: 已抢回 52637（udp=$_udpPort）');
+      _announce();
+    }).catchError((_) {});
   }
 
   void _onDiscoveryDatagram(RawSocketEvent event) {
@@ -228,21 +278,21 @@ class LandropService {
     final fromIp = datagram.address.address;
     final pk = (packet['public_key'] as String?) ?? '';
     if (pk.isEmpty) return;
-    // 自己的包不处理（组播回环 + 广播自发；IP 未刷新时用公钥兜底判自）
-    if (_isSelfIp(fromIp) || pk == _identityPkB64) return;
+    // 只按身份公钥判自（自己的包必带自己的 pk，组播回环/广播自发都覆盖）。
+    // 不能用「源 IP 是本机 IP」判自——同主机并存的对方（真 LANDrop）
+    // 发的包也来自本机 IP，会被误杀。
+    if (pk == _identityPkB64) return;
 
     final isRequest = packet['request'] == true;
     final discoverable = packet['discoverable'] == true;
-    if (isRequest) {
-      // 对方在主动查询 → 单播应答（LANDrop 对广播/组播查询都回单播）
-      _sendDiscoveryPacket(to: fromIp, port: datagram.port);
-      return;
-    }
     if (!discoverable) {
       // 对方关掉了可被发现 → 摘除
       if (_devices.remove(pk) != null) _events.add(LandropEvent.devicesChanged);
       return;
     }
+    // announce 与查询包都带完整设备信息（LANDrop 的启动查询即一条
+    // announce：request=true + discoverable=true + device_info）→
+    // 先登记/刷新设备，再按需应答（与 LANDrop 的 discovery 事件语义一致）
     final info = (packet['device_info'] as Map<String, dynamic>?) ?? {};
     final dev = LandropDevice(
       publicKey: pk,
@@ -260,19 +310,22 @@ class LandropService {
         prev.name != dev.name) {
       _events.add(LandropEvent.devicesChanged);
     }
+    if (isRequest) {
+      // 对方在主动查询 → 单播应答（LANDrop 对广播/组播查询都回单播）
+      _sendDiscoveryPacket(to: fromIp, port: datagram.port);
+    }
   }
 
-  bool _isSelfIp(String ip) {
-    // 本地 IP 列表（ LanTransferService 已过滤虚拟网卡）
-    final locals = _selfIpsCache;
-    return locals.contains(ip);
-  }
-
+  /// 本机 IP 缓存（诊断/备用；判自已改用身份公钥精确匹配，见 _onDiscoveryDatagram）
   List<String> _selfIpsCache = [];
 
-  /// 发现包 JSON（与 LANDrop G 完全一致）
-  Map<String, dynamic> _discoveryPacket() => {
-        'request': false,
+  /// 发现包 JSON（与 LANDrop G 完全一致）。
+  /// [request]=true 为查询包：LANDrop 被动设计——平时不周期重播，
+  /// 只在启动/detectMode 时发查询，之后全靠应答。故我方每周期必须
+  /// 主动查一次，否则「LANDrop 先于我方启动」或「同机并存（我方
+  /// 52637 被占降级临时端口）」场景下永远发现不了对方。
+  Map<String, dynamic> _discoveryPacket({bool request = false}) => {
+        'request': request,
         'supported_versions': ['v2'],
         'public_key': _identityPkB64,
         'port': _serverPort,
@@ -280,26 +333,33 @@ class LandropService {
         'discoverable': true,
       };
 
-  void _sendDiscoveryPacket({required String to, required int port}) {
+  void _sendDiscoveryPacket(
+      {required String to, required int port, bool request = false}) {
     final sock = _udpSocket;
     if (sock == null) return;
     try {
-      sock.send(utf8.encode(json.encode(_discoveryPacket())),
+      sock.send(utf8.encode(json.encode(_discoveryPacket(request: request))),
           InternetAddress(to), port);
     } catch (_) {}
   }
 
-  /// 周期广播：组播 + 广播双发（LANDrop 设备 20s 过期，10s 一次保活）
+  /// 周期广播：组播 + 广播双发 announce 保活（LANDrop 设备 20s 过期），
+  /// 同时发 request 查询包——对方（含真 LANDrop）收到即单播应答，
+  /// 覆盖「对方先启动/同机端口被占」场景。
   void _announce() {
     final sock = _udpSocket;
     if (sock == null || !_running) return;
-    final data = utf8.encode(json.encode(_discoveryPacket()));
-    try {
-      sock.send(data, InternetAddress(multicastGroup), port);
-    } catch (_) {}
-    try {
-      sock.send(data, InternetAddress('255.255.255.255'), port);
-    } catch (_) {}
+    final announce =
+        utf8.encode(json.encode(_discoveryPacket(request: false)));
+    final query = utf8.encode(json.encode(_discoveryPacket(request: true)));
+    for (final data in [announce, query]) {
+      try {
+        sock.send(data, InternetAddress(multicastGroup), port);
+      } catch (_) {}
+      try {
+        sock.send(data, InternetAddress('255.255.255.255'), port);
+      } catch (_) {}
+    }
   }
 
   void _pruneDevices() {

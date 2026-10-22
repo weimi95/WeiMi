@@ -56,6 +56,18 @@ class GeneralModule extends FeatureModule {
             type: SettingType.custom,
             customTile: (ctx) => const _AutostartTile(),
           ),
+        if (_isDesktop && AutostartService.supported)
+          SettingDef(
+            key: 'tray_start_hidden',
+            title: '开机自启时进入托盘',
+            icon: Icons.visibility_off_outlined,
+            group: '桌面端',
+            subtitle: '开机启动后只留托盘图标、不显示窗口；从托盘菜单可打开主界面',
+            type: SettingType.boolean,
+            defaultValue: false,
+            visible: () => _isDesktop && AutostartService.supported,
+            onChanged: (ctx, v) => _applyTrayStartHidden(v as bool),
+          ),
         if (_isDesktop && Platform.isWindows)
           SettingDef(
             key: 'daemon_enabled',
@@ -154,6 +166,18 @@ class _ClearCacheTile extends StatelessWidget {
   }
 }
 
+/// 开机自启「进托盘不进窗口」：重写注册表自启条目。
+/// 开 → 条目带 --tray 参数（main.dart 识别后 initDesktop(startHidden: true)）；
+/// 关 → 条目去掉参数。自启未开时只存设置，等开自启时按当前值写入参数。
+Future<void> _applyTrayStartHidden(bool hidden) async {
+  if (await AutostartService.isEnabled(valueName: 'WeiMiFile')) {
+    await AutostartService.setEnabled(true,
+        exePath: Platform.resolvedExecutable,
+        valueName: 'WeiMiFile',
+        extraArgs: hidden ? const ['--tray'] : const []);
+  }
+}
+
 /// 开机自启：初始值是异步查询（AutostartService.isEnabled），自绘整块。
 class _AutostartTile extends StatefulWidget {
   const _AutostartTile();
@@ -182,8 +206,11 @@ class _AutostartTileState extends State<_AutostartTile> {
   }
 
   Future<void> _toggle(bool v) async {
+    final hidden = SettingStore.get<bool>('tray_start_hidden', false);
     final ok = await AutostartService.setEnabled(v,
-        exePath: Platform.resolvedExecutable, valueName: 'WeiMiFile');
+        exePath: Platform.resolvedExecutable,
+        valueName: 'WeiMiFile',
+        extraArgs: hidden ? const ['--tray'] : const []);
     if (!mounted) return;
     setState(() => _enabled = ok ? v : _enabled);
     ScaffoldMessenger.of(context).showSnackBar(SnackBar(

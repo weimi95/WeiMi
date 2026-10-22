@@ -36,13 +36,18 @@ class AutostartService {
   }
 
   static Future<bool> setEnabled(bool enable,
-      {String? exePath, String valueName = 'WeiMiFile'}) async {
+      {String? exePath,
+      String valueName = 'WeiMiFile',
+      List<String> extraArgs = const []}) async {
     try {
       final exe = exePath ?? Platform.resolvedExecutable;
       if (Platform.isWindows) {
         if (enable) {
+          // reg /d 值：路径带空格必须整体加引号；参数追加在引号外
+          final cmdLine =
+              extraArgs.isEmpty ? '"$exe"' : '"$exe" ${extraArgs.join(' ')}';
           final r = await Process.run('reg', [
-            'add', _runKey, '/v', valueName, '/t', 'REG_SZ', '/d', '"$exe"', '/f'
+            'add', _runKey, '/v', valueName, '/t', 'REG_SZ', '/d', cmdLine, '/f'
           ]);
           return r.exitCode == 0;
         } else {
@@ -61,7 +66,7 @@ class AutostartService {
           await f.writeAsString('[Desktop Entry]\n'
               'Type=Application\n'
               'Name=微密文件\n'
-              'Exec=$exe\n'
+              'Exec=$exe ${extraArgs.join(' ')}\n'
               'X-GNOME-Autostart-enabled=true\n');
           return true;
         } else {
