@@ -1594,4 +1594,4 @@ pub extern "C" fn index_refresh(
         Some(v) => v.len() as i64,
         None => -3,
     }
-}
+}
