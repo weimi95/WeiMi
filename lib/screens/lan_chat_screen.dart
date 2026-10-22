@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:io';
+import 'dart:typed_data';
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -10,6 +11,8 @@ import '../services/lan_transfer_service.dart';
 import '../services/landrop_service.dart';
 import '../services/pending_send_service.dart';
 import '../services/transfer_history_service.dart';
+import '../services/windows_thumbnail_provider.dart';
+import '../widgets/file_thumbnail.dart';
 
 /// 与单台设备的聊天式传输窗口（Flix 风格：历史记录按设备保存在这里）。
 /// - 在线设备（peer != null）可发文件/文本；离线设备发送自动进**待发送队列**，
@@ -617,6 +620,10 @@ class _Bubble extends StatelessWidget {
     final out = record.direction == 'out';
     final theme = Theme.of(context);
     final accent = theme.colorScheme.primary;
+    // 图片/视频文件气泡顶部显示缩略图（复用文件页底层能力）
+    final showThumb = record.kind == 'file' &&
+        record.path != null &&
+        (FileThumbs.isImage(record.name) || FileThumbs.isVideo(record.name));
     return Align(
       alignment: out ? Alignment.centerRight : Alignment.centerLeft,
       child: GestureDetector(
@@ -624,7 +631,6 @@ class _Bubble extends StatelessWidget {
         onLongPress: onLongPress,
         child: Container(
           margin: const EdgeInsets.symmetric(vertical: 4),
-          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
           constraints: const BoxConstraints(maxWidth: 280),
           decoration: BoxDecoration(
             color: out ? accent.withAlpha(28) : Colors.grey.shade200,
@@ -638,61 +644,71 @@ class _Bubble extends StatelessWidget {
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              Row(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  Icon(
-                    record.kind == 'text'
-                        ? Icons.chat_bubble_outline
-                        : Icons.insert_drive_file_outlined,
-                    size: 16,
-                    color: out ? accent : Colors.grey.shade700,
-                  ),
-                  const SizedBox(width: 6),
-                  Flexible(
-                    child: Text(
-                      record.kind == 'text'
-                          ? (record.text ?? record.name)
-                          : record.name,
-                      style: const TextStyle(fontSize: 14),
-                    ),
-                  ),
-                ],
-              ),
-              if (record.kind == 'file')
-                Padding(
-                  padding: const EdgeInsets.only(top: 2),
-                  child: Text(
-                    _fmtSize(record.size),
-                    style:
-                        TextStyle(fontSize: 11, color: Colors.grey.shade600),
-                  ),
-                ),
-              if (!record.ok && record.note != null)
-                Padding(
-                  padding: const EdgeInsets.only(top: 2),
-                  child: Text(
-                    record.note!,
-                    style:
-                        TextStyle(fontSize: 11, color: Colors.red.shade600),
-                  ),
-                ),
+              if (showThumb)
+                _ChatThumb(path: record.path!, name: record.name),
               Padding(
-                padding: const EdgeInsets.only(top: 2),
-                child: Row(
-                  mainAxisSize: MainAxisSize.min,
+                padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    Text(
-                      _fmtTime(record.time),
-                      style:
-                          TextStyle(fontSize: 10, color: Colors.grey.shade500),
+                    Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Icon(
+                          record.kind == 'text'
+                              ? Icons.chat_bubble_outline
+                              : Icons.insert_drive_file_outlined,
+                          size: 16,
+                          color: out ? accent : Colors.grey.shade700,
+                        ),
+                        const SizedBox(width: 6),
+                        Flexible(
+                          child: Text(
+                            record.kind == 'text'
+                                ? (record.text ?? record.name)
+                                : record.name,
+                            style: const TextStyle(fontSize: 14),
+                          ),
+                        ),
+                      ],
                     ),
-                    if (selected)
+                    if (record.kind == 'file')
                       Padding(
-                        padding: const EdgeInsets.only(left: 6),
-                        child: const Icon(Icons.check_circle,
-                            size: 14, color: Colors.green),
+                        padding: const EdgeInsets.only(top: 2),
+                        child: Text(
+                          _fmtSize(record.size),
+                          style: TextStyle(
+                              fontSize: 11, color: Colors.grey.shade600),
+                        ),
                       ),
+                    if (!record.ok && record.note != null)
+                      Padding(
+                        padding: const EdgeInsets.only(top: 2),
+                        child: Text(
+                          record.note!,
+                          style: TextStyle(
+                              fontSize: 11, color: Colors.red.shade600),
+                        ),
+                      ),
+                    Padding(
+                      padding: const EdgeInsets.only(top: 2),
+                      child: Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          Text(
+                            _fmtTime(record.time),
+                            style: TextStyle(
+                                fontSize: 10, color: Colors.grey.shade500),
+                          ),
+                          if (selected)
+                            Padding(
+                              padding: const EdgeInsets.only(left: 6),
+                              child: const Icon(Icons.check_circle,
+                                  size: 14, color: Colors.green),
+                            ),
+                        ],
+                      ),
+                    ),
                   ],
                 ),
               ),
@@ -711,6 +727,95 @@ class _Bubble extends StatelessWidget {
 
   String _fmtTime(DateTime t) =>
       '${t.hour.toString().padLeft(2, '0')}:${t.minute.toString().padLeft(2, '0')}';
+}
+
+/// 聊天文件气泡缩略图（图片/视频）：复用文件页底层能力——
+/// 图片 Image.file 降采样、视频 Windows 走系统缩略图首帧 / Android 原生抽帧，
+/// 加载失败或文件已删时回退类型图标盒。
+class _ChatThumb extends StatelessWidget {
+  final String path;
+  final String name;
+  final double height;
+  const _ChatThumb({
+    required this.path,
+    required this.name,
+    this.height = 140,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final isImg = FileThumbs.isImage(name);
+    final isVid = FileThumbs.isVideo(name);
+    if (!isImg && !isVid) return const SizedBox.shrink();
+    Widget content;
+    if (isImg) {
+      content = Image.file(
+        File(path),
+        fit: BoxFit.cover,
+        cacheWidth: 560,
+        gaplessPlayback: true,
+        errorBuilder: (_, __, ___) => _fallback(),
+      );
+    } else if (Platform.isWindows) {
+      content = FutureBuilder<String?>(
+        future: WindowsThumbnailProvider.getThumbnailFile(path),
+        builder: (ctx, snap) {
+          final bp = snap.data;
+          if (bp != null && File(bp).existsSync()) {
+            return Image.file(
+              File(bp),
+              fit: BoxFit.cover,
+              gaplessPlayback: true,
+              errorBuilder: (_, __, ___) => _fallback(),
+            );
+          }
+          return _fallback();
+        },
+      );
+    } else {
+      content = FutureBuilder<Uint8List?>(
+        future: FileThumbs.videoFrame(path),
+        builder: (ctx, snap) {
+          final data = snap.data;
+          if (data != null) {
+            return Image.memory(
+              data,
+              fit: BoxFit.cover,
+              gaplessPlayback: true,
+              errorBuilder: (_, __, ___) => _fallback(),
+            );
+          }
+          return _fallback();
+        },
+      );
+    }
+    return ClipRRect(
+      borderRadius: const BorderRadius.vertical(top: Radius.circular(11)),
+      child: SizedBox(
+        width: double.infinity,
+        height: height,
+        child: Stack(
+          fit: StackFit.expand,
+          children: [
+            content,
+            if (isVid)
+              const Center(
+                child: Icon(Icons.play_circle_outline,
+                    color: Colors.white, size: 34),
+              ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _fallback() {
+    final info = FileThumbs.infoFor(name);
+    return Container(
+      color: info.color.withAlpha(20),
+      child: Center(child: Icon(info.icon, size: 40, color: info.color)),
+    );
+  }
 }
 
 class _Composer extends StatelessWidget {
