@@ -1190,9 +1190,16 @@ class _HomePageState extends State<HomePage>
         backgroundColor: Theme.of(context).colorScheme.inversePrimary,
         bottom: TabBar(
           controller: _tabController,
-          tabs: const [
-            Tab(text: '微密文件'),
-            Tab(text: '微密飞传'),
+          tabs: [
+            GestureDetector(
+              onDoubleTap: () {}, // 文件页暂不响应双击回顶
+              child: const Tab(text: '微密文件'),
+            ),
+            GestureDetector(
+              onDoubleTap: () =>
+                  LanTransferScreen.scrollToTopSignal.value++,
+              child: const Tab(text: '微密飞传'),
+            ),
           ],
         ),
         actions: [

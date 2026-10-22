@@ -64,6 +64,53 @@ class TransferHistoryService {
     } catch (_) {}
   }
 
+  // ---- 未读标记（会话级，独立小文件） ----
+  final Map<String, int> _readMarkers = {};
+  bool _readLoaded = false;
+  String? _readPath;
+
+  Future<String> _resolveReadPath() async {
+    if (_readPath != null) return _readPath!;
+    final docs = await getApplicationDocumentsDirectory();
+    _readPath = p.join(docs.path, 'transfer_read_markers.json');
+    return _readPath!;
+  }
+
+  Future<void> _ensureReadLoaded() async {
+    if (_readLoaded) return;
+    _readLoaded = true;
+    try {
+      final f = File(await _resolveReadPath());
+      if (await f.exists()) {
+        final m = json.decode(await f.readAsString()) as Map<String, dynamic>;
+        for (final e in m.entries) {
+          _readMarkers[e.key] = (e.value as num).toInt();
+        }
+      }
+    } catch (_) {}
+  }
+
+  /// 打开某会话时调用：记下已读时间（微秒）。
+  Future<void> markRead(String peerKey) async {
+    await _ensureReadLoaded();
+    _readMarkers[peerKey] = DateTime.now().microsecondsSinceEpoch;
+    try {
+      final f = File(await _resolveReadPath());
+      await f.writeAsString(json.encode(_readMarkers));
+    } catch (_) {}
+  }
+
+  DateTime? lastRead(String peerKey) {
+    final m = _readMarkers[peerKey];
+    return m == null ? null : DateTime.fromMicrosecondsSinceEpoch(m);
+  }
+
+  /// 该会话有无未读（最后一条记录晚于已读时间即为未读）。
+  bool isUnread(String peerKey, DateTime lastTime) {
+    final lr = lastRead(peerKey);
+    return lr == null || lastTime.isAfter(lr);
+  }
+
   /// 新增一条记录（最新在前）。文本超长截断存储。
   Future<void> add(TransferRecord record) async {
     await _ensureLoaded();

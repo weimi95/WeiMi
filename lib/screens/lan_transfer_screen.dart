@@ -26,14 +26,18 @@ class _ConvItem {
   final bool online;
   final LanPeer? peer;
   final int count;
+  final bool unread;
   const _ConvItem(this.key, this.name, this.preview, this.lastTime,
-      this.online, this.peer, this.count);
+      this.online, this.peer, this.count, {this.unread = false});
 }
 
 class LanTransferScreen extends StatefulWidget {
   final String? initialText;
   final List<String> initialFiles;
   final bool standalone;
+
+  /// 双击 Tab 回顶部的全局信号（main.dart 的 TabBar onDoubleTap 触发）。
+  static final ValueNotifier<int> scrollToTopSignal = ValueNotifier(0);
 
   const LanTransferScreen(
       {super.key,
@@ -61,10 +65,14 @@ class _LanTransferScreenState extends State<LanTransferScreen> {
   Timer? _pollTimer;
   String? _pendingText;
   List<String> _pendingFiles = [];
+  final ScrollController _listCtl = ScrollController();
+  int _lastTopSignal = 0;
 
   @override
   void initState() {
     super.initState();
+    _lastTopSignal = LanTransferScreen.scrollToTopSignal.value;
+    LanTransferScreen.scrollToTopSignal.addListener(_onScrollToTop);
     if (widget.initialText != null && widget.initialText!.isNotEmpty) {
       _pendingText = widget.initialText;
     } else if (widget.initialFiles.isNotEmpty) {
@@ -272,7 +280,20 @@ class _LanTransferScreenState extends State<LanTransferScreen> {
   @override
   void dispose() {
     _pollTimer?.cancel();
+    LanTransferScreen.scrollToTopSignal.removeListener(_onScrollToTop);
+    _listCtl.dispose();
     super.dispose();
+  }
+
+  /// 双击 Tab → 会话列表滚回顶部。
+  void _onScrollToTop() {
+    final v = LanTransferScreen.scrollToTopSignal.value;
+    if (v == _lastTopSignal) return;
+    _lastTopSignal = v;
+    if (!_listCtl.hasClients) return;
+    _listCtl.animateTo(0,
+        duration: const Duration(milliseconds: 250),
+        curve: Curves.easeOutCubic);
   }
 
   Future<void> _showReceivedText(String text, String from) async {
@@ -959,11 +980,15 @@ class _LanTransferScreenState extends State<LanTransferScreen> {
     for (final p in _peers) {
       final c = convByKey.remove(p.id);
       items.add(_ConvItem(p.id, c?.name ?? p.name, c?.preview, c?.lastTime,
-          true, p, c?.count ?? 0));
+          true, p, c?.count ?? 0,
+          unread: c != null &&
+              TransferHistoryService.instance.isUnread(p.id, c.lastTime)));
     }
     for (final c in convByKey.values) {
       items.add(_ConvItem(
-          c.key, c.name, c.preview, c.lastTime, false, null, c.count));
+          c.key, c.name, c.preview, c.lastTime, false, null, c.count,
+          unread:
+              TransferHistoryService.instance.isUnread(c.key, c.lastTime)));
     }
     // 信任但从未传过文件的设备：离线也保留在列表（已在线的已在 _peers 覆盖；
     // 有历史的已在 convByKey 覆盖），仅补「信任且无记录」的离线设备。
@@ -993,6 +1018,7 @@ class _LanTransferScreenState extends State<LanTransferScreen> {
     return Stack(
       children: [
         ListView(
+          controller: _listCtl,
           padding: const EdgeInsets.all(12),
           children: [
             _buildSelfCard(),
@@ -1227,6 +1253,16 @@ class _LanTransferScreenState extends State<LanTransferScreen> {
             if (item.lastTime != null)
               Text(_fmtTime(item.lastTime!),
                   style: TextStyle(fontSize: 11, color: Colors.grey.shade500)),
+            if (item.unread)
+              Container(
+                margin: const EdgeInsets.only(top: 3),
+                width: 9,
+                height: 9,
+                decoration: const BoxDecoration(
+                  color: Colors.red,
+                  shape: BoxShape.circle,
+                ),
+              ),
           ],
         ),
         onTap: () => _openChat(item),
