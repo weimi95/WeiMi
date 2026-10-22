@@ -1881,6 +1881,7 @@ class WeiMiVaultScreenState extends State<WeiMiVaultScreen> {
             mainAxisSize: MainAxisSize.min,
             children: [
               SearchOptsButton(
+                currentQuery: _fileQuery,
                 onChanged: (_) {
                   // 菜单开关变更即重搜（空词不搜）
                   if (_fileQuery.isNotEmpty) {
@@ -1888,6 +1889,18 @@ class WeiMiVaultScreenState extends State<WeiMiVaultScreen> {
                     _fileDebounce = Timer(
                         const Duration(milliseconds: 50), _runFileGlobalSearch);
                   }
+                },
+                onApplyFilter: (f) async {
+                  // 应用筛选器：灌查询词 + 持久化其开关 + 重搜
+                  _fileSearchCtrl.text = f.query;
+                  _fileSearchCtrl.selection = TextSelection.collapsed(
+                      offset: f.query.length);
+                  await SearchOpts.save(f.toOpts());
+                  if (!mounted) return;
+                  setState(() => _fileQuery = f.query);
+                  _fileDebounce?.cancel();
+                  _fileDebounce = Timer(
+                      const Duration(milliseconds: 50), _runFileGlobalSearch);
                 },
               ),
               IconButton(

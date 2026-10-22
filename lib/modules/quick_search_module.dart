@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:io';
 
 import 'package:flutter/material.dart';
@@ -9,6 +10,7 @@ import '../services/encryption_service.dart';
 import '../services/file_operations_service.dart';
 import '../services/lan_transfer_service.dart';
 import '../services/system_open_service.dart';
+import '../widgets/saved_filters_dialog.dart';
 
 /// 快捷搜索浮窗模块（PC 端）。
 ///
@@ -108,6 +110,15 @@ class QuickSearchModule extends FeatureModule {
             '500': '0.5 秒（最省电）',
           },
         ),
+        SettingDef(
+          key: 'qs_saved_filters',
+          title: '自定义筛选器',
+          icon: Icons.filter_alt_outlined,
+          subtitle: '把常用「搜索词 + 开关」存为命名筛选器一键复用；支持导入/导出',
+          group: '搜索语法',
+          type: SettingType.custom,
+          customTile: (ctx) => const _SavedFiltersTile(),
+        ),
       ];
 
   @override
@@ -165,6 +176,22 @@ class QuickSearchActions {
 
   /// 启用开关变化时的钩子（hotkey_service 监听 qs_enabled）。
   static void Function(bool enabled)? onEnabledChanged;
+}
+
+/// 设置中心「自定义筛选器」入口：打开管理对话框（新建/编辑/删除/导入/导出）。
+class _SavedFiltersTile extends StatelessWidget {
+  const _SavedFiltersTile();
+
+  @override
+  Widget build(BuildContext context) {
+    return ListTile(
+      leading: const Icon(Icons.filter_alt_outlined),
+      title: const Text('自定义筛选器', style: TextStyle(fontSize: 14)),
+      subtitle: const Text('管理命名筛选器，支持导入/导出', style: TextStyle(fontSize: 12)),
+      trailing: const Icon(Icons.chevron_right, size: 20),
+      onTap: () => unawaited(SavedFiltersDialog.show(context)),
+    );
+  }
 }
 
 Future<void> _openFile(BuildContext context, String path) async {

@@ -3,6 +3,8 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 
 import '../framework/setting_store.dart';
+import '../services/search_filters_service.dart';
+import 'saved_filters_dialog.dart';
 
 /// M3 搜索菜单开关（全局修饰符，持久化；与 Rust `case:`/`wholeword:`/`path:`/`regex:` 裸词对应）。
 ///
@@ -121,10 +123,23 @@ class SearchMacro {
       .join(' ');
 }
 
-/// 搜索菜单按钮：四个全局开关 + 语法帮助。开关变更即写盘并回调触发重搜。
+/// 搜索菜单按钮：四个全局开关 + 语法帮助 + 自定义筛选器入口。
+/// 开关变更即写盘并回调触发重搜。
 class SearchOptsButton extends StatefulWidget {
   final ValueChanged<SearchOpts>? onChanged;
-  const SearchOptsButton({super.key, this.onChanged});
+
+  /// 当前输入框内容（用于「保存当前为筛选器」预填；为空时隐藏该入口）。
+  final String currentQuery;
+
+  /// 应用某条已存筛选器：调用方负责灌查询词、持久化开关、重搜。
+  final void Function(SavedFilter filter)? onApplyFilter;
+
+  const SearchOptsButton({
+    super.key,
+    this.onChanged,
+    this.currentQuery = '',
+    this.onApplyFilter,
+  });
 
   @override
   State<SearchOptsButton> createState() => _SearchOptsButtonState();
@@ -228,6 +243,24 @@ class _SearchOptsButtonState extends State<SearchOptsButton> {
           child: const Text('正则表达式'),
         ),
         const PopupMenuDivider(),
+        if (widget.currentQuery.trim().isNotEmpty)
+          const PopupMenuItem<int>(
+            value: 98,
+            child: ListTile(
+              leading: Icon(Icons.bookmark_add_outlined, size: 20),
+              title: Text('保存当前为筛选器', style: TextStyle(fontSize: 13)),
+              contentPadding: EdgeInsets.zero,
+            ),
+          ),
+        const PopupMenuItem<int>(
+          value: 97,
+          child: ListTile(
+            leading: Icon(Icons.filter_alt_outlined, size: 20),
+            title: Text('管理自定义筛选器', style: TextStyle(fontSize: 13)),
+            contentPadding: EdgeInsets.zero,
+          ),
+        ),
+        const PopupMenuDivider(),
         const PopupMenuItem<int>(
           value: 99,
           child: ListTile(
@@ -240,11 +273,38 @@ class _SearchOptsButtonState extends State<SearchOptsButton> {
       onSelected: (v) {
         if (v == 99) {
           _showHelp();
+        } else if (v == 97) {
+          _openFilters();
+        } else if (v == 98) {
+          unawaited(_saveCurrent());
         } else {
           unawaited(_toggle(v));
         }
       },
     );
+  }
+
+  Future<void> _saveCurrent() async {
+    final q = widget.currentQuery.trim();
+    if (q.isEmpty) return;
+    final name = q.length > 12 ? '${q.substring(0, 12)}…' : q;
+    final f = await SearchFiltersService.instance.add(name, q, _opts);
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+      content: Text(f == null
+          ? '保存失败（筛选器数量已达上限 ${SearchFiltersService.maxCount} 条）'
+          : '已保存为筛选器「${f.name}」'),
+      duration: const Duration(seconds: 2),
+    ));
+  }
+
+  void _openFilters() {
+    unawaited(SavedFiltersDialog.show(
+      context,
+      initialQuery: widget.currentQuery,
+      initialOpts: _opts,
+      onApply: widget.onApplyFilter,
+    ));
   }
 }
 

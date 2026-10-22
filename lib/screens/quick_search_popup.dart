@@ -656,7 +656,19 @@ class _QuickSearchPopupState extends State<QuickSearchPopup> {
                       height: 14,
                       child: CircularProgressIndicator(strokeWidth: 2),
                     ),
-                  SearchOptsButton(onChanged: (_) => _runSearch()),
+                  SearchOptsButton(
+                    currentQuery: _controller.text,
+                    onChanged: (_) => _runSearch(),
+                    onApplyFilter: (f) async {
+                      // 应用筛选器：灌查询词 + 持久化其开关 + 重搜
+                      _controller.text = f.query;
+                      _controller.selection = TextSelection.collapsed(
+                          offset: f.query.length);
+                      await SearchOpts.save(f.toOpts());
+                      if (!mounted) return;
+                      _runSearch();
+                    },
+                  ),
                   IconButton(
                     tooltip: '打开主界面',
                     icon: const Icon(Icons.open_in_full, size: 18),
