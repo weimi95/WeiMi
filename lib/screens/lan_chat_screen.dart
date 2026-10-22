@@ -5,6 +5,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:file_picker/file_picker.dart';
 import 'package:path/path.dart' as p;
+import '../framework/setting_store.dart';
 import '../services/lan_transfer_service.dart';
 import '../services/landrop_service.dart';
 import '../services/pending_send_service.dart';
@@ -59,6 +60,9 @@ class _LanChatScreenState extends State<LanChatScreen> {
   bool _flushTried = false; // 本次在线期间已尝试过队列 flush（避免反复重试）
 
   bool get _online => _livePeer != null;
+
+  /// 离线预发送开关（设置-微密飞传；默认开）。关闭后离线设备只读。
+  bool get _presend => SettingStore.get<bool>('lan_offline_presend', true);
 
   @override
   void initState() {
@@ -138,6 +142,10 @@ class _LanChatScreenState extends State<LanChatScreen> {
         res.files.where((f) => f.path != null).map((f) => f.path!).toList();
     if (files.isEmpty) return;
     if (!_online) {
+      if (!_presend) {
+        _snack('设备离线，无法发送（可在 设置-微密飞传 开启「离线预发送」）');
+        return;
+      }
       await _enqueueFiles(files);
       return;
     }
@@ -224,6 +232,10 @@ class _LanChatScreenState extends State<LanChatScreen> {
     final text = _textCtl.text.trim();
     if (text.isEmpty) return;
     if (!_online) {
+      if (!_presend) {
+        _snack('设备离线，无法发送（可在 设置-微密飞传 开启「离线预发送」）');
+        return;
+      }
       await _enqueueText(text);
       if (mounted) _textCtl.clear();
       return;
@@ -540,6 +552,7 @@ class _LanChatScreenState extends State<LanChatScreen> {
         Expanded(child: list),
         _Composer(
           online: _online,
+          presend: _presend,
           sending: _sending,
           controller: _textCtl,
           onSendText: _sendText,
@@ -702,6 +715,7 @@ class _Bubble extends StatelessWidget {
 
 class _Composer extends StatelessWidget {
   final bool online;
+  final bool presend; // 离线预发送开关（offline && !presend → 只读灰条）
   final bool sending;
   final TextEditingController controller;
   final VoidCallback onSendText;
@@ -709,6 +723,7 @@ class _Composer extends StatelessWidget {
   final VoidCallback? onPaste; // 桌面端粘贴发送（null=不显示按钮）
   const _Composer({
     required this.online,
+    this.presend = true,
     required this.sending,
     required this.controller,
     required this.onSendText,
@@ -718,6 +733,17 @@ class _Composer extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    if (!online && !presend) {
+      return Container(
+        padding: const EdgeInsets.all(14),
+        color: Colors.grey.shade100,
+        child: Text(
+          '设备当前离线，仅可查看历史记录。设备上线后可在此发送文件/文本。',
+          style: TextStyle(color: Colors.grey.shade600, fontSize: 13),
+          textAlign: TextAlign.center,
+        ),
+      );
+    }
     return Column(
       mainAxisSize: MainAxisSize.min,
       children: [

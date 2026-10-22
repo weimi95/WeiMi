@@ -102,6 +102,8 @@ class DaemonService {
           final v = SettingStore.get<int>('lan_untrusted_timeout', 30);
           return v < 5 ? 5 : v;
         }(),
+        // 接收后自动打开文件夹（托盘模式收文件由守护进程执行开目录）
+        'open_recv_dir': SettingStore.get<bool>('lan_open_recv_folder', false),
       };
       return _sendLine(jsonEncode(cfg));
     } catch (_) {

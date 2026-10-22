@@ -26,7 +26,7 @@ use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream, UdpSocket};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicU16, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU16, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -52,12 +52,15 @@ struct Config {
     ui_active: bool,
     untrusted_confirm: bool,
     untrusted_confirm_secs: u32,
+    open_recv_dir: bool,
 }
 
 static CONFIG: Mutex<Option<Config>> = Mutex::new(None);
 static TRANSFER_ON: AtomicBool = AtomicBool::new(false);
 static HTTP_PORT: AtomicU16 = AtomicU16::new(HTTP_PORT_BASE);
 static TASKBAR_MSG: AtomicU32 = AtomicU32::new(0);
+/// 接收完成计数（自动开目录的批内去抖：2 秒内连收多个文件只开一次目录）
+static RECV_TICK: AtomicU64 = AtomicU64::new(0);
 
 fn log(msg: &str) {
     use std::fmt::Write as _;
@@ -81,6 +84,32 @@ fn now_ms() -> u64 {
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_millis() as u64)
         .unwrap_or(0)
+}
+
+/// 收到文件后按「接收后自动打开文件夹」设置打开所在目录（托盘模式）。
+/// 批内去抖：2 秒内连收多个文件，只由最后一个完成者开一次目录。
+fn maybe_open_recv_dir(save: &std::path::Path) {
+    let enabled = CONFIG
+        .lock()
+        .unwrap()
+        .as_ref()
+        .map(|c| c.open_recv_dir)
+        .unwrap_or(false);
+    if !enabled {
+        return;
+    }
+    let Some(dir) = save.parent() else {
+        return;
+    };
+    let dir = dir.to_path_buf();
+    let my = RECV_TICK.fetch_add(1, Ordering::SeqCst) + 1;
+    std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_secs(2));
+        if RECV_TICK.load(Ordering::SeqCst) != my {
+            return; // 2 秒内又有文件收完，交给最后一个开
+        }
+        let _ = std::process::Command::new("explorer.exe").arg(&dir).spawn();
+    });
 }
 
 // ==================== win32 ffi ====================
@@ -255,6 +284,13 @@ extern "system" {
     fn GetAsyncKeyState(vk: i32) -> i16;
     fn GetModuleHandleW(name: *const u16) -> HINSTANCE;
     fn SetTimer(hwnd: HWND, id: usize, ms: u32, proc_: usize) -> usize;
+    fn MessageBoxW(hwnd: HWND, text: *const u16, caption: *const u16, typ: u32) -> i32;
+    fn EnumThreadWindows(
+        tid: u32,
+        proc_: unsafe extern "system" fn(HWND, isize) -> i32,
+        lparam: isize,
+    ) -> i32;
+    fn PostMessageW(hwnd: HWND, msg: u32, wp: usize, lp: isize) -> i32;
 }
 
 #[link(name = "shell32")]
@@ -286,6 +322,7 @@ extern "system" {
         si: *mut core::ffi::c_void,
         pi: *mut core::ffi::c_void,
     ) -> i32;
+    fn GetCurrentThreadId() -> u32;
 }
 
 #[link(name = "iphlpapi")]
@@ -705,8 +742,10 @@ fn pending_map() -> &'static Mutex<HashMap<String, PendingReq>> {
     PENDING.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
-/// Wait for the user's decision on an untrusted request (via UI confirm
-/// dialog + config channel). True = accept. Timeout/no-UI = reject.
+/// Wait for the user's decision on an untrusted request. True = accept.
+/// - UI 活跃：拉起主程序走 UI 确认框（原有路径）
+/// - 托盘模式（UI 未运行）：直接弹**原生 Win32 确认框**，全程不需要主程序；
+///   超时自动关框=拒收
 fn wait_untrusted_confirm(
     sender_name: &str,
     name: &str,
@@ -728,42 +767,61 @@ fn wait_untrusted_confirm(
         .unwrap()
         .insert(token.clone(), entry);
 
-    balloon(
-        "微密飞传",
-        &format!(
-            "{} 请求发送：{}\n已拉起微密文件，{}秒内未确认将自动拒收",
-            sender_name, name, timeout_secs
-        ),
-    );
-    launch_ui(None);
-
-    let deadline = std::time::Instant::now() + Duration::from_secs(timeout_secs);
-    let mut decision = false;
-    {
-        let entry = pending_map()
+    let ui_active = CONFIG
         .lock()
         .unwrap()
-        .get(&token)
-        .map(|e| e.cell.clone());
-        if let Some(cell) = entry {
-            let (m, cv) = &*cell;
-            loop {
-                let guard = m.lock().unwrap();
-                if let Some(v) = *guard {
-                    decision = v;
-                    break;
-                }
-                let now = std::time::Instant::now();
-                if now >= deadline {
-                    break;
-                }
-                let (g, _) = cv.wait_timeout(guard, deadline - now).unwrap();
-                if let Some(v) = *g {
-                    decision = v;
-                    break;
+        .as_ref()
+        .map(|c| c.ui_active)
+        .unwrap_or(false);
+
+    let mut decision = false;
+    if ui_active {
+        balloon(
+            "微密飞传",
+            &format!(
+                "{} 请求发送：{}\n已拉起微密文件，{}秒内未确认将自动拒收",
+                sender_name, name, timeout_secs
+            ),
+        );
+        launch_ui(None);
+
+        let deadline = std::time::Instant::now() + Duration::from_secs(timeout_secs);
+        {
+            let entry = pending_map()
+            .lock()
+            .unwrap()
+            .get(&token)
+            .map(|e| e.cell.clone());
+            if let Some(cell) = entry {
+                let (m, cv) = &*cell;
+                loop {
+                    let guard = m.lock().unwrap();
+                    if let Some(v) = *guard {
+                        decision = v;
+                        break;
+                    }
+                    let now = std::time::Instant::now();
+                    if now >= deadline {
+                        break;
+                    }
+                    let (g, _) = cv.wait_timeout(guard, deadline - now).unwrap();
+                    if let Some(v) = *g {
+                        decision = v;
+                        break;
+                    }
                 }
             }
         }
+    } else {
+        // 托盘独立接收：不调主程序，弹原生确认框
+        balloon(
+            "微密飞传",
+            &format!(
+                "{} 请求发送：{}\n请在弹出的确认框里选择，{}秒内未确认将自动拒收",
+                sender_name, name, timeout_secs
+            ),
+        );
+        decision = native_confirm_dialog(sender_name, name, is_text, timeout_secs);
     }
     pending_map().lock().unwrap().remove(&token);
     log(&format!(
@@ -771,6 +829,72 @@ fn wait_untrusted_confirm(
         sender_name, name, decision
     ));
     decision
+}
+
+/// 原生 Win32 确认框（托盘模式专用）：是/否 + 超时自动关闭（=拒收）。
+fn native_confirm_dialog(
+    sender_name: &str,
+    name: &str,
+    is_text: bool,
+    timeout_secs: u64,
+) -> bool {
+    const MB_YESNO: u32 = 0x0000_0004;
+    const MB_ICONQUESTION: u32 = 0x0000_0020;
+    const MB_SYSTEMMODAL: u32 = 0x0000_1000;
+    const MB_SETFOREGROUND: u32 = 0x0001_0000;
+    const MB_TOPMOST: u32 = 0x0004_0000;
+    const IDYES: i32 = 6;
+    // WM_CLOSE 已有顶层常量（136 行）
+    let body = if is_text {
+        format!(
+            "「{}」想发送一条文本消息到本机\n\n是否接收？（{}秒未确认自动拒收）",
+            sender_name, timeout_secs
+        )
+    } else {
+        format!(
+            "「{}」想发送文件到本机：\n{}\n\n是否接收？（{}秒未确认自动拒收）",
+            sender_name, name, timeout_secs
+        )
+    };
+    let body_w = to_wide(&body);
+    let title_w = to_wide("微密飞传 - 接收确认");
+    let answered = Arc::new(AtomicBool::new(false));
+    let (res_tx, res_rx) = std::sync::mpsc::channel::<i32>();
+    let (tid_tx, tid_rx) = std::sync::mpsc::channel::<u32>();
+    let answered2 = answered.clone();
+    std::thread::spawn(move || unsafe {
+        let _ = tid_tx.send(GetCurrentThreadId());
+        let r = MessageBoxW(
+            std::ptr::null_mut(),
+            body_w.as_ptr(),
+            title_w.as_ptr(),
+            MB_YESNO | MB_ICONQUESTION | MB_SYSTEMMODAL | MB_SETFOREGROUND | MB_TOPMOST,
+        );
+        answered2.store(true, Ordering::SeqCst);
+        let _ = res_tx.send(r);
+    });
+    // 拿不到对话框线程 id（异常）直接按拒收处理
+    let Ok(tid) = tid_rx.recv_timeout(Duration::from_secs(3)) else {
+        return false;
+    };
+    // 超时关框线程：到点且用户仍未作答 → PostMessage(WM_CLOSE) 关掉对话框
+    let answered3 = answered.clone();
+    std::thread::spawn(move || unsafe {
+        std::thread::sleep(Duration::from_secs(timeout_secs));
+        if !answered3.load(Ordering::SeqCst) {
+            EnumThreadWindows(tid, close_dialog_cb, 0);
+        }
+    });
+    match res_rx.recv_timeout(Duration::from_secs(timeout_secs + 10)) {
+        Ok(r) => r == IDYES,
+        Err(_) => false,
+    }
+}
+
+/// EnumThreadWindows 回调：给对话框发 WM_CLOSE（返回 0 停止枚举）。
+unsafe extern "system" fn close_dialog_cb(hwnd: HWND, _l: isize) -> i32 {
+    PostMessageW(hwnd, WM_CLOSE, 0, 0);
+    0
 }
 
 // ==================== save path / history ====================
@@ -1280,6 +1404,7 @@ fn handle_client(mut stream: TcpStream) {
                         "微密飞传",
                         &format!("收到网页文件：{}\n来自 {}", name, from),
                     );
+                    maybe_open_recv_dir(&save);
                     record_history(
                         "file",
                         &name,
@@ -1464,6 +1589,7 @@ fn handle_client(mut stream: TcpStream) {
                             "微密飞传",
                             &format!("收到文件：{}\n来自 {}", name, sender_name),
                         );
+                        maybe_open_recv_dir(&save);
                         record_history(
                             "file",
                             &name,
@@ -1818,6 +1944,8 @@ struct PushMsg {
     #[serde(default = "default_confirm_secs")]
     untrusted_confirm_secs: u32,
     #[serde(default)]
+    open_recv_dir: bool,
+    #[serde(default)]
     receive_dir: String,
     #[serde(default)]
     docs_dir: String,
@@ -1926,6 +2054,7 @@ fn config_server() {
                         c.web_share_enabled = msg.web_share_enabled;
                         c.untrusted_confirm = msg.untrusted_confirm;
                         c.untrusted_confirm_secs = msg.untrusted_confirm_secs;
+                        c.open_recv_dir = msg.open_recv_dir;
                         if !msg.receive_dir.is_empty() {
                             c.receive_dir = msg.receive_dir;
                         }
@@ -1943,12 +2072,13 @@ fn config_server() {
                         }
                         c.ui_active = msg.ui_active;
                         log(&format!(
-                            "apply: ui_active={} discover={} web={} confirm={} recv_dir={}",
+                            "apply: ui_active={} discover={} web={} confirm={} recv_dir={} open_dir={}",
                             c.ui_active,
                             c.discover_enabled,
                             c.web_share_enabled,
                             c.untrusted_confirm,
-                            c.receive_dir
+                            c.receive_dir,
+                            c.open_recv_dir
                         ));
                         *cfg = Some(c);
                     }

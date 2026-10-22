@@ -74,6 +74,15 @@ class ReceiveNotifyService {
     final b = _recvBatches.putIfAbsent(from, () => _RecvBatch());
     b.add(name, path);
     b.timer?.cancel();
+    // 首个文件收完且该设备无在途接收 → 立即开目录（恢复 v1.1.01 前
+    // 「收完即开」的即时性；同批后续文件不再重复开，flush 只补通知）。
+    if (!b.opened &&
+        isDesktop &&
+        _openDir &&
+        !LanTransferService.instance.hasActiveIncomingByName(from)) {
+      b.opened = true;
+      unawaited(_openContainingFolder(b.dir));
+    }
     b.timer = Timer(const Duration(seconds: 3), () => _flushRecv(from));
   }
 
@@ -92,7 +101,8 @@ class ReceiveNotifyService {
         : '已接收来自 $from 的 ${b.count} 个文件';
     _fire(body,
         revealPath: b.count == 1 ? b.firstPath : null, revealDir: b.dir);
-    if (isDesktop && _openDir) {
+    // 目录已在首文件完成时开过（b.opened）就不再重复开
+    if (isDesktop && _openDir && !b.opened) {
       unawaited(_openContainingFolder(b.dir));
     }
   }
@@ -211,6 +221,7 @@ class _RecvBatch {
   String firstName = '';
   String firstPath = '';
   String dir = '';
+  bool opened = false; // 目录已自动开过（首文件完成即开，一批只开一次）
   Timer? timer;
 
   void add(String name, String path) {

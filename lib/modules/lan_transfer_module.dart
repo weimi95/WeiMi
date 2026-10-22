@@ -156,6 +156,15 @@ class LanTransferModule extends FeatureModule {
               ReceiveNotifyService.instance.setEnabled(v as bool),
         ),
         SettingDef(
+          key: 'lan_offline_presend',
+          title: '离线预发送',
+          icon: Icons.schedule_send_outlined,
+          subtitle: '设备离线时在聊天窗发送的文件/文本先排队，设备上线后自动发出；'
+              '关闭后离线设备只能查看历史记录',
+          type: SettingType.boolean,
+          defaultValue: true,
+        ),
+        SettingDef(
           key: 'lan_receive_dir',
           title: '接收保存目录',
           type: SettingType.custom,
