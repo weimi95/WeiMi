@@ -9,6 +9,7 @@ import '../services/firewall_service.dart';
 import '../services/landrop_service.dart';
 import '../services/lan_transfer_service.dart';
 import '../services/localsend_service.dart';
+import '../services/pending_send_service.dart';
 import '../services/transfer_history_service.dart';
 import '../services/trusted_devices_service.dart';
 import '../widgets/progress_dialog.dart';
@@ -67,6 +68,7 @@ class _LanTransferScreenState extends State<LanTransferScreen> {
   List<String> _pendingFiles = [];
   final ScrollController _listCtl = ScrollController();
   int _lastTopSignal = 0;
+  Set<String> _prevOnlineIds = {}; // 上轮在线设备集合（待发送队列的上线沿触发）
 
   @override
   void initState() {
@@ -275,6 +277,17 @@ class _LanTransferScreenState extends State<LanTransferScreen> {
       _selfHttpPort = _svc.httpPortActual;
       _selfWebShare = _svc.webShareEnabled;
     });
+    // 待发送队列：设备新上线（含启动时已在线的）→ 尝试自动发出排队的文件/文本
+    final onlineIds = peers.map((e) => e.id).toSet();
+    final newly = onlineIds.difference(_prevOnlineIds);
+    _prevOnlineIds = onlineIds;
+    if (newly.isNotEmpty && PendingSendService.instance.count > 0) {
+      for (final p in peers) {
+        if (newly.contains(p.id)) {
+          unawaited(PendingSendService.instance.flushFor(p));
+        }
+      }
+    }
   }
 
   @override

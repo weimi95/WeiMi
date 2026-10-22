@@ -7,10 +7,12 @@ import 'package:file_picker/file_picker.dart';
 import 'package:path/path.dart' as p;
 import '../services/lan_transfer_service.dart';
 import '../services/landrop_service.dart';
+import '../services/pending_send_service.dart';
 import '../services/transfer_history_service.dart';
 
 /// 与单台设备的聊天式传输窗口（Flix 风格：历史记录按设备保存在这里）。
-/// - 在线设备（peer != null）可发文件/文本；离线设备（peer == null）仅查看历史。
+/// - 在线设备（peer != null）可发文件/文本；离线设备发送自动进**待发送队列**，
+///   设备上线后自动发出（Flix 1.5.1/1.7.0 的离线预发送）。
 /// - 记录实时刷新（轮询 TransferHistoryService，避免引入额外流）。
 class LanChatScreen extends StatefulWidget {
   final LanPeer? peer; // 在线设备对象（含地址/端口）；离线为 null
@@ -50,7 +52,13 @@ class _LanChatScreenState extends State<LanChatScreen> {
   bool get _isDesktop =>
       Platform.isWindows || Platform.isMacOS || Platform.isLinux;
 
-  bool get _online => widget.peer != null;
+  /// 实时设备对象：每轮从服务按会话 key 重新取（widget.peer 只是打开那一刻的
+  /// 快照，设备重连后 ip/port 可能变化）。null = 离线。
+  LanPeer? _livePeer;
+  List<PendingSend> _pending = [];
+  bool _flushTried = false; // 本次在线期间已尝试过队列 flush（避免反复重试）
+
+  bool get _online => _livePeer != null;
 
   @override
   void initState() {
@@ -69,16 +77,36 @@ class _LanChatScreenState extends State<LanChatScreen> {
     super.dispose();
   }
 
+  LanPeer? _peerById(String key) {
+    for (final p in LanTransferService.instance.peers) {
+      if (p.id == key) return p;
+    }
+    return null;
+  }
+
   Future<void> _load() async {
     final r = await TransferHistoryService.instance.recordsFor(widget.peerKey);
     if (!mounted) return;
     _records = r;
+    // 实时设备对象同步 + 待发送队列刷新（listFor 载入后为纯内存过滤，零 IO）
+    _livePeer = _peerById(widget.peerKey);
+    _pending = await PendingSendService.instance.listFor(widget.peerKey);
+    if (!mounted) return;
     // 停留在此会话期间持续标已读（仅在有未读时写盘，避免每 700ms 白写）
     final latest = r.isNotEmpty ? r.first.time : null;
     if (latest != null &&
         TransferHistoryService.instance.isUnread(widget.peerKey, latest)) {
       await TransferHistoryService.instance.markRead(widget.peerKey);
     }
+    // 设备在线且有排队内容 → 自动发出（每次在线期间只试一轮，失败留下轮再试）
+    if (_online && _pending.isNotEmpty && !_flushTried) {
+      _flushTried = true;
+      unawaited(PendingSendService.instance
+          .flushFor(_livePeer!)
+          .whenComplete(_load));
+      return;
+    }
+    if (!_online) _flushTried = false;
     setState(() {});
   }
 
@@ -100,7 +128,7 @@ class _LanChatScreenState extends State<LanChatScreen> {
   }
 
   Future<void> _pickAndSend() async {
-    if (!_online || _sending) return;
+    if (_sending) return;
     final res = await FilePicker.platform.pickFiles(
       type: FileType.any,
       allowMultiple: true,
@@ -109,13 +137,49 @@ class _LanChatScreenState extends State<LanChatScreen> {
     final files =
         res.files.where((f) => f.path != null).map((f) => f.path!).toList();
     if (files.isEmpty) return;
+    if (!_online) {
+      await _enqueueFiles(files);
+      return;
+    }
     await _sendFiles(files);
   }
 
+  /// 离线入队：文件
+  Future<void> _enqueueFiles(List<String> paths) async {
+    final ok = await PendingSendService.instance.enqueue(PendingSend(
+      id: newPendingId(),
+      peerKey: widget.peerKey,
+      peerName: widget.displayName,
+      kind: 'file',
+      paths: paths,
+      createdAt: DateTime.now(),
+    ));
+    _snack(ok ? '设备离线，已加入待发送队列，上线后自动发出' : '加入待发送队列失败', error: !ok);
+    _load();
+  }
+
+  /// 离线入队：文本
+  Future<void> _enqueueText(String text) async {
+    final ok = await PendingSendService.instance.enqueue(PendingSend(
+      id: newPendingId(),
+      peerKey: widget.peerKey,
+      peerName: widget.displayName,
+      kind: 'text',
+      text: text,
+      createdAt: DateTime.now(),
+    ));
+    _snack(ok ? '设备离线，已加入待发送队列，上线后自动发出' : '加入待发送队列失败', error: !ok);
+    _load();
+  }
+
   Future<void> _sendFiles(List<String> paths) async {
-    if (!_online || _sending) return;
+    if (_livePeer == null) return;
+    await _sendFilesTo(_livePeer!, paths);
+  }
+
+  Future<void> _sendFilesTo(LanPeer peer, List<String> paths) async {
+    if (_sending) return;
     setState(() => _sending = true);
-    final peer = widget.peer!;
     try {
       if (peer.isLandrop) {
         final dev = _toDev(peer);
@@ -156,11 +220,21 @@ class _LanChatScreenState extends State<LanChatScreen> {
   }
 
   Future<void> _sendText() async {
-    if (!_online || _sending) return;
+    if (_sending) return;
     final text = _textCtl.text.trim();
     if (text.isEmpty) return;
+    if (!_online) {
+      await _enqueueText(text);
+      if (mounted) _textCtl.clear();
+      return;
+    }
+    await _sendTextTo(_livePeer!, text);
+    if (mounted) _textCtl.clear();
+  }
+
+  Future<void> _sendTextTo(LanPeer peer, String text) async {
+    if (_sending) return;
     setState(() => _sending = true);
-    final peer = widget.peer!;
     try {
       if (peer.isLandrop) {
         final dev = _toDev(peer);
@@ -178,7 +252,6 @@ class _LanChatScreenState extends State<LanChatScreen> {
             await LanTransferService.instance.sendText(peer: peer, text: text);
         _snack(ok ? '已发送' : '发送失败', error: !ok);
       }
-      if (mounted) _textCtl.clear();
     } catch (e) {
       _hideProg();
       _snack('发送出错：$e', error: true);
@@ -284,6 +357,14 @@ class _LanChatScreenState extends State<LanChatScreen> {
                 },
               ),
             ListTile(
+              leading: const Icon(Icons.shortcut),
+              title: const Text('转发给其他设备'),
+              onTap: () {
+                Navigator.pop(ctx);
+                _forwardRecord(r);
+              },
+            ),
+            ListTile(
               leading: const Icon(Icons.delete_outline, color: Colors.red),
               title: const Text('删除这条记录',
                   style: TextStyle(color: Colors.red)),
@@ -298,6 +379,45 @@ class _LanChatScreenState extends State<LanChatScreen> {
         ),
       ),
     );
+  }
+
+  /// 一键转发：把收到的文件/文本直接发给另一台在线设备（Flix 1.3.0 风格）。
+  Future<void> _forwardRecord(TransferRecord r) async {
+    final peers = LanTransferService.instance.peers
+        .where((p0) => p0.id != widget.peerKey)
+        .toList();
+    if (!mounted) return;
+    if (peers.isEmpty) {
+      _snack('附近没有其他在线设备，无法转发');
+      return;
+    }
+    final picked = await showDialog<LanPeer>(
+      context: context,
+      builder: (ctx) => SimpleDialog(
+        title: const Text('转发给'),
+        children: peers
+            .map((p0) => SimpleDialogOption(
+                  onPressed: () => Navigator.pop(ctx, p0),
+                  child: Row(children: [
+                    const Icon(Icons.devices, size: 20),
+                    const SizedBox(width: 10),
+                    Flexible(child: Text(p0.name)),
+                  ]),
+                ))
+            .toList(),
+      ),
+    );
+    if (picked == null || !mounted) return;
+    if (r.kind == 'text') {
+      if (r.text == null || r.text!.isEmpty) return;
+      await _sendTextTo(picked, r.text!);
+    } else {
+      if (r.path == null || !File(r.path!).existsSync()) {
+        _snack('原文件不存在，无法转发', error: true);
+        return;
+      }
+      await _sendFilesTo(picked, [r.path!]);
+    }
   }
 
   void _toggleSelect(String id) {
@@ -353,7 +473,7 @@ class _LanChatScreenState extends State<LanChatScreen> {
           }).toList();
 
     Widget list;
-    if (filtered.isEmpty) {
+    if (filtered.isEmpty && _pending.isEmpty) {
       list = Center(
         child: Text(
           _online ? '还没有传输记录，发个文件试试' : '暂无与该设备的历史记录',
@@ -362,12 +482,23 @@ class _LanChatScreenState extends State<LanChatScreen> {
       );
     } else {
       final items = _buildChatItems(filtered, !_selecting);
+      // 待发送队列气泡排在最新位置（列表 reverse 后 items 末尾 = 最新）
+      items.addAll(_pending.map((s) => _PendingItem(s)));
       list = ListView.builder(
         reverse: true,
         padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
         itemCount: items.length,
         itemBuilder: (ctx, i) {
           final it = items[items.length - 1 - i];
+          if (it is _PendingItem) {
+            return _PendingBubble(
+              item: it.s,
+              onCancel: () async {
+                await PendingSendService.instance.remove(it.s.id);
+                _load();
+              },
+            );
+          }
           if (it is _StackItem) {
             return _StackBubble(
               recs: it.recs,
@@ -587,63 +718,78 @@ class _Composer extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    if (!online) {
-      return Container(
-        padding: const EdgeInsets.all(14),
-        color: Colors.grey.shade100,
-        child: Text(
-          '设备当前离线，仅可查看历史记录。设备上线后可在此发送文件/文本。',
-          style: TextStyle(color: Colors.grey.shade600, fontSize: 13),
-          textAlign: TextAlign.center,
-        ),
-      );
-    }
-    return Container(
-      padding: const EdgeInsets.fromLTRB(8, 6, 8, 8),
-      decoration: BoxDecoration(
-        border: Border(top: BorderSide(color: Colors.grey.shade300)),
-      ),
-      child: Row(
-        children: [
-          IconButton(
-            icon: const Icon(Icons.attach_file),
-            tooltip: '发送文件/文件夹',
-            onPressed: sending ? null : onPick,
-          ),
-          if (onPaste != null)
-            IconButton(
-              icon: const Icon(Icons.content_paste),
-              tooltip: '粘贴并发送剪贴板文本',
-              onPressed: sending ? null : onPaste,
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        if (!online)
+          Container(
+            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+            color: Colors.orange.shade50,
+            child: Row(
+              children: [
+                Icon(Icons.schedule,
+                    size: 14, color: Colors.orange.shade800),
+                const SizedBox(width: 6),
+                Expanded(
+                  child: Text(
+                    '设备离线：现在发送会先排队，设备上线后自动发出',
+                    style: TextStyle(
+                        fontSize: 12, color: Colors.orange.shade900),
+                  ),
+                ),
+              ],
             ),
-          Expanded(
-            child: TextField(
-              controller: controller,
-              minLines: 1,
-              maxLines: 4,
-              decoration: const InputDecoration(
-                hintText: '输入文本，回车发送',
-                border: OutlineInputBorder(),
-                isCollapsed: true,
-                contentPadding:
-                    EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+          ),
+        Container(
+          padding: const EdgeInsets.fromLTRB(8, 6, 8, 8),
+          decoration: BoxDecoration(
+            border: Border(top: BorderSide(color: Colors.grey.shade300)),
+          ),
+          child: Row(
+            children: [
+              IconButton(
+                icon: const Icon(Icons.attach_file),
+                tooltip: online ? '发送文件/文件夹' : '选择要排队的文件',
+                onPressed: sending ? null : onPick,
               ),
-              onSubmitted: (_) => onSendText(),
-            ),
+              if (onPaste != null && online)
+                IconButton(
+                  icon: const Icon(Icons.content_paste),
+                  tooltip: '粘贴并发送剪贴板文本',
+                  onPressed: sending ? null : onPaste,
+                ),
+              Expanded(
+                child: TextField(
+                  controller: controller,
+                  minLines: 1,
+                  maxLines: 4,
+                  decoration: InputDecoration(
+                    hintText:
+                        online ? '输入文本，回车发送' : '输入文本，发送后排队待设备上线',
+                    border: const OutlineInputBorder(),
+                    isCollapsed: true,
+                    contentPadding: const EdgeInsets.symmetric(
+                        horizontal: 12, vertical: 10),
+                  ),
+                  onSubmitted: (_) => onSendText(),
+                ),
+              ),
+              const SizedBox(width: 6),
+              IconButton(
+                icon: sending
+                    ? const SizedBox(
+                        width: 18,
+                        height: 18,
+                        child: CircularProgressIndicator(strokeWidth: 2),
+                      )
+                    : Icon(online ? Icons.send : Icons.schedule_send),
+                tooltip: online ? '发送' : '加入待发送队列',
+                onPressed: sending ? null : onSendText,
+              ),
+            ],
           ),
-          const SizedBox(width: 6),
-          IconButton(
-            icon: sending
-                ? const SizedBox(
-                    width: 18,
-                    height: 18,
-                    child: CircularProgressIndicator(strokeWidth: 2),
-                  )
-                : const Icon(Icons.send),
-            onPressed: sending ? null : onSendText,
-          ),
-        ],
-      ),
+        ),
+      ],
     );
   }
 }
@@ -657,6 +803,89 @@ String _fmtSizeStr(int n) {
 // ============ 聊天项分组（堆叠气泡） ============
 abstract class _ChatItem {
   bool get out;
+}
+
+/// 待发送队列项（不参与堆叠分组）。
+class _PendingItem extends _ChatItem {
+  final PendingSend s;
+  _PendingItem(this.s);
+  @override
+  bool get out => true;
+}
+
+/// 待发送气泡：排队的文件/文本，长按可取消。
+class _PendingBubble extends StatelessWidget {
+  final PendingSend item;
+  final VoidCallback onCancel;
+  const _PendingBubble({required this.item, required this.onCancel});
+
+  @override
+  Widget build(BuildContext context) {
+    final accent = Theme.of(context).colorScheme.primary;
+    final body = item.kind == 'text'
+        ? (item.text ?? '')
+        : (item.paths.length == 1
+            ? p.basename(item.paths.first)
+            : '${item.paths.length} 个文件');
+    return Align(
+      alignment: Alignment.centerRight,
+      child: GestureDetector(
+        onLongPress: onCancel,
+        child: Container(
+          margin: const EdgeInsets.symmetric(vertical: 4),
+          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+          constraints: const BoxConstraints(maxWidth: 280),
+          decoration: BoxDecoration(
+            color: Colors.orange.shade50,
+            borderRadius: BorderRadius.circular(12),
+            border: Border.all(color: Colors.orange.shade200),
+          ),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Icon(
+                    item.kind == 'text'
+                        ? Icons.chat_bubble_outline
+                        : Icons.insert_drive_file_outlined,
+                    size: 16,
+                    color: accent,
+                  ),
+                  const SizedBox(width: 6),
+                  Flexible(
+                    child: Text(
+                      body,
+                      style: const TextStyle(fontSize: 14),
+                      maxLines: 4,
+                      overflow: TextOverflow.ellipsis,
+                    ),
+                  ),
+                ],
+              ),
+              Padding(
+                padding: const EdgeInsets.only(top: 2),
+                child: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Icon(Icons.schedule,
+                        size: 11, color: Colors.orange.shade800),
+                    const SizedBox(width: 3),
+                    Text(
+                      '待发送 · 设备上线后自动发出 · 长按取消',
+                      style: TextStyle(
+                          fontSize: 10, color: Colors.orange.shade800),
+                    ),
+                  ],
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
 }
 
 class _SingleItem extends _ChatItem {

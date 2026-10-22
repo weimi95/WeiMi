@@ -11,6 +11,7 @@ import '../services/landrop_service.dart';
 import '../services/lan_transfer_service.dart';
 import '../services/localsend_service.dart';
 import '../services/receive_notify_service.dart';
+import '../services/transfer_history_service.dart';
 import '../services/trusted_devices_service.dart';
 
 /// 微密飞传模块：网页快传 / 可被发现 / 接收通知 / 接收目录 / 本机名称 /
@@ -159,6 +160,37 @@ class LanTransferModule extends FeatureModule {
           title: '接收保存目录',
           type: SettingType.custom,
           customTile: (ctx) => const _ReceiveDirTile(),
+        ),
+        SettingDef(
+          key: 'transfer_history_retention_days',
+          title: '传输记录保留时长',
+          icon: Icons.history_toggle_off,
+          subtitle: '超过保留时长的传输记录自动清除（只清记录，不动已接收的文件）。'
+              '上限 500 条，超出时最旧的先被挤掉',
+          type: SettingType.choice,
+          defaultValue: '30',
+          options: const ['0', '7', '30', '90'],
+          optionLabels: const {
+            '0': '永久保留',
+            '7': '保留 7 天',
+            '30': '保留 30 天',
+            '90': '保留 90 天',
+          },
+          onChanged: (ctx, v) async {
+            final days = int.tryParse('$v') ?? 30;
+            final removed = await TransferHistoryService.instance
+                .setRetentionDays(days);
+            if (ctx.mounted) {
+              ScaffoldMessenger.of(ctx).showSnackBar(SnackBar(
+                content: Text(days <= 0
+                    ? '已设为永久保留传输记录'
+                    : (removed > 0
+                        ? '已设为保留 $days 天，清除了 $removed 条过期记录'
+                        : '已设为保留 $days 天')),
+                duration: const Duration(seconds: 2),
+              ));
+            }
+          },
         ),
         SettingDef(
           key: 'lan_open_recv_folder',

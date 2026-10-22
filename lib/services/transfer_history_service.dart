@@ -24,6 +24,32 @@ class TransferHistoryService {
   bool _loaded = false;
   String? _filePath;
 
+  // ---- 历史保留时长（自动清除过期记录，只清记录不动文件） ----
+  /// SharedPreferences 键。0=永久保留；7/30/90=保留天数。默认 30。
+  static const String retentionPrefKey = 'transfer_history_retention_days';
+  static const int defaultRetentionDays = 30;
+  int _retentionDays = defaultRetentionDays;
+  int get retentionDays => _retentionDays;
+
+  /// 读保留时长设置（进程内一次）。
+  Future<void> _loadRetention() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final v = prefs.getInt(retentionPrefKey) ?? defaultRetentionDays;
+      _retentionDays = (v == 0 || v == 7 || v == 30 || v == 90) ? v : defaultRetentionDays;
+    } catch (_) {}
+  }
+
+  /// 设置保留时长并立即生效（清除过期记录，返回清掉的条数）。
+  Future<int> setRetentionDays(int days) async {
+    _retentionDays = days;
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setInt(retentionPrefKey, days);
+    } catch (_) {}
+    return applyRetention();
+  }
+
   List<TransferRecord> get records =>
       List.unmodifiable(_records); // 最新在前由 add 时维护
 
@@ -43,6 +69,7 @@ class TransferHistoryService {
   Future<void> _ensureLoaded() async {
     if (_loaded) return;
     _loaded = true;
+    await _loadRetention();
     try {
       final f = File(await _resolveFilePath());
       if (await f.exists()) {
@@ -54,6 +81,21 @@ class TransferHistoryService {
     } catch (_) {
       _records.clear();
     }
+    // 启动即按保留时长清一次过期记录
+    await applyRetention();
+  }
+
+  /// 按保留时长清除过期记录（**只清记录，不动已接收的文件**）。
+  /// 返回清除条数。永久保留（0）时直接返回 0。
+  Future<int> applyRetention() async {
+    if (_retentionDays <= 0 || _records.isEmpty) return 0;
+    final cutoff =
+        DateTime.now().subtract(Duration(days: _retentionDays));
+    final before = _records.length;
+    _records.removeWhere((r) => r.time.isBefore(cutoff));
+    final removed = before - _records.length;
+    if (removed > 0) await _persist();
+    return removed;
   }
 
   Future<void> _persist() async {
@@ -112,8 +154,15 @@ class TransferHistoryService {
   }
 
   /// 新增一条记录（最新在前）。文本超长截断存储。
+  /// 长驻进程顺带做保留期检查（最旧一条过期才触发清理，均摊零开销）。
   Future<void> add(TransferRecord record) async {
     await _ensureLoaded();
+    if (_retentionDays > 0 &&
+        _records.isNotEmpty &&
+        _records.last.time.isBefore(
+            DateTime.now().subtract(Duration(days: _retentionDays)))) {
+      await applyRetention();
+    }
     if (record.kind == 'text' && record.text != null &&
         record.text!.length > 2000) {
       _records.insert(0, record.copyWith(text: record.text!.substring(0, 2000)));
