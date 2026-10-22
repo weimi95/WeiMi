@@ -751,6 +751,7 @@ class LanTransferService {
         name: request.fileName,
         size: request.fileSize,
         peerName: request.senderName,
+        peerKey: request.senderId,
         time: DateTime.now(),
         ok: false,
         note: '未信任，已拒收',
@@ -791,6 +792,7 @@ class LanTransferService {
         path: savePath,
         size: request.fileSize,
         peerName: request.senderName,
+        peerKey: request.senderId,
         time: DateTime.now(),
         ok: true,
       ));
@@ -855,6 +857,7 @@ class LanTransferService {
         name: '（已拒收）来自 $senderName 的文本',
         size: req.contentLength,
         peerName: senderName,
+        peerKey: senderId,
         time: DateTime.now(),
         ok: false,
         note: '未信任，已拒收',
@@ -882,6 +885,7 @@ class LanTransferService {
         text: text,
         size: text.length,
         peerName: senderName,
+        peerKey: senderId,
         time: DateTime.now(),
         ok: true,
       ));
@@ -933,6 +937,7 @@ class LanTransferService {
         path: savePath,
         size: req.contentLength,
         peerName: from,
+        peerKey: 'web',
         time: DateTime.now(),
         ok: true,
       ));
@@ -950,6 +955,7 @@ class LanTransferService {
         name: name,
         size: 0,
         peerName: from,
+        peerKey: 'web',
         time: DateTime.now(),
         ok: false,
       ));
@@ -984,6 +990,7 @@ class LanTransferService {
         text: text,
         size: text.length,
         peerName: from,
+        peerKey: 'web',
         time: DateTime.now(),
         ok: true,
       ));
@@ -1202,6 +1209,7 @@ class LanTransferService {
         path: savePath,
         size: inbound.size,
         peerName: from,
+        peerKey: 'web',
         time: DateTime.now(),
         ok: true,
       ));
@@ -1236,6 +1244,7 @@ class LanTransferService {
       text: text,
       size: text.length,
       peerName: from,
+      peerKey: 'web',
       time: DateTime.now(),
       ok: true,
     ));
@@ -1308,6 +1317,7 @@ class LanTransferService {
         path: filePath,
         size: total,
         peerName: '网页客户端(${peer.name})',
+        peerKey: 'web',
         time: DateTime.now(),
         ok: true,
       ));
@@ -1333,6 +1343,7 @@ class LanTransferService {
         text: text,
         size: text.length,
         peerName: '网页客户端(${peer.name})',
+        peerKey: 'web',
         time: DateTime.now(),
         ok: true,
       ));
@@ -1749,6 +1760,7 @@ function done(el, text, ok) {
               path: filePath,
               size: total,
               peerName: peer.name,
+              peerKey: peer.id,
               time: DateTime.now(),
               ok: true,
             ));
@@ -1766,6 +1778,7 @@ function done(el, text, ok) {
             path: filePath,
             size: total,
             peerName: peer.name,
+            peerKey: peer.id,
             time: DateTime.now(),
             ok: false,
           ));
@@ -1814,6 +1827,7 @@ function done(el, text, ok) {
             text: text,
             size: text.length,
             peerName: peer.name,
+            peerKey: peer.id,
             time: DateTime.now(),
             ok: true,
           ));
@@ -1828,6 +1842,7 @@ function done(el, text, ok) {
           text: text,
           size: text.length,
           peerName: peer.name,
+          peerKey: peer.id,
           time: DateTime.now(),
           ok: false,
         ));

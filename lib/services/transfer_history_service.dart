@@ -204,6 +204,10 @@ class TransferRecord {
   final String? text; // 文本内容（kind=text，超长截断）
   final int size; // 字节；文本为字符数
   final String peerName;
+  /// 稳定会话 key：微密自研=对方 identityId / 纯 LocalSend=`ls_指纹` /
+  /// LANDrop=身份公钥 base64 / 网页快传固定 'web'。用于把历史记录归并到
+  /// 具体设备会话（聊天窗口）。旧记录（无此字段）按 peerName 兜底归并。
+  final String? peerKey;
   final DateTime time;
   final bool ok;
   final String? note; // 失败/拒收原因（如「未信任，已拒收」），ok=false 时显示
@@ -217,6 +221,7 @@ class TransferRecord {
     this.text,
     required this.size,
     required this.peerName,
+    this.peerKey,
     required this.time,
     required this.ok,
     this.note,
@@ -231,6 +236,7 @@ class TransferRecord {
         text: j['text'] as String?,
         size: (j['size'] as num?)?.toInt() ?? 0,
         peerName: (j['peerName'] as String?) ?? '',
+        peerKey: j['peerKey'] as String?,
         time:
             DateTime.tryParse((j['time'] as String?) ?? '') ?? DateTime.now(),
         ok: (j['ok'] as bool?) ?? true,
@@ -246,6 +252,7 @@ class TransferRecord {
         if (text != null) 'text': text,
         'size': size,
         'peerName': peerName,
+        if (peerKey != null) 'peerKey': peerKey,
         'time': time.toIso8601String(),
         'ok': ok,
         if (note != null) 'note': note,
@@ -260,8 +267,68 @@ class TransferRecord {
         text: text ?? this.text,
         size: size,
         peerName: peerName,
+        peerKey: peerKey,
         time: time,
         ok: ok,
         note: note,
       );
+}
+
+/// 按设备聚合的会话摘要（飞传页聊天式列表用）。
+class Conversation {
+  final String key; // 稳定会话 key（= TransferRecord.peerKey）
+  final String name; // 最近一条记录的对端名
+  final DateTime lastTime; // 最近一条记录时间
+  final TransferRecord lastRecord; // 最近一条记录（用于预览摘要）
+  final int count; // 该会话总条数
+
+  Conversation({
+    required this.key,
+    required this.name,
+    required this.lastTime,
+    required this.lastRecord,
+    required this.count,
+  });
+
+  /// 预览文字：图标前缀 + 文件名/文本内容（截断）。
+  String get preview {
+    final r = lastRecord;
+    final prefix = r.direction == 'out' ? '我: ' : '';
+    final body = r.kind == 'text'
+        ? (r.text ?? r.name)
+        : r.name;
+    final stat = r.ok ? '' : '（失败）';
+    final s = body.length > 28 ? '${body.substring(0, 28)}…' : body;
+    return '$prefix$s$stat';
+  }
+}
+
+extension TransferHistoryConversations on TransferHistoryService {
+  /// 所有会话（按最后活动时间降序）。旧记录无 peerKey 时按 peerName 兜底聚合，
+  /// 与在线设备 key 可能不完全一致——在线会话在 UI 层由 _peers 驱动，这里只覆盖离线。
+  List<Conversation> conversations() {
+    final Map<String, List<TransferRecord>> groups = {};
+    for (final r in _records) {
+      final key = r.peerKey ?? r.peerName;
+      groups.putIfAbsent(key, () => []).add(r);
+    }
+    final out = <Conversation>[];
+    for (final e in groups.entries) {
+      final list = e.value;
+      list.sort((a, b) => b.time.compareTo(a.time));
+      out.add(Conversation(
+        key: e.key,
+        name: list.first.peerName,
+        lastTime: list.first.time,
+        lastRecord: list.first,
+        count: list.length,
+      ));
+    }
+    out.sort((a, b) => b.lastTime.compareTo(a.lastTime));
+    return out;
+  }
+
+  /// 某会话的全部记录（最新在前）。
+  List<TransferRecord> recordsFor(String peerKey) =>
+      _records.where((r) => (r.peerKey ?? r.peerName) == peerKey).toList();
 }

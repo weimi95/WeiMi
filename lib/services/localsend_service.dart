@@ -614,6 +614,7 @@ class LocalSendService {
         name: '$names$more',
         size: totalSize,
         peerName: senderName,
+        peerKey: senderId,
         time: DateTime.now(),
         ok: false,
         note: 'LocalSend 未信任，已拒收',
@@ -692,6 +693,7 @@ class LocalSendService {
         path: savePath,
         size: file.size,
         peerName: session.senderName,
+        peerKey: senderId,
         time: DateTime.now(),
         ok: true,
       ));
@@ -839,6 +841,7 @@ class LocalSendService {
             path: file.path,
             size: total,
             peerName: peer.name,
+            peerKey: senderId,
             time: DateTime.now(),
             ok: true,
           ));
@@ -851,6 +854,7 @@ class LocalSendService {
             path: file.path,
             size: total,
             peerName: peer.name,
+            peerKey: senderId,
             time: DateTime.now(),
             ok: false,
           ));

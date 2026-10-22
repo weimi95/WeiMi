@@ -12,17 +12,21 @@ import '../services/localsend_service.dart';
 import '../services/transfer_history_service.dart';
 import '../services/trusted_devices_service.dart';
 import '../widgets/progress_dialog.dart';
+import 'lan_chat_screen.dart';
 import 'settings_screen.dart';
-import 'transfer_history_screen.dart';
 
 /// 微密飞传页（单进程方案）：直接调用本进程 LanTransferService 单例，
 /// 不再经 IPC 转发。接收确认通过 service 的 confirmHandler 回调弹窗。
 class LanTransferScreen extends StatefulWidget {
   final String? initialText;
   final List<String> initialFiles;
+  final bool standalone;
 
   const LanTransferScreen(
-      {super.key, this.initialText, this.initialFiles = const []});
+      {super.key,
+      this.initialText,
+      this.initialFiles = const [],
+      this.standalone = true});
 
   @override
   State<LanTransferScreen> createState() => _LanTransferScreenState();
@@ -909,370 +913,405 @@ class _LanTransferScreenState extends State<LanTransferScreen> {
 
   @override
   Widget build(BuildContext context) {
-    return Scaffold(
-      appBar: AppBar(
-        title: const Text('微密飞传'),
-        actions: [
-          IconButton(
-            icon: const Icon(Icons.history),
-            tooltip: '传输记录',
-            onPressed: () {
-              Navigator.push(context,
-                  MaterialPageRoute(builder: (_) => const TransferHistoryScreen()));
-            },
+    if (widget.standalone) {
+      return Scaffold(
+        appBar: AppBar(
+          title: const Text('微密飞传'),
+          actions: [
+            IconButton(
+              icon: const Icon(Icons.settings_outlined),
+              tooltip: '设置',
+              onPressed: () {
+                Navigator.push(
+                  context,
+                  MaterialPageRoute(builder: (_) => const SettingsScreen()),
+                );
+              },
+            ),
+          ],
+        ),
+        body: _buildBody(),
+      );
+    }
+    return _buildBody();
+  }
+
+  /// 聊天式会话列表（Flix 风格）：本机卡 + 网页快传固定项 + 按设备聚合的历史会话
+  /// （在线设备排在上方并标注在线/离线）+ 网页客户端。点开任意项进入与设备的聊天窗口。
+  Widget _buildBody() {
+    final convs = TransferHistoryService.instance.conversations();
+    final peerConvs = convs.where((c) => c.key != 'web').toList();
+    final convByKey = <String, Conversation>{for (final c in peerConvs) c.key: c};
+    final items = <_ConvItem>[];
+    for (final p in _peers) {
+      final c = convByKey.remove(p.id);
+      items.add(_ConvItem(p.id, c?.name ?? p.name, c?.preview, c?.lastTime,
+          true, p, c?.count ?? 0));
+    }
+    for (final c in convByKey.values) {
+      items.add(_ConvItem(
+          c.key, c.name, c.preview, c.lastTime, false, null, c.count));
+    }
+    // 信任但从未传过文件的设备：离线也保留在列表（已在线的已在 _peers 覆盖；
+    // 有历史的已在 convByKey 覆盖），仅补「信任且无记录」的离线设备。
+    final covered = <String>{
+      for (final p in _peers) p.id,
+      ...convByKey.keys,
+    };
+    for (final t in TrustedDevices.instance.all) {
+      if (covered.contains(t.key)) continue;
+      items.add(_ConvItem(t.key, t.value, '已信任', null, false, null, 0));
+    }
+    // 在线排上方（按协议 rank）；离线按最后活动时间降序
+    items.sort((a, b) {
+      if (a.online != b.online) return a.online ? -1 : 1;
+      if (a.online) {
+        int rank(LanPeer? p) =>
+            p == null ? 3 : (p.protocol == 'weimi' ? 0 : (p.isLocalSend ? 1 : 2));
+        return rank(a.peer).compareTo(rank(b.peer));
+      }
+      final ta = a.lastTime, tb = b.lastTime;
+      if (ta == null && tb == null) return 0;
+      if (ta == null) return 1;
+      if (tb == null) return -1;
+      return tb.compareTo(ta);
+    });
+
+    return Stack(
+      children: [
+        ListView(
+          padding: const EdgeInsets.all(12),
+          children: [
+            _buildSelfCard(),
+            if (_fwMissing || _fwLsMissing || _fwLdMissing) _buildFirewallCard(),
+            const SizedBox(height: 12),
+            if (_pendingText != null || _pendingFiles.isNotEmpty) _buildPendingCard(),
+            _buildWebItem(),
+            const SizedBox(height: 12),
+            _sectionHeader('设备会话（在线 · 历史记录 · 已信任）'),
+            if (items.isEmpty) _emptyHint() else ...items.map(_buildConvTile),
+            if (_webPeers.isNotEmpty) ...[
+              _sectionHeader('网页客户端（${_webPeers.length}）'),
+              ..._webPeers.map(_buildWebPeerTile),
+            ],
+            const SizedBox(height: 8),
+            _buildNote(),
+            const SizedBox(height: 80),
+          ],
+        ),
+        Positioned(
+          right: 16,
+          bottom: 16,
+          child: FloatingActionButton.extended(
+            onPressed: _startSendMenu,
+            icon: const Icon(Icons.send),
+            label: const Text('发送'),
           ),
-          IconButton(
-            icon: const Icon(Icons.settings_outlined),
-            tooltip: '设置',
-            onPressed: () {
-              Navigator.push(context,
-                  MaterialPageRoute(builder: (_) => const SettingsScreen()));
-            },
-          ),
-        ],
+        ),
+      ],
+    );
+  }
+
+  Widget _buildSelfCard() {
+    return Container(
+      margin: const EdgeInsets.only(bottom: 12),
+      padding: const EdgeInsets.all(14),
+      decoration: BoxDecoration(
+        color: Colors.blue.withAlpha(15),
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: Colors.blue.withAlpha(50)),
       ),
-      floatingActionButton: FloatingActionButton.extended(
-        onPressed: _startSendMenu,
-        icon: const Icon(Icons.send),
-        label: const Text('发送'),
-      ),
-      body: ListView(
-        padding: const EdgeInsets.all(12),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          // 本机信息卡
-          Container(
-            padding: const EdgeInsets.all(14),
-            decoration: BoxDecoration(
-              color: Colors.blue.withAlpha(15),
-              borderRadius: BorderRadius.circular(12),
-              border: Border.all(color: Colors.blue.withAlpha(50)),
-            ),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Row(
-                  children: [
-                    const Icon(Icons.smartphone, size: 20, color: Colors.blue),
-                    const SizedBox(width: 8),
-                    Expanded(
-                      child: Text(
-                        _selfName.isEmpty ? '本机' : _selfName,
-                        style: const TextStyle(
-                            fontWeight: FontWeight.w600, fontSize: 15),
-                      ),
-                    ),
-                    IconButton(
-                      icon: const Icon(Icons.edit, size: 18),
-                      tooltip: '改名',
-                      onPressed: _editName,
-                    ),
-                  ],
-                ),
-                Text(
-                  _selfIps.isEmpty ? '本机 IP：获取中…' : '本机 IP：${_selfIps.join('、')}',
-                  style: TextStyle(fontSize: 12, color: Colors.grey.shade600),
-                ),
-                const SizedBox(height: 8),
-                Text(
-                  '允许接收文件（托盘常驻）',
-                  style: TextStyle(
-                    fontSize: 13,
-                    color: Colors.green.shade700,
-                  ),
-                ),
-              ],
-            ),
-          ),
-          // Windows 防火墙未放行警示（热点/公用网络下默认拦所有入站，
-          // 对端会搜不到本机或发送超时）
-          if (_fwMissing || _fwLsMissing || _fwLdMissing) _buildFirewallCard(),
-          const SizedBox(height: 16),
-          // 分享直达：待发送内容卡
-          if (_pendingText != null || _pendingFiles.isNotEmpty)
-            Container(
-              margin: const EdgeInsets.only(bottom: 16),
-              padding: const EdgeInsets.all(14),
-              decoration: BoxDecoration(
-                color: Colors.amber.withAlpha(30),
-                borderRadius: BorderRadius.circular(12),
-                border: Border.all(color: Colors.amber.withAlpha(90)),
-              ),
-              child: Row(
-                children: [
-                  const Icon(Icons.share_outlined,
-                      size: 20, color: Colors.amber),
-                  const SizedBox(width: 8),
-                  Expanded(
-                    child: Text(
-                      _pendingText != null
-                          ? '待发送文本：${_pendingText!.length > 30 ? '${_pendingText!.substring(0, 30)}…' : _pendingText!}'
-                          : '待发送 ${_pendingFiles.length} 个文件，点击下方设备即发送',
-                      style:
-                          const TextStyle(fontSize: 13, fontWeight: FontWeight.w500),
-                    ),
-                  ),
-                  TextButton(
-                    onPressed: () =>
-                        setState(() {
-                          _pendingText = null;
-                          _pendingFiles = [];
-                        }),
-                    child: const Text('取消'),
-                  ),
-                ],
-              ),
-            ),
-          // 网页快传地址卡（Snapdrop 式：浏览器打开即可发文件给本机）
-          Container(
-            padding: const EdgeInsets.all(14),
-            decoration: BoxDecoration(
-              color: Colors.teal.withAlpha(15),
-              borderRadius: BorderRadius.circular(12),
-              border: Border.all(color: Colors.teal.withAlpha(50)),
-            ),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Row(
-                  children: [
-                    const Icon(Icons.language, size: 20, color: Colors.teal),
-                    const SizedBox(width: 8),
-                    const Expanded(
-                      child: Text('微密飞传-网页版',
-                          style: TextStyle(
-                              fontWeight: FontWeight.w600, fontSize: 15)),
-                    ),
-                    IconButton(
-                      icon: const Icon(Icons.copy, size: 18),
-                      tooltip: '复制地址',
-                      onPressed: () {
-                        final urls = _webUrls;
-                        Clipboard.setData(ClipboardData(
-                            text: urls.isEmpty
-                                ? 'http://$_selfIp:$_selfHttpPort'
-                                : urls.join('\n')));
-                        ScaffoldMessenger.of(context).showSnackBar(
-                            const SnackBar(content: Text('已复制网页快传地址')));
-                      },
-                    ),
-                  ],
-                ),
-                Text(
-                  _webUrls.isEmpty ? 'http://…' : _webUrls.join('\n'),
-                  style: const TextStyle(
-                      fontSize: 15,
-                      fontWeight: FontWeight.w600,
-                      color: Colors.teal),
-                ),
-                const SizedBox(height: 4),
-                Text(
-                  _selfWebShare
-                      ? '同一 WiFi 下任何设备用浏览器打开此地址，即可发送文件/文本给本机（免确认直接接收，重名自动加序号）'
-                      : '网页快传已在设置中关闭',
-                  style: TextStyle(
-                      fontSize: 12,
-                      color: _selfWebShare
-                          ? Colors.grey.shade600
-                          : Colors.orange),
-                ),
-              ],
-            ),
-          ),
-          const SizedBox(height: 16),
-          // 附近设备
           Row(
             children: [
-              Icon(Icons.radar, size: 18, color: Colors.grey.shade600),
-              const SizedBox(width: 6),
-              Text(
-                '附近设备（${_peers.length}）',
-                style: TextStyle(
-                  fontSize: 13,
-                  fontWeight: FontWeight.bold,
-                  color: Colors.grey.shade600,
+              const Icon(Icons.smartphone, size: 20, color: Colors.blue),
+              const SizedBox(width: 8),
+              Expanded(
+                child: Text(
+                  _selfName.isEmpty ? '本机' : _selfName,
+                  style: const TextStyle(fontWeight: FontWeight.w600, fontSize: 15),
                 ),
               ),
-              const SizedBox(width: 8),
-              const SizedBox(
-                width: 14,
-                height: 14,
-                child: CircularProgressIndicator(strokeWidth: 2),
+              IconButton(
+                icon: const Icon(Icons.edit, size: 18),
+                tooltip: '改名',
+                onPressed: _editName,
               ),
             ],
           ),
+          Text(
+            _selfIps.isEmpty ? '本机 IP：获取中…' : '本机 IP：${_selfIps.join('、')}',
+            style: TextStyle(fontSize: 12, color: Colors.grey.shade600),
+          ),
           const SizedBox(height: 8),
-          if (_peers.isEmpty)
-            Container(
-              padding: const EdgeInsets.all(20),
-              decoration: BoxDecoration(
-                color: Colors.grey.shade100,
-                borderRadius: BorderRadius.circular(12),
-              ),
-              child: Column(
-                children: [
-                  Icon(Icons.wifi_find, size: 40, color: Colors.grey.shade400),
-                  const SizedBox(height: 10),
-                  Text(
-                    '正在搜索同一 WiFi 下的设备…\n对方需打开微密文件的「微密飞传」页，'
-                        '或与 LANDrop App 同网',
-                    textAlign: TextAlign.center,
-                    style: TextStyle(fontSize: 13, color: Colors.grey.shade600),
-                  ),
-                ],
-              ),
-            )
-          else
-            ..._peers.map((d) {
-              final trusted = d.trusted;
-              final isLs = d.isLocalSend;
-              final isLd = d.isLandrop;
-              return Container(
-                margin: const EdgeInsets.only(bottom: 8),
-                decoration: BoxDecoration(
-                  color: Colors.white,
-                  borderRadius: BorderRadius.circular(12),
-                  border: Border.all(
-                      color: trusted
-                          ? Colors.green.shade300
-                          : (isLs
-                              ? Colors.blue.shade200
-                              : (isLd
-                                  ? Colors.indigo.shade200
-                                  : Colors.grey.shade300))),
-                ),
-                child: ListTile(
-                  leading: Icon(
-                    isLs
-                        ? Icons.swap_horiz
-                        : (isLd
-                            ? Icons.public
-                            : (trusted ? Icons.verified_user : Icons.devices)),
-                    color: isLs
-                        ? Colors.blue
-                        : (isLd
-                            ? Colors.indigo
-                            : (trusted ? Colors.green : Colors.teal)),
-                  ),
-                  title: Text(d.name,
-                      style: const TextStyle(fontWeight: FontWeight.w500)),
-                  subtitle: Text(
-                      '${d.ip}:${d.httpPort} · ${_peerProtocolLabel(d)}'
-                      '${trusted ? ' · 已信任' : ''}',
-                      style: const TextStyle(fontSize: 12)),
-                  trailing: PopupMenuButton<String>(
-                    icon: const Icon(Icons.more_horiz, size: 20),
-                    onSelected: (v) {
-                      if (v == 'send_file') {
-                        _startSendFilesTo(d);
-                      } else if (v == 'send_folder') {
-                        _startSendFolderTo(d);
-                      } else if (v == 'send_text') {
-                        _startSendTextTo(d);
-                      } else if (v == 'trust') {
-                        _toggleTrust(d);
-                      }
-                    },
-                    itemBuilder: (ctx) => [
-                      const PopupMenuItem(
-                          value: 'send_file',
-                          child: Row(children: [
-                            Icon(Icons.insert_drive_file_outlined, size: 18),
-                            SizedBox(width: 8),
-                            Text('发送文件'),
-                          ])),
-                      // 文件夹发送：仅微密设备（自研协议支持目录层级，
-                      // LocalSend v2 协议无目录概念）
-                      if (!isLs)
-                        const PopupMenuItem(
-                            value: 'send_folder',
-                            child: Row(children: [
-                              Icon(Icons.folder_outlined, size: 18),
-                              SizedBox(width: 8),
-                              Text('发送文件夹'),
-                            ])),
-                      // LocalSend 设备不支持文本/信任体系（协议无文本消息，
-                      // 信任是微密设备 ID 概念）
-                      if (!isLs)
-                        const PopupMenuItem(
-                            value: 'send_text',
-                            child: Row(children: [
-                              Icon(Icons.chat_bubble_outline, size: 18),
-                              SizedBox(width: 8),
-                              Text('发送文本'),
-                            ])),
-                      if (!isLs)
-                        PopupMenuItem(
-                            value: 'trust',
-                            child: Row(children: [
-                              Icon(
-                                  trusted
-                                      ? Icons.remove_moderator_outlined
-                                      : Icons.add_moderator_outlined,
-                                  size: 18),
-                              const SizedBox(width: 8),
-                              Text(trusted ? '取消信任' : '添加信任'),
-                            ])),
-                    ],
-                  ),
-                  onTap: () => _onDeviceTap(d),
-                ),
-              );
-            }),
-          const SizedBox(height: 12),
-          // 网页客户端（Snapdrop 式 WS 房间成员，可与本机互发）
-          if (_webPeers.isNotEmpty) ...[
-            Row(
-              children: [
-                Icon(Icons.language, size: 18, color: Colors.grey.shade600),
-                const SizedBox(width: 6),
-                Text(
-                  '网页客户端（${_webPeers.length}）· 浏览器打开上面的快传地址即可加入',
-                  style: TextStyle(
-                    fontSize: 13,
-                    fontWeight: FontWeight.bold,
-                    color: Colors.grey.shade600,
-                  ),
-                ),
-              ],
-            ),
-            const SizedBox(height: 8),
-            ..._webPeers.map((w) {
-              return Container(
-                margin: const EdgeInsets.only(bottom: 8),
-                decoration: BoxDecoration(
-                  color: Colors.white,
-                  borderRadius: BorderRadius.circular(12),
-                  border: Border.all(color: Colors.teal.shade300),
-                ),
-                child: ListTile(
-                  leading: const Icon(Icons.language, color: Colors.teal),
-                  title: Text(w.name,
-                      style: const TextStyle(fontWeight: FontWeight.w500)),
-                  subtitle: Text('网页客户端 · ${w.ip}',
-                      style: const TextStyle(fontSize: 12)),
-                  trailing: IconButton(
-                    icon: const Icon(Icons.chat_bubble_outline, size: 20),
-                    tooltip: '发送文本',
-                    onPressed: () => _startSendTextToWeb(w),
-                  ),
-                  onTap: () => _onWebPeerTap(w),
-                ),
-              );
-            }),
-            const SizedBox(height: 4),
-          ],
-          const SizedBox(height: 4),
-          Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 4),
-            child: Text(
-              '说明：发送与接收双方须连接同一 WiFi；接收的文件默认存入「加密文件存放目录」（未设置时存入应用目录）；信任过的设备免确认直接接收。',
-              style: TextStyle(fontSize: 12, color: Colors.grey.shade500),
-            ),
+          Text(
+            '允许接收文件（托盘常驻）',
+            style: TextStyle(fontSize: 13, color: Colors.green.shade700),
           ),
         ],
       ),
     );
   }
+
+  Widget _buildPendingCard() {
+    return Container(
+      margin: const EdgeInsets.only(bottom: 12),
+      padding: const EdgeInsets.all(14),
+      decoration: BoxDecoration(
+        color: Colors.amber.withAlpha(30),
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: Colors.amber.withAlpha(90)),
+      ),
+      child: Row(
+        children: [
+          const Icon(Icons.share_outlined, size: 20, color: Colors.amber),
+          const SizedBox(width: 8),
+          Expanded(
+            child: Text(
+              _pendingText != null
+                  ? '待发送文本：${_pendingText!.length > 30 ? '${_pendingText!.substring(0, 30)}…' : _pendingText!}'
+                  : '待发送 ${_pendingFiles.length} 个文件，点击下方设备即发送',
+              style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w500),
+            ),
+          ),
+          TextButton(
+            onPressed: () => setState(() {
+              _pendingText = null;
+              _pendingFiles = [];
+            }),
+            child: const Text('取消'),
+          ),
+        ],
+      ),
+    );
+  }
+
+  /// 网页快传：固定项（类文件传输助手），点复制地址可分享给同 WiFi 设备。
+  Widget _buildWebItem() {
+    return Container(
+      margin: const EdgeInsets.only(bottom: 12),
+      padding: const EdgeInsets.all(14),
+      decoration: BoxDecoration(
+        color: Colors.teal.withAlpha(15),
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: Colors.teal.withAlpha(50)),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              const Icon(Icons.language, size: 20, color: Colors.teal),
+              const SizedBox(width: 8),
+              const Expanded(
+                child: Text('网页快传',
+                    style:
+                        TextStyle(fontWeight: FontWeight.w600, fontSize: 15)),
+              ),
+              IconButton(
+                icon: const Icon(Icons.copy, size: 18),
+                tooltip: '复制地址',
+                onPressed: () {
+                  final urls = _webUrls;
+                  Clipboard.setData(ClipboardData(
+                      text: urls.isEmpty
+                          ? 'http://$_selfIp:$_selfHttpPort'
+                          : urls.join('\n')));
+                  if (mounted) {
+                    ScaffoldMessenger.of(context).showSnackBar(
+                        const SnackBar(content: Text('已复制网页快传地址')));
+                  }
+                },
+              ),
+            ],
+          ),
+          Text(
+            _webUrls.isEmpty ? 'http://…' : _webUrls.join('\n'),
+            style: const TextStyle(
+                fontSize: 15, fontWeight: FontWeight.w600, color: Colors.teal),
+          ),
+          const SizedBox(height: 4),
+          Text(
+            _selfWebShare
+                ? '同一 WiFi 下任何设备用浏览器打开此地址，即可发送文件/文本给本机'
+                : '网页快传已在设置中关闭',
+            style: TextStyle(
+                fontSize: 12,
+                color: _selfWebShare ? Colors.grey.shade600 : Colors.orange),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _sectionHeader(String text) {
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(4, 8, 4, 8),
+      child: Text(
+        text,
+        style: TextStyle(
+            fontSize: 13, fontWeight: FontWeight.bold, color: Colors.grey.shade600),
+      ),
+    );
+  }
+
+  Widget _buildConvTile(_ConvItem item) {
+    final online = item.online;
+    final peer = item.peer;
+    final isLs = peer?.isLocalSend ?? false;
+    final isLd = peer?.isLandrop ?? false;
+    return Container(
+      margin: const EdgeInsets.only(bottom: 8),
+      decoration: BoxDecoration(
+        color: Colors.white,
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: Colors.grey.shade300),
+      ),
+      child: ListTile(
+        leading: Stack(
+          children: [
+            Icon(
+              isLs
+                  ? Icons.swap_horiz
+                  : (isLd ? Icons.public : Icons.devices),
+              color: isLs
+                  ? Colors.blue
+                  : (isLd ? Colors.indigo : Colors.teal),
+            ),
+            Positioned(
+              right: 0,
+              bottom: 0,
+              child: Container(
+                width: 11,
+                height: 11,
+                decoration: BoxDecoration(
+                  color: online ? Colors.green : Colors.grey,
+                  shape: BoxShape.circle,
+                  border: Border.all(color: Colors.white, width: 2),
+                ),
+              ),
+            ),
+          ],
+        ),
+        title: Text(item.name,
+            style: const TextStyle(fontWeight: FontWeight.w500)),
+        subtitle: Text(
+          item.preview ?? (online ? '在线' : '离线'),
+          maxLines: 1,
+          overflow: TextOverflow.ellipsis,
+          style: const TextStyle(fontSize: 12),
+        ),
+        trailing: Column(
+          mainAxisAlignment: MainAxisAlignment.center,
+          crossAxisAlignment: CrossAxisAlignment.end,
+          children: [
+            Text(online ? '在线' : '离线',
+                style: TextStyle(
+                    fontSize: 11,
+                    color: online ? Colors.green : Colors.grey)),
+            if (item.lastTime != null)
+              Text(_fmtTime(item.lastTime!),
+                  style: TextStyle(fontSize: 11, color: Colors.grey.shade500)),
+          ],
+        ),
+        onTap: () => _openChat(item),
+      ),
+    );
+  }
+
+  Widget _buildWebPeerTile(WebPeer w) {
+    return Container(
+      margin: const EdgeInsets.only(bottom: 8),
+      decoration: BoxDecoration(
+        color: Colors.white,
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: Colors.teal.shade300),
+      ),
+      child: ListTile(
+        leading: const Icon(Icons.language, color: Colors.teal),
+        title:
+            Text(w.name, style: const TextStyle(fontWeight: FontWeight.w500)),
+        subtitle: Text('网页客户端 · ${w.ip}',
+            style: const TextStyle(fontSize: 12)),
+        trailing: IconButton(
+          icon: const Icon(Icons.chat_bubble_outline, size: 20),
+          tooltip: '发送文本',
+          onPressed: () => _startSendTextToWeb(w),
+        ),
+        onTap: () => _onWebPeerTap(w),
+      ),
+    );
+  }
+
+  Widget _emptyHint() {
+    return Container(
+      padding: const EdgeInsets.all(20),
+      decoration: BoxDecoration(
+        color: Colors.grey.shade100,
+        borderRadius: BorderRadius.circular(12),
+      ),
+      child: Column(
+        children: [
+          Icon(Icons.chat_bubble_outline, size: 40, color: Colors.grey.shade400),
+          const SizedBox(height: 10),
+          Text(
+            '还没有聊天记录。\n附近有设备上线时会出现在这里，点开即可收发文件/文本',
+            textAlign: TextAlign.center,
+            style: TextStyle(fontSize: 13, color: Colors.grey.shade600),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildNote() {
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 4),
+      child: Text(
+        '说明：发送与接收双方须连接同一 WiFi；接收的文件默认存入「加密文件存放目录」（未设置时存入应用目录）；信任过的设备免确认直接接收。',
+        style: TextStyle(fontSize: 12, color: Colors.grey.shade500),
+      ),
+    );
+  }
+
+  void _openChat(_ConvItem item) {
+    Navigator.push(
+      context,
+      MaterialPageRoute(
+        builder: (_) => LanChatScreen(
+          peer: item.peer,
+          peerKey: item.key,
+          displayName: item.name,
+        ),
+      ),
+    );
+  }
+
+  String _fmtTime(DateTime t) {
+    final now = DateTime.now();
+    final sameDay =
+        t.year == now.year && t.month == now.month && t.day == now.day;
+    final hm =
+        '${t.hour.toString().padLeft(2, '0')}:${t.minute.toString().padLeft(2, '0')}';
+    if (sameDay) return hm;
+    return '${t.month}/${t.day} $hm';
+  }
+
+  /// 会话列表项：合并历史记录与当前在线设备。
+  class _ConvItem {
+    final String key;
+    final String name;
+    final String? preview;
+    final DateTime? lastTime;
+    final bool online;
+    final LanPeer? peer;
+    final int count;
+    const _ConvItem(this.key, this.name, this.preview, this.lastTime,
+        this.online, this.peer, this.count);
+  }
+
 
   Future<void> _startSendFilesTo(LanPeer peer) async {
     if (!mounted) return;

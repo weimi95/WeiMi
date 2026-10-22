@@ -36,7 +36,7 @@ import 'services/view_prefs_service.dart';
 import 'services/share_receive_service.dart';
 import 'services/receive_notify_service.dart';
 import 'services/daemon_service.dart';
-import 'screens/transfer_history_screen.dart';
+import 'screens/lan_transfer_screen.dart';
 import 'widgets/file_thumbnail.dart';
 import 'package:path_provider/path_provider.dart';
 
@@ -192,8 +192,8 @@ void main(List<String> args) async {
       try {
         final ctx = ShareReceiveService.navigatorKey.currentContext;
         if (ctx != null) {
-          Navigator.of(ctx).push(MaterialPageRoute(
-              builder: (_) => const TransferHistoryScreen()));
+        Navigator.of(ctx).push(MaterialPageRoute(
+            builder: (_) => const LanTransferScreen()));
         }
       } catch (_) {}
     }());
@@ -291,10 +291,12 @@ class HomePage extends StatefulWidget {
   State<HomePage> createState() => _HomePageState();
 }
 
-class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
+class _HomePageState extends State<HomePage>
+    with WidgetsBindingObserver, SingleTickerProviderStateMixin {
   int _currentTab = 0;
   bool _isProcessing = false;
   bool _isDragging = false;
+  late TabController _tabController;
   final GlobalKey<WeiMiVaultScreenState> _filesKey =
       GlobalKey<WeiMiVaultScreenState>();
 
@@ -305,6 +307,12 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
+    _tabController = TabController(length: 2, vsync: this);
+    _tabController.addListener(() {
+      if (_currentTab != _tabController.index) {
+        setState(() => _currentTab = _tabController.index);
+      }
+    });
     _checkInitialFile();
   }
 
@@ -318,6 +326,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   @override
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
+    _tabController.dispose();
     if (Platform.isAndroid) {
       _cleanupFilePickerCache();
     }
@@ -1133,12 +1142,35 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     final bool isDesktop = !Platform.isAndroid && !Platform.isIOS;
     final bool supportDragDrop = isDesktop;
 
-    Widget bodyContent;
-    switch (_currentTab) {
-      case 0:
-      default:
-        bodyContent = _buildFilesTab();
+    final filesTab = _buildFilesTab();
+    final transferTab = LanTransferScreen(standalone: false);
+    Widget filesBody = filesTab;
+    if (_isProcessing) {
+      filesBody = const Center(child: CircularProgressIndicator());
+    } else if (supportDragDrop) {
+      filesBody = DropTarget(
+        onDragDone: (detail) {
+          if (!_isProcessing) {
+            _handleDroppedFiles(detail.files);
+          }
+        },
+        onDragEntered: (_) => setState(() => _isDragging = true),
+        onDragExited: (_) => setState(() => _isDragging = false),
+        child: Container(
+          decoration: BoxDecoration(
+            border: _isDragging
+                ? Border.all(color: Colors.blueAccent, width: 3)
+                : null,
+            color: _isDragging ? Colors.blueAccent.withAlpha(20) : null,
+          ),
+          child: filesTab,
+        ),
+      );
     }
+    final Widget bodyContent = TabBarView(
+      controller: _tabController,
+      children: [filesBody, transferTab],
+    );
 
     // 系统返回键：文件页在子目录/多选状态时先内部消化（逐级返回/清选择），
     // 到根视图才放行退出应用
@@ -1156,19 +1188,27 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
         title: Text(t('appTitle'),
             style: const TextStyle(fontWeight: FontWeight.bold)),
         backgroundColor: Theme.of(context).colorScheme.inversePrimary,
+        bottom: TabBar(
+          controller: _tabController,
+          tabs: const [
+            Tab(text: '微密文件'),
+            Tab(text: '微密飞传'),
+          ],
+        ),
         actions: [
-          // 加解密历史（与飞传页右上角「传输记录」同款入口）
-          IconButton(
-            icon: const Icon(Icons.history),
-            tooltip: '加解密历史',
-            onPressed: () {
-              Navigator.push(
-                context,
-                MaterialPageRoute(
-                    builder: (context) => const OperationHistoryScreen()),
-              );
-            },
-          ),
+          // 加解密历史（文件页专属；飞传页已自带聊天式历史，无需此入口）
+          if (_currentTab == 0)
+            IconButton(
+              icon: const Icon(Icons.history),
+              tooltip: '加解密历史',
+              onPressed: () {
+                Navigator.push(
+                  context,
+                  MaterialPageRoute(
+                      builder: (context) => const OperationHistoryScreen()),
+                );
+              },
+            ),
           // 竖三点：视图 / 语言 / 关于
           PopupMenuButton<String>(
             icon: const Icon(Icons.more_vert),
@@ -1276,36 +1316,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
           ),
         ],
       ),
-      body: supportDragDrop
-          ? DropTarget(
-              onDragDone: (detail) {
-                if (!_isProcessing) {
-                  _handleDroppedFiles(detail.files);
-                }
-              },
-              onDragEntered: (detail) {
-                setState(() => _isDragging = true);
-              },
-              onDragExited: (detail) {
-                setState(() => _isDragging = false);
-              },
-              child: Container(
-                decoration: BoxDecoration(
-                  border: _isDragging
-                      ? Border.all(color: Colors.blueAccent, width: 3)
-                      : null,
-                  color: _isDragging
-                      ? Colors.blueAccent.withAlpha(20)
-                      : null,
-                ),
-                child: _isProcessing
-                    ? const Center(child: CircularProgressIndicator())
-                    : bodyContent,
-              ),
-            )
-          : _isProcessing
-              ? const Center(child: CircularProgressIndicator())
-              : bodyContent,
+      body: bodyContent,
       ),
     );
   }

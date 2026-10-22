@@ -479,6 +479,7 @@ class LandropService {
           name: _safeName((m['filename'] as String?) ?? '未命名文件'),
           size: (m['size'] as num? ?? 0).toInt(),
           peerName: senderName,
+          peerKey: session.peerPkB64,
           time: DateTime.now(),
           ok: false,
           note: '未信任，已拒收',
@@ -545,6 +546,7 @@ class LandropService {
         path: savePath,
         size: size,
         peerName: senderName,
+        peerKey: session.peerPkB64,
         time: DateTime.now(),
         ok: true,
       ));
@@ -567,6 +569,7 @@ class LandropService {
         name: name,
         size: size,
         peerName: senderName,
+        peerKey: session.peerPkB64,
         time: DateTime.now(),
         ok: false,
         note: '传输失败: $e',
@@ -662,7 +665,8 @@ class LandropService {
           (reply['data'] as Map<String, dynamic>?)?['accept'] != true) {
         // 对端拒收：记账留痕
         for (final m in metas) {
-          await _recordOut(m, ok: false, note: '对方拒收', peerName: device.name);
+          await _recordOut(m, ok: false, note: '对方拒收', peerName: device.name,
+              peerKey: device.publicKey);
         }
         return LandropSendResult(
             ok: false,
@@ -691,7 +695,8 @@ class LandropService {
         } finally {
           await raf.close();
         }
-        await _recordOut(m, ok: true, peerName: session.peerDeviceName);
+        await _recordOut(m, ok: true, peerName: session.peerDeviceName,
+            peerKey: device.publicKey);
       }
       // 等对端读完关闭（LANDrop 收完即 FIN；最多等 3s）
       await session.waitPeerClose(const Duration(seconds: 3));
@@ -747,6 +752,7 @@ class LandropService {
           text: text.length > 2000 ? '${text.substring(0, 2000)}…' : text,
           size: text.length,
           peerName: device.name,
+          peerKey: device.publicKey,
           time: DateTime.now(),
           ok: true,
         ));
@@ -770,7 +776,10 @@ class LandropService {
   }
 
   Future<void> _recordOut(_SendFileMeta m,
-      {required bool ok, String? note, required String peerName}) async {
+      {required bool ok,
+      String? note,
+      required String peerName,
+      required String peerKey}) async {
     await TransferHistoryService.instance.add(TransferRecord(
       id: '${DateTime.now().microsecondsSinceEpoch}_ldout',
       kind: 'file',
@@ -778,6 +787,7 @@ class LandropService {
       name: m.filename,
       size: m.size,
       peerName: peerName,
+      peerKey: peerKey,
       time: DateTime.now(),
       ok: ok,
       note: note,
@@ -1148,6 +1158,7 @@ class _LandropSession {
       text: text.length > 2000 ? '${text.substring(0, 2000)}…' : text,
       size: text.length,
       peerName: peerDeviceName,
+      peerKey: publicKey,
       time: DateTime.now(),
       ok: true,
     ));
