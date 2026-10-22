@@ -17,6 +17,19 @@ import 'settings_screen.dart';
 
 /// 微密飞传页（单进程方案）：直接调用本进程 LanTransferService 单例，
 /// 不再经 IPC 转发。接收确认通过 service 的 confirmHandler 回调弹窗。
+/// 会话列表项：合并历史记录与当前在线设备（顶层类，供 _LanTransferScreenState 使用）。
+class _ConvItem {
+  final String key;
+  final String name;
+  final String? preview;
+  final DateTime? lastTime;
+  final bool online;
+  final LanPeer? peer;
+  final int count;
+  const _ConvItem(this.key, this.name, this.preview, this.lastTime,
+      this.online, this.peer, this.count);
+}
+
 class LanTransferScreen extends StatefulWidget {
   final String? initialText;
   final List<String> initialFiles;
@@ -1298,20 +1311,6 @@ class _LanTransferScreenState extends State<LanTransferScreen> {
     if (sameDay) return hm;
     return '${t.month}/${t.day} $hm';
   }
-
-  /// 会话列表项：合并历史记录与当前在线设备。
-  class _ConvItem {
-    final String key;
-    final String name;
-    final String? preview;
-    final DateTime? lastTime;
-    final bool online;
-    final LanPeer? peer;
-    final int count;
-    const _ConvItem(this.key, this.name, this.preview, this.lastTime,
-        this.online, this.peer, this.count);
-  }
-
 
   Future<void> _startSendFilesTo(LanPeer peer) async {
     if (!mounted) return;

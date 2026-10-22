@@ -1158,7 +1158,7 @@ class _LandropSession {
       text: text.length > 2000 ? '${text.substring(0, 2000)}…' : text,
       size: text.length,
       peerName: peerDeviceName,
-      peerKey: publicKey,
+      peerKey: peerPkB64,
       time: DateTime.now(),
       ok: true,
     ));

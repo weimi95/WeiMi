@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:io';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:file_picker/file_picker.dart';
 import 'package:path/path.dart' as p;
 import '../services/lan_transfer_service.dart';
@@ -101,7 +102,7 @@ class _LanChatScreenState extends State<LanChatScreen> {
         final result = await LandropService.instance.sendFilesToDevice(
           dev,
           paths
-              .map((p) => LandropSendFile(path: p, filename: p.basename(p)))
+              .map((fp) => LandropSendFile(path: fp, filename: p.basename(fp)))
               .toList(),
           onVerifCode: (code) {
             vc = code;

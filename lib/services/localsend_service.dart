@@ -693,7 +693,7 @@ class LocalSendService {
         path: savePath,
         size: file.size,
         peerName: session.senderName,
-        peerKey: senderId,
+        peerKey: session.senderId,
         time: DateTime.now(),
         ok: true,
       ));
@@ -841,7 +841,7 @@ class LocalSendService {
             path: file.path,
             size: total,
             peerName: peer.name,
-            peerKey: senderId,
+            peerKey: peer.id,
             time: DateTime.now(),
             ok: true,
           ));
@@ -854,7 +854,7 @@ class LocalSendService {
             path: file.path,
             size: total,
             peerName: peer.name,
-            peerKey: senderId,
+            peerKey: peer.id,
             time: DateTime.now(),
             ok: false,
           ));
