@@ -668,6 +668,13 @@ class _QuickSearchPopupState extends State<QuickSearchPopup> {
                       if (!mounted) return;
                       _runSearch();
                     },
+                    onAdvancedSearch: (syntax) {
+                      // 高级搜索：语法串灌入输入框并重搜
+                      _controller.text = syntax;
+                      _controller.selection =
+                          TextSelection.collapsed(offset: syntax.length);
+                      _runSearch();
+                    },
                   ),
                   IconButton(
                     tooltip: '打开主界面',

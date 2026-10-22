@@ -1902,6 +1902,13 @@ class WeiMiVaultScreenState extends State<WeiMiVaultScreen> {
                   _fileDebounce = Timer(
                       const Duration(milliseconds: 50), _runFileGlobalSearch);
                 },
+                onAdvancedSearch: (syntax) {
+                  // 高级搜索：语法串灌入输入框并重搜
+                  _fileSearchCtrl.text = syntax;
+                  _fileSearchCtrl.selection =
+                      TextSelection.collapsed(offset: syntax.length);
+                  _onFileSearchChanged(syntax);
+                },
               ),
               IconButton(
                 icon: Icon(

@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 
 import '../framework/setting_store.dart';
 import '../services/search_filters_service.dart';
+import 'advanced_search_dialog.dart';
 import 'saved_filters_dialog.dart';
 
 /// M3 搜索菜单开关（全局修饰符，持久化；与 Rust `case:`/`wholeword:`/`path:`/`regex:` 裸词对应）。
@@ -134,11 +135,15 @@ class SearchOptsButton extends StatefulWidget {
   /// 应用某条已存筛选器：调用方负责灌查询词、持久化开关、重搜。
   final void Function(SavedFilter filter)? onApplyFilter;
 
+  /// 高级搜索生成语法串：调用方负责灌入输入框并触发搜索。
+  final void Function(String syntax)? onAdvancedSearch;
+
   const SearchOptsButton({
     super.key,
     this.onChanged,
     this.currentQuery = '',
     this.onApplyFilter,
+    this.onAdvancedSearch,
   });
 
   @override
@@ -260,6 +265,15 @@ class _SearchOptsButtonState extends State<SearchOptsButton> {
             contentPadding: EdgeInsets.zero,
           ),
         ),
+        if (widget.onAdvancedSearch != null)
+          const PopupMenuItem<int>(
+            value: 96,
+            child: ListTile(
+              leading: Icon(Icons.tune, size: 20),
+              title: Text('高级搜索…', style: TextStyle(fontSize: 13)),
+              contentPadding: EdgeInsets.zero,
+            ),
+          ),
         const PopupMenuDivider(),
         const PopupMenuItem<int>(
           value: 99,
@@ -275,6 +289,11 @@ class _SearchOptsButtonState extends State<SearchOptsButton> {
           _showHelp();
         } else if (v == 97) {
           _openFilters();
+        } else if (v == 96) {
+          unawaited(AdvancedSearchDialog.show(
+            context,
+            onSearch: widget.onAdvancedSearch,
+          ));
         } else if (v == 98) {
           unawaited(_saveCurrent());
         } else {
