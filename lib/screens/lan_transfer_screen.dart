@@ -6,6 +6,7 @@ import 'package:flutter/services.dart';
 import 'package:file_picker/file_picker.dart';
 import 'package:path/path.dart' as p;
 import '../services/firewall_service.dart';
+import '../services/device_alias_service.dart';
 import '../services/landrop_service.dart';
 import '../services/lan_transfer_service.dart';
 import '../services/localsend_service.dart';
@@ -69,6 +70,10 @@ class _LanTransferScreenState extends State<LanTransferScreen> {
   final ScrollController _listCtl = ScrollController();
   int _lastTopSignal = 0;
   Set<String> _prevOnlineIds = {}; // 上轮在线设备集合（待发送队列的上线沿触发）
+  Map<String, String> _aliases = {}; // 设备别名（重命名，id -> alias）
+
+  /// 设备显示名：用户起的别名优先，否则设备广播名（v1.2.13 设备菜单「重命名」）
+  String _displayName(LanPeer p) => _aliases[p.id] ?? p.name;
 
   @override
   void initState() {
@@ -247,6 +252,10 @@ class _LanTransferScreenState extends State<LanTransferScreen> {
       _selfHttpPort = _svc.httpPortActual;
       _selfWebShare = _svc.webShareEnabled;
     });
+    unawaited(() async {
+      final m = await DeviceAliasService.instance.load();
+      if (mounted) setState(() => _aliases = m);
+    }());
     // 待发送队列：设备新上线（含启动时已在线的）→ 尝试自动发出排队的文件/文本
     final onlineIds = peers.map((e) => e.id).toSet();
     final newly = onlineIds.difference(_prevOnlineIds);
@@ -936,8 +945,8 @@ class _LanTransferScreenState extends State<LanTransferScreen> {
     final items = <_ConvItem>[];
     for (final p in _peers) {
       final c = convByKey.remove(p.id);
-      items.add(_ConvItem(p.id, c?.name ?? p.name, c?.preview, c?.lastTime,
-          true, p, c?.count ?? 0,
+      items.add(_ConvItem(p.id, _aliases[p.id] ?? (c?.name ?? p.name),
+          c?.preview, c?.lastTime, true, p, c?.count ?? 0,
           unread: c != null &&
               TransferHistoryService.instance.isUnread(p.id, c.lastTime)));
     }
@@ -1125,95 +1134,105 @@ class _LanTransferScreenState extends State<LanTransferScreen> {
     final peer = item.peer;
     final isLs = peer?.isLocalSend ?? false;
     final isLd = peer?.isLandrop ?? false;
-    return Container(
-      margin: const EdgeInsets.only(bottom: 8),
-      decoration: BoxDecoration(
-        color: Colors.white,
-        borderRadius: BorderRadius.circular(12),
-        border: Border.all(color: Colors.grey.shade300),
-      ),
-      child: ListTile(
-        leading: Stack(
-          children: [
-            Icon(
-              isLs
-                  ? Icons.swap_horiz
-                  : (isLd ? Icons.public : Icons.devices),
-              color: isLs
-                  ? Colors.blue
-                  : (isLd ? Colors.indigo : Colors.teal),
-            ),
-            Positioned(
-              right: 0,
-              bottom: 0,
-              child: Container(
-                width: 11,
-                height: 11,
-                decoration: BoxDecoration(
-                  color: online ? Colors.green : Colors.grey,
-                  shape: BoxShape.circle,
-                  border: Border.all(color: Colors.white, width: 2),
+    // 手机长按 / 桌面右击 → 设备菜单（信任/重命名/删除）；onTap 仍走打开会话
+    return GestureDetector(
+      onLongPress: () => _showPeerMenu(item),
+      onSecondaryTap: () => _showPeerMenu(item),
+      child: Container(
+        margin: const EdgeInsets.only(bottom: 8),
+        decoration: BoxDecoration(
+          color: Colors.white,
+          borderRadius: BorderRadius.circular(12),
+          border: Border.all(color: Colors.grey.shade300),
+        ),
+        child: ListTile(
+          leading: Stack(
+            children: [
+              Icon(
+                isLs
+                    ? Icons.swap_horiz
+                    : (isLd ? Icons.public : Icons.devices),
+                color: isLs
+                    ? Colors.blue
+                    : (isLd ? Colors.indigo : Colors.teal),
+              ),
+              Positioned(
+                right: 0,
+                bottom: 0,
+                child: Container(
+                  width: 11,
+                  height: 11,
+                  decoration: BoxDecoration(
+                    color: online ? Colors.green : Colors.grey,
+                    shape: BoxShape.circle,
+                    border: Border.all(color: Colors.white, width: 2),
+                  ),
                 ),
               ),
-            ),
-          ],
-        ),
-        title: Text(item.name,
-            style: const TextStyle(fontWeight: FontWeight.w500)),
-        subtitle: Text(
-          item.preview ?? (online ? '在线' : '离线'),
-          maxLines: 1,
-          overflow: TextOverflow.ellipsis,
-          style: const TextStyle(fontSize: 12),
-        ),
-        trailing: Column(
-          mainAxisAlignment: MainAxisAlignment.center,
-          crossAxisAlignment: CrossAxisAlignment.end,
-          children: [
-            Text(online ? '在线' : '离线',
-                style: TextStyle(
-                    fontSize: 11,
-                    color: online ? Colors.green : Colors.grey)),
-            if (item.lastTime != null)
-              Text(_fmtTime(item.lastTime!),
-                  style: TextStyle(fontSize: 11, color: Colors.grey.shade500)),
-            if (item.unread)
-              Container(
-                margin: const EdgeInsets.only(top: 3),
-                width: 9,
-                height: 9,
-                decoration: const BoxDecoration(
-                  color: Colors.red,
-                  shape: BoxShape.circle,
+            ],
+          ),
+          title: Text(item.name,
+              style: const TextStyle(fontWeight: FontWeight.w500)),
+          subtitle: Text(
+            item.preview ?? (online ? '在线' : '离线'),
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+            style: const TextStyle(fontSize: 12),
+          ),
+          trailing: Column(
+            mainAxisAlignment: MainAxisAlignment.center,
+            crossAxisAlignment: CrossAxisAlignment.end,
+            children: [
+              Text(online ? '在线' : '离线',
+                  style: TextStyle(
+                      fontSize: 11,
+                      color: online ? Colors.green : Colors.grey)),
+              if (item.lastTime != null)
+                Text(_fmtTime(item.lastTime!),
+                    style: TextStyle(fontSize: 11, color: Colors.grey.shade500)),
+              if (item.unread)
+                Container(
+                  margin: const EdgeInsets.only(top: 3),
+                  width: 9,
+                  height: 9,
+                  decoration: const BoxDecoration(
+                    color: Colors.red,
+                    shape: BoxShape.circle,
+                  ),
                 ),
-              ),
-          ],
+            ],
+          ),
+          onTap: () => _openChat(item),
         ),
-        onTap: () => _openChat(item),
       ),
     );
   }
 
   Widget _buildWebPeerTile(WebPeer w) {
-    return Container(
-      margin: const EdgeInsets.only(bottom: 8),
-      decoration: BoxDecoration(
-        color: Colors.white,
-        borderRadius: BorderRadius.circular(12),
-        border: Border.all(color: Colors.teal.shade300),
-      ),
-      child: ListTile(
-        leading: const Icon(Icons.language, color: Colors.teal),
-        title:
-            Text(w.name, style: const TextStyle(fontWeight: FontWeight.w500)),
-        subtitle: Text('网页客户端 · ${w.ip}',
-            style: const TextStyle(fontSize: 12)),
-        trailing: IconButton(
-          icon: const Icon(Icons.chat_bubble_outline, size: 20),
-          tooltip: '发送文本',
-          onPressed: () => _startSendTextToWeb(w),
+    // 网页客户端同样支持长按（手机）/右击（电脑）菜单：重命名/断开
+    return GestureDetector(
+      onLongPress: () => _showWebPeerMenu(w),
+      onSecondaryTap: () => _showWebPeerMenu(w),
+      child: Container(
+        margin: const EdgeInsets.only(bottom: 8),
+        decoration: BoxDecoration(
+          color: Colors.white,
+          borderRadius: BorderRadius.circular(12),
+          border: Border.all(color: Colors.teal.shade300),
         ),
-        onTap: () => _onWebPeerTap(w),
+        child: ListTile(
+          leading: const Icon(Icons.language, color: Colors.teal),
+          title: Text(_aliases[w.id] ?? w.name,
+              style: const TextStyle(fontWeight: FontWeight.w500)),
+          subtitle: Text('网页客户端 · ${w.ip}',
+              style: const TextStyle(fontSize: 12)),
+          trailing: IconButton(
+            icon: const Icon(Icons.chat_bubble_outline, size: 20),
+            tooltip: '发送文本',
+            onPressed: () => _startSendTextToWeb(w),
+          ),
+          onTap: () => _onWebPeerTap(w),
+        ),
       ),
     );
   }
@@ -1260,6 +1279,242 @@ class _LanTransferScreenState extends State<LanTransferScreen> {
         ),
       ),
     );
+  }
+
+  // ============ 设备菜单（v1.2.13：手机长按 / 电脑右击） ============
+
+  void _toast(String msg) {
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(msg)));
+  }
+
+  /// 设备列表项菜单：信任/取消信任、重命名、删除。
+  /// 手机长按 / 桌面右击触发（_buildConvTile 的 GestureDetector）。
+  Future<void> _showPeerMenu(_ConvItem item) async {
+    final peer = item.peer;
+    if (peer == null) {
+      // 纯历史会话（设备离线且未信任）：仅提供删除记录
+      final ok = await showDialog<bool>(
+        context: context,
+        builder: (ctx) => AlertDialog(
+          title: Text('删除与「${item.name}」的会话'),
+          content: const Text('将删除该设备的全部传输记录（不删除已接收的文件）。'),
+          actions: [
+            TextButton(
+                onPressed: () => Navigator.pop(ctx, false),
+                child: const Text('取消')),
+            TextButton(
+                onPressed: () => Navigator.pop(ctx, true),
+                child: const Text('删除', style: TextStyle(color: Colors.red))),
+          ],
+        ),
+      );
+      if (ok == true && mounted) {
+        final recs =
+            await TransferHistoryService.instance.recordsFor(item.key);
+        await TransferHistoryService.instance
+            .deleteRecords(recs.map((r) => r.id).toList());
+        _toast('已删除会话记录');
+        _poll();
+      }
+      return;
+    }
+    final trusted = TrustedDevices.instance.isTrustedSync(peer.id);
+    await showModalBottomSheet(
+      context: context,
+      builder: (ctx) => SafeArea(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            ListTile(
+              title: Text(_displayName(peer),
+                  style: const TextStyle(fontWeight: FontWeight.bold)),
+              subtitle: Text(
+                  '${peer.ip}:${peer.httpPort} · ${_peerProtocolLabel(peer)}'
+                  '${trusted ? ' · 已信任' : ''}'),
+            ),
+            const Divider(height: 1),
+            ListTile(
+              leading: Icon(trusted
+                  ? Icons.shield_outlined
+                  : Icons.verified_user_outlined),
+              title: Text(trusted ? '取消信任' : '信任此设备'),
+              subtitle: Text(trusted ? '取消后对方发送需重新确认' : '信任后免确认直接接收文件/文本'),
+              onTap: () {
+                Navigator.pop(ctx);
+                _toggleTrust(peer, trusted);
+              },
+            ),
+            ListTile(
+              leading: const Icon(Icons.drive_file_rename_outline),
+              title: const Text('重命名'),
+              subtitle: const Text('别名只影响本机显示，对方无感'),
+              onTap: () {
+                Navigator.pop(ctx);
+                _renamePeer(peer);
+              },
+            ),
+            ListTile(
+              leading: const Icon(Icons.delete_outline, color: Colors.red),
+              title: const Text('删除设备',
+                  style: TextStyle(color: Colors.red.shade700)),
+              subtitle: const Text('取消信任、清除别名并删除会话记录'),
+              onTap: () {
+                Navigator.pop(ctx);
+                _deletePeer(peer);
+              },
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Future<void> _toggleTrust(LanPeer peer, bool trusted) async {
+    if (trusted) {
+      await TrustedDevices.instance.remove(peer.id);
+      _toast('已取消信任「${_displayName(peer)}」');
+    } else {
+      await TrustedDevices.instance.add(peer.id, peer.name);
+      _toast('已信任「${_displayName(peer)}」，之后免确认直接接收');
+    }
+    _poll();
+  }
+
+  Future<void> _renamePeer(LanPeer peer) async {
+    final controller = TextEditingController(text: _aliases[peer.id] ?? '');
+    final name = await showDialog<String>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('重命名设备'),
+        content: TextField(
+          controller: controller,
+          autofocus: true,
+          maxLength: 30,
+          decoration: const InputDecoration(
+            hintText: '留空恢复设备广播的名字',
+            helperText: '别名只影响本机显示，对方无感',
+          ),
+        ),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.pop(ctx),
+              child: const Text('取消')),
+          TextButton(
+              onPressed: () => Navigator.pop(ctx, controller.text),
+              child: const Text('保存')),
+        ],
+      ),
+    );
+    controller.dispose();
+    if (name == null || !mounted) return;
+    await DeviceAliasService.instance.setAlias(peer.id, name);
+    final m = await DeviceAliasService.instance.load();
+    if (!mounted) return;
+    setState(() => _aliases = m);
+    _toast(name.trim().isEmpty ? '已恢复默认名称' : '已重命名为「${name.trim()}」');
+  }
+
+  Future<void> _deletePeer(LanPeer peer) async {
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('删除设备'),
+        content: Text(
+            '将取消信任、清除别名，并删除与「${_displayName(peer)}」的全部会话记录。'
+            '设备仍在局域网时下次出现需重新确认。'),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.pop(ctx, false),
+              child: const Text('取消')),
+          TextButton(
+              onPressed: () => Navigator.pop(ctx, true),
+              child: const Text('删除', style: TextStyle(color: Colors.red))),
+        ],
+      ),
+    );
+    if (ok != true || !mounted) return;
+    await TrustedDevices.instance.remove(peer.id);
+    await DeviceAliasService.instance.remove(peer.id);
+    final recs = await TransferHistoryService.instance.recordsFor(peer.id);
+    if (recs.isNotEmpty) {
+      await TransferHistoryService.instance
+          .deleteRecords(recs.map((r) => r.id).toList());
+    }
+    _toast('已删除「${_displayName(peer)}」');
+    _poll();
+  }
+
+  /// 网页客户端菜单（v1.2.13）：重命名 / 断开连接
+  Future<void> _showWebPeerMenu(WebPeer w) async {
+    await showModalBottomSheet(
+      context: context,
+      builder: (ctx) => SafeArea(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            ListTile(
+              title: Text(w.name,
+                  style: const TextStyle(fontWeight: FontWeight.bold)),
+              subtitle: Text('网页客户端 · ${w.ip}'),
+            ),
+            const Divider(height: 1),
+            ListTile(
+              leading: const Icon(Icons.drive_file_rename_outline),
+              title: const Text('重命名'),
+              onTap: () {
+                Navigator.pop(ctx);
+                _renameWebPeer(w);
+              },
+            ),
+            ListTile(
+              leading: const Icon(Icons.link_off, color: Colors.red),
+              title:
+                  Text('断开连接', style: TextStyle(color: Colors.red.shade700)),
+              onTap: () {
+                Navigator.pop(ctx);
+                _svc.removeWebPeer(w);
+                _toast('已断开 ${w.name}');
+              },
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Future<void> _renameWebPeer(WebPeer w) async {
+    final controller = TextEditingController(text: _aliases[w.id] ?? '');
+    final name = await showDialog<String>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('重命名网页客户端'),
+        content: TextField(
+          controller: controller,
+          autofocus: true,
+          maxLength: 30,
+          decoration: const InputDecoration(
+            hintText: '留空恢复默认名称',
+            helperText: '别名只影响本机显示，对方无感',
+          ),
+        ),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.pop(ctx),
+              child: const Text('取消')),
+          TextButton(
+              onPressed: () => Navigator.pop(ctx, controller.text),
+              child: const Text('保存')),
+        ],
+      ),
+    );
+    controller.dispose();
+    if (name == null || !mounted) return;
+    await DeviceAliasService.instance.setAlias(w.id, name);
+    final m = await DeviceAliasService.instance.load();
+    if (!mounted) return;
+    setState(() => _aliases = m);
+    _toast(name.trim().isEmpty ? '已恢复默认名称' : '已重命名为「${name.trim()}」');
   }
 
   String _fmtTime(DateTime t) {

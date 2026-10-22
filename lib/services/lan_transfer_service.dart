@@ -407,20 +407,41 @@ class LanTransferService {
       'httpPort': _httpPort,
       'v': 1,
     }));
-    // 对每个本机网段的定向广播都发一遍，多网卡/虚拟网卡环境也能被同网段设备发现
+    // 255.255.255.255 + 本机各私网网段的定向广播：多网卡/虚拟网卡环境
+    // （有线+WiFi+VPN/VM）下 255.255.255.255 的出口由系统选，经常到不了
+    // 对方网段；定向广播按目标 IP 明确走对应网卡（v1.2.13 与 LANDrop
+    // 兼容层统一收编到 [directedBroadcastIps]）
     final targets = <String>['255.255.255.255'];
-    for (final myIp in await localIPv4s()) {
-      final parts = myIp.split('.');
-      if (parts.length == 4) {
-        final sub = '${parts[0]}.${parts[1]}.${parts[2]}.255';
-        if (!targets.contains(sub)) targets.add(sub);
-      }
+    for (final b in directedBroadcastIps(await localIPv4s())) {
+      if (!targets.contains(b)) targets.add(b);
     }
     for (final t in targets) {
       try {
         socket.send(body, InternetAddress(t), discoveryPort);
       } catch (_) {}
     }
+  }
+
+  /// 本机各私网 IPv4（192.168/10/172.16-31）推算的 /24 定向广播地址。
+  /// 广播类发现（微密 announce / LANDrop 兼容层 query+announce）共用：
+  /// 只发 255.255.255.255 在多网卡机器上会选错出口网卡，导致同网段设备
+  /// 发现不了（v1.2.13：电脑端发现不了其他电脑 LANDrop 的根因之一）。
+  /// [myIps] 传 [localIPv4s] 的结果（已过滤虚拟网卡）。
+  static List<String> directedBroadcastIps(List<String> myIps) {
+    final out = <String>[];
+    for (final myIp in myIps) {
+      final parts = myIp.split('.');
+      if (parts.length != 4) continue;
+      final a = int.tryParse(parts[0]);
+      final b = int.tryParse(parts[1]);
+      if (a == null || b == null) continue;
+      final isPrivate =
+          (a == 192 && b == 168) || a == 10 || (a == 172 && b >= 16 && b <= 31);
+      if (!isPrivate) continue; // 公网 IP 推 .255 定向广播无意义
+      final sub = '${parts[0]}.${parts[1]}.${parts[2]}.255';
+      if (!out.contains(sub)) out.add(sub);
+    }
+    return out;
   }
 
   /// 登记/刷新设备。同一物理设备可能同时跑着微密+LocalSend 两个 App，
@@ -673,10 +694,15 @@ class LanTransferService {
     try {
       decision = await ask().timeout(
           Duration(seconds: confirmTimeoutSecs()),
+          // 超时 = 用户没操作（框可能因窗口未恢复而没被看见），
+          // 只拒本条、不拉黑：拉黑会让后续请求也静默失败（v1.2.13）
           onTimeout: () =>
-              const IncomingDecision(accepted: false, batchDefault: true));
-    } catch (_) {
-      decision = const IncomingDecision(accepted: false, batchDefault: true);
+              const IncomingDecision(accepted: false, batchDefault: false));
+    } catch (e) {
+      // ask 抛异常（窗口恢复失败/对话框挂载失败等）= 系统侧问题，
+      // 同样只拒本条不拉黑，避免故障被放大成 2 分钟静默拒收
+      debugPrint('lan: confirm ask failed: $e');
+      decision = const IncomingDecision(accepted: false, batchDefault: false);
     }
     if (decision.batchDefault) {
       final until = DateTime.now().add(const Duration(minutes: 2));
@@ -810,13 +836,19 @@ class LanTransferService {
     }
   }
 
-  /// 走 UI 确认弹窗（仅前台未信任设备）
+  /// 走 UI 确认弹窗（仅前台未信任设备）。
+  /// UI 启动竞态（HTTP 服务已起、confirmHandler 尚未挂上）时短暂等待重试；
+  /// 最终仍拿不到 handler = 拒收但**不拉黑**——用户根本没被问到，
+  /// 不该顺带把该设备静默拒 2 分钟（v1.2.13：修复「有时不弹框、
+  /// 且随后 2 分钟内怎么发都失败」的报障）。
   Future<IncomingDecision> handlerAsk(IncomingRequest request) async {
-    final handler = confirmHandler;
-    if (handler == null) {
-      return const IncomingDecision(accepted: false, batchDefault: true);
+    for (var i = 0; i < 10; i++) {
+      final handler = confirmHandler;
+      if (handler != null) return handler(request);
+      await Future.delayed(const Duration(milliseconds: 300));
     }
-    return handler(request);
+    debugPrint('lan: confirmHandler missing after retries, reject (no blacklist)');
+    return const IncomingDecision(accepted: false, batchDefault: false);
   }
 
   Future<void> _handleIncomingText(HttpRequest req) async {
@@ -832,18 +864,12 @@ class LanTransferService {
 
     final accepted = await decideAccept(
       senderId: senderId,
-      ask: () async {
-        final handler = confirmHandler;
-        if (handler == null) {
-          return const IncomingDecision(accepted: false, batchDefault: true);
-        }
-        return handler(IncomingRequest(
-          senderId: senderId,
-          senderName: senderName,
-          fileName: '一条文本消息',
-          fileSize: req.contentLength,
-        ));
-      },
+      ask: () => handlerAsk(IncomingRequest(
+        senderId: senderId,
+        senderName: senderName,
+        fileName: '一条文本消息',
+        fileSize: req.contentLength,
+      )),
     );
     if (!accepted) {
       req.response.statusCode = HttpStatus.forbidden;
@@ -1249,6 +1275,9 @@ class LanTransferService {
       ok: true,
     ));
   }
+
+  /// 主动断开某个网页客户端（设备列表长按/右击菜单「断开连接」用，v1.2.13）
+  void removeWebPeer(WebPeer peer) => _removeWebPeer(peer);
 
   void _removeWebPeer(WebPeer? peer) {
     if (peer == null) return;

@@ -19,7 +19,8 @@ use std::sync::atomic::AtomicUsize;
 use std::sync::LazyLock;
 
 use crate::{
-    dir_mtime_ns, index_skip_dir, wildcard_match, INDEX_DIR_MTIMES, INDEX_EXCLUDES, INDEX_PATHS,
+    dir_mtime_ns, index_skip_dir, lock_or_recover, wildcard_match, INDEX_DIR_MTIMES,
+    INDEX_EXCLUDES, INDEX_PATHS,
 };
 
 // ==================== Win32 FFI（无 windows crate，手写 extern，同 usn.rs 风格） ====================
@@ -107,8 +108,8 @@ fn watch_root(root: String) {
         )
     };
     if (handle as isize) == INVALID_HANDLE_VALUE {
-        WATCH_OVERFLOWS.lock().unwrap().push(root.clone());
-        WATCHING.lock().unwrap().remove(&root);
+        lock_or_recover(&WATCH_OVERFLOWS).push(root.clone());
+        lock_or_recover(&WATCHING).remove(&root);
         return;
     }
     loop {
@@ -129,14 +130,14 @@ fn watch_root(root: String) {
         if ok == 0 || returned == 0 {
             // 监视失效（句柄被关/缓冲溢出等）：标记根溢出，退出线程，
             // Dart 全量重建后 index_watch_start 会重新拉起
-            WATCH_OVERFLOWS.lock().unwrap().push(root.clone());
+            lock_or_recover(&WATCH_OVERFLOWS).push(root.clone());
             break;
         }
         // 解析通知链
         let recs = &buf[..returned as usize];
         let mut offset = 0usize;
         {
-            let mut events = WATCH_EVENTS.lock().unwrap();
+            let mut events = lock_or_recover(&WATCH_EVENTS);
             while offset + NOTIFY_REC_HEADER_LEN <= recs.len() {
                 let rec = &recs[offset..];
                 let next = u32::from_ne_bytes([rec[0], rec[1], rec[2], rec[3]]) as usize;
@@ -170,7 +171,7 @@ fn watch_root(root: String) {
     unsafe {
         CloseHandle(handle);
     }
-    WATCHING.lock().unwrap().remove(&root);
+    lock_or_recover(&WATCHING).remove(&root);
 }
 
 /// 启动目录变更监视（每个根一个线程；重复调用幂等）
@@ -179,6 +180,7 @@ pub extern "C" fn index_watch_start(
     roots_ptr: *const *const c_char,
     num_roots: usize,
 ) -> i32 {
+    ffi_catch!({
     if roots_ptr.is_null() {
         return -1;
     }
@@ -196,7 +198,7 @@ pub extern "C" fn index_watch_start(
             } else {
                 format!("{}{}", s, sep)
             };
-            let mut watching = WATCHING.lock().unwrap();
+            let mut watching = lock_or_recover(&WATCHING);
             if watching.contains(&root) {
                 continue;
             }
@@ -211,12 +213,14 @@ pub extern "C" fn index_watch_start(
         }
     }
     started
+})
 }
 
 /// 取走并清空事件池（两段式：第一次 out_ptr 传 null 拿长度）。
 /// 格式：每行一条，'U' + 目录路径（增量合并）或 'O' + 根路径（需全量重建），'\n' 结尾。
 #[no_mangle]
 pub extern "C" fn index_watch_drain(out_ptr: *mut u8, out_len: *mut usize) -> i32 {
+    ffi_catch!({
     if out_len.is_null() {
         return -3;
     }
@@ -226,10 +230,10 @@ pub extern "C" fn index_watch_drain(out_ptr: *mut u8, out_len: *mut usize) -> i3
     unsafe {
         if out_ptr.is_null() {
             let mut total = 0usize;
-            for r in WATCH_OVERFLOWS.lock().unwrap().iter() {
+            for r in lock_or_recover(&WATCH_OVERFLOWS).iter() {
                 total += r.len() + 2;
             }
-            let ev = WATCH_EVENTS.lock().unwrap();
+            let ev = lock_or_recover(&WATCH_EVENTS);
             let mut seen: HashSet<&String> = ev.iter().collect();
             for d in seen.drain() {
                 total += d.len() + 2;
@@ -240,13 +244,13 @@ pub extern "C" fn index_watch_drain(out_ptr: *mut u8, out_len: *mut usize) -> i3
         }
     }
     let mut payload = String::new();
-    for r in WATCH_OVERFLOWS.lock().unwrap().drain(..) {
+    for r in lock_or_recover(&WATCH_OVERFLOWS).drain(..) {
         payload.push('O');
         payload.push_str(&r);
         payload.push('\n');
     }
     {
-        let mut ev = WATCH_EVENTS.lock().unwrap();
+        let mut ev = lock_or_recover(&WATCH_EVENTS);
         ev.sort();
         ev.dedup();
         for d in ev.drain(..) {
@@ -263,6 +267,7 @@ pub extern "C" fn index_watch_drain(out_ptr: *mut u8, out_len: *mut usize) -> i3
         *out_len = n;
     }
     0
+})
 }
 
 /// 单目录增量合并：移除该目录下的旧索引条目，非递归重扫该目录并入。
@@ -270,6 +275,7 @@ pub extern "C" fn index_watch_drain(out_ptr: *mut u8, out_len: *mut usize) -> i3
 /// 返回 0 成功；目录不存在/非目录 -2；被排除跳过 1。
 #[no_mangle]
 pub extern "C" fn index_update_dir(path_ptr: *const c_char) -> i32 {
+    ffi_catch!({
     if path_ptr.is_null() {
         return -1;
     }
@@ -288,7 +294,7 @@ pub extern "C" fn index_update_dir(path_ptr: *const c_char) -> i32 {
     // （其下文件路径才形如 ...\\temp\\x.txt 被排除）
     {
         let with_sep = format!("{}{}", lower_key, std::path::MAIN_SEPARATOR);
-        let ex = INDEX_EXCLUDES.lock().unwrap();
+        let ex = lock_or_recover(&INDEX_EXCLUDES);
         if let Some(list) = ex.as_ref() {
             if list.iter().any(|pat| {
                 wildcard_match(pat.as_bytes(), with_sep.as_bytes())
@@ -308,7 +314,7 @@ pub extern "C" fn index_update_dir(path_ptr: *const c_char) -> i32 {
     let sep = std::path::MAIN_SEPARATOR;
     let prefix = format!("{}{}", key, sep);
     {
-        let mut pg = INDEX_PATHS.lock().unwrap();
+        let mut pg = lock_or_recover(&INDEX_PATHS);
         if let Some(v) = pg.as_mut() {
             v.retain(|x| !x.starts_with(&prefix));
         }
@@ -340,7 +346,7 @@ pub extern "C" fn index_update_dir(path_ptr: *const c_char) -> i32 {
         }
     }
     {
-        let mut pg = INDEX_PATHS.lock().unwrap();
+        let mut pg = lock_or_recover(&INDEX_PATHS);
         if let Some(v) = pg.as_mut() {
             // 上限保护：超出 max_entries 就不再并入
             let room = MAX_ENTRIES.saturating_sub(v.len());
@@ -351,11 +357,12 @@ pub extern "C" fn index_update_dir(path_ptr: *const c_char) -> i32 {
 
     // 目录 mtime 刷新（保持 map 一致，供全量重建前的比对面）
     if let Some(mt) = dir_mtime_ns(&path) {
-        let mut dm = INDEX_DIR_MTIMES.lock().unwrap();
+        let mut dm = lock_or_recover(&INDEX_DIR_MTIMES);
         if let Some(m) = dm.as_mut() {
             m.insert(key, mt);
         }
     }
     WATCH_TOTAL.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     0
+})
 }

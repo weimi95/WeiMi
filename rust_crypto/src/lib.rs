@@ -12,6 +12,22 @@ use std::ffi::CStr;
 use std::os::raw::c_char;
 use rand::RngCore;
 
+/// FFI 边界 panic 兜底宏（v1.2.13）：extern "C" 里的任何 panic 会直接
+/// abort 宿主进程（Dart 侧表现为 UI 闪退、托盘残留）。索引链路全部入口
+/// 一律经此包裹：panic 时打印现场并返回类型默认值（i32→0、i64→0、()→()），
+/// 宿主把非零/零结果当错误码处理，绝不死进程。
+macro_rules! ffi_catch {
+    ($body:expr) => {
+        match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| $body)) {
+            Ok(v) => v,
+            Err(_) => {
+                eprintln!("rust_crypto: FFI panicked, degraded to default");
+                Default::default()
+            }
+        }
+    };
+}
+
 // NTFS USN Journal 实时文件索引（仅 Windows；其他平台无此模块，Dart 侧须 Platform.isWindows 守卫）
 #[cfg(windows)]
 mod usn;
@@ -983,8 +999,9 @@ pub extern "C" fn index_set_excludes(
     patterns_ptr: *const *const c_char,
     num_patterns: usize,
 ) -> i32 {
+    ffi_catch!({
     if patterns_ptr.is_null() || num_patterns == 0 {
-        *INDEX_EXCLUDES.lock().unwrap() = Some(Vec::new());
+        *lock_or_recover(&INDEX_EXCLUDES) = Some(Vec::new());
         return 0;
     }
     let mut out: Vec<String> = Vec::new();
@@ -997,8 +1014,9 @@ pub extern "C" fn index_set_excludes(
             }
         }
     }
-    *INDEX_EXCLUDES.lock().unwrap() = Some(out);
+    *lock_or_recover(&INDEX_EXCLUDES) = Some(out);
     0
+})
 }
 
 /// 取目录 mtime（纳秒），失败返回 None
@@ -1054,7 +1072,7 @@ pub(crate) fn scan_roots(roots: &[std::path::PathBuf]) -> (Vec<String>, HashMap<
                     break;
                 }
                 let dir = {
-                    let mut q = queue.lock().unwrap();
+                    let mut q = lock_or_recover(&queue);
                     match q.pop() {
                         Some(d) => {
                             busy.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -1098,7 +1116,7 @@ pub(crate) fn scan_roots(roots: &[std::path::PathBuf]) -> (Vec<String>, HashMap<
                             if index_skip_dir(&name) {
                                 continue;
                             }
-                            let mut q = queue.lock().unwrap();
+                            let mut q = lock_or_recover(&queue);
                             q.push(e.path());
                         } else {
                             if total.load(std::sync::atomic::Ordering::Relaxed) >= max_entries {
@@ -1107,7 +1125,7 @@ pub(crate) fn scan_roots(roots: &[std::path::PathBuf]) -> (Vec<String>, HashMap<
                                 local.push(e.path().to_string_lossy().to_string());
                                 if local.len() >= 4096 {
                                     let n = local.len();
-                                    paths.lock().unwrap().extend(local.drain(..));
+                                    lock_or_recover(&paths).extend(local.drain(..));
                                     total.fetch_add(n, std::sync::atomic::Ordering::Relaxed);
                                 }
                             }
@@ -1119,10 +1137,10 @@ pub(crate) fn scan_roots(roots: &[std::path::PathBuf]) -> (Vec<String>, HashMap<
             if !local.is_empty()
                 && total.load(std::sync::atomic::Ordering::Relaxed) < max_entries
             {
-                paths.lock().unwrap().extend(local);
+                lock_or_recover(&paths).extend(local);
             }
             {
-                let mut dm = dir_mtimes.lock().unwrap();
+                let mut dm = lock_or_recover(&dir_mtimes);
                 for (k, v) in local_dirs {
                     dm.insert(k, v);
                 }
@@ -1132,8 +1150,8 @@ pub(crate) fn scan_roots(roots: &[std::path::PathBuf]) -> (Vec<String>, HashMap<
     for h in handles {
         let _ = h.join();
     }
-    let final_paths = paths.lock().unwrap().clone();
-    let final_dirs = dir_mtimes.lock().unwrap().clone();
+    let final_paths = lock_or_recover(&paths).clone();
+    let final_dirs = lock_or_recover(&dir_mtimes).clone();
     (final_paths, final_dirs)
 }
 
@@ -1154,14 +1172,17 @@ pub(crate) fn index_skip_dir(name: &str) -> bool {
 /// 初始化空索引（USN 全量重建前调用：INDEX_PATHS 置空 Vec，usn_sync 往里填）
 #[no_mangle]
 pub extern "C" fn index_init() -> i32 {
+    ffi_catch!({
     *lock_or_recover(&INDEX_PATHS) = Some(Vec::new());
-    *INDEX_DIR_MTIMES.lock().unwrap() = Some(HashMap::new());
-    *INDEX_ROOTS.lock().unwrap() = Some(Vec::new());
+    *lock_or_recover(&INDEX_DIR_MTIMES) = Some(HashMap::new());
+    *lock_or_recover(&INDEX_ROOTS) = Some(Vec::new());
     0
+})
 }
 
 #[no_mangle]
 pub extern "C" fn index_build(roots_ptr: *const *const c_char, num_roots: usize) -> i64 {
+    ffi_catch!({
     let mut roots: Vec<std::path::PathBuf> = Vec::new();
     unsafe {
         if roots_ptr.is_null() {
@@ -1184,26 +1205,31 @@ pub extern "C" fn index_build(roots_ptr: *const *const c_char, num_roots: usize)
     let n = final_paths.len() as i64;
     *lock_or_recover(&INDEX_PATHS) = Some(final_paths);
     let root_strs: Vec<String> = roots.iter().map(|p| p.to_string_lossy().to_string()).collect();
-    *INDEX_DIR_MTIMES.lock().unwrap() = Some(final_dirs);
-    *INDEX_ROOTS.lock().unwrap() = Some(root_strs);
+    *lock_or_recover(&INDEX_DIR_MTIMES) = Some(final_dirs);
+    *lock_or_recover(&INDEX_ROOTS) = Some(root_strs);
     n
+})
 }
 
 #[no_mangle]
 pub extern "C" fn index_count() -> i64 {
+    ffi_catch!({
     match lock_or_recover(&INDEX_PATHS).as_ref() {
         Some(v) => v.len() as i64,
         None => -1,
     }
+})
 }
 
 /// 释放全盘索引内存（全部置回 None：路径 Vec + 目录 MTIMES 表 + 根列表）。
 /// 收托盘/隐藏窗口时调用，内存随 drop 归还；下次搜索前 rebuildIfStale 会重建。
 #[no_mangle]
 pub extern "C" fn index_free() {
+    ffi_catch!({
     *lock_or_recover(&INDEX_PATHS) = None;
-    *INDEX_DIR_MTIMES.lock().unwrap() = None;
-    *INDEX_ROOTS.lock().unwrap() = None;
+    *lock_or_recover(&INDEX_DIR_MTIMES) = None;
+    *lock_or_recover(&INDEX_ROOTS) = None;
+})
 }
 
 #[no_mangle]
@@ -1299,7 +1325,7 @@ fn index_search2_inner(
 /// 带 panic 兜底的互斥锁：Mutex 一旦被 poison，内部数据依然完好可用
 /// （ poison 只表示上次持锁时发生了 panic）。FFI 库里对 poison 锁再 unwrap
 /// 会造成连环 panic → abort 进程，统一走这里恢复。
-fn lock_or_recover<T>(m: &std::sync::Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+pub(crate) fn lock_or_recover<T>(m: &std::sync::Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     m.lock().unwrap_or_else(|e| e.into_inner())
 }
 
@@ -1312,6 +1338,7 @@ pub extern "C" fn index_sample(
     out_ptr: *mut u8,
     out_len: *mut usize,
 ) -> i32 {
+    ffi_catch!({
     if out_len.is_null() {
         return -3;
     }
@@ -1352,6 +1379,7 @@ pub extern "C" fn index_sample(
         }
     }
     0
+})
 }
 
 /// v1/v2 通用 body 写入：路径列表 + 各目录 mtime + 根列表。
@@ -1435,14 +1463,15 @@ fn parse_index_body<R: std::io::Read>(
 /// v1（旧版未压缩）仍可读，升级后下一次落盘自动变为 v2。
 #[no_mangle]
 pub extern "C" fn index_save(file_ptr: *const c_char) -> i32 {
+    ffi_catch!({
     let cpath = unsafe { CStr::from_ptr(file_ptr) };
     let path = cpath.to_string_lossy().to_string();
 
     // 先在内存里组 body（拿锁期间完成，不做 IO）
     let body = {
         let pg = lock_or_recover(&INDEX_PATHS);
-        let rg = INDEX_DIR_MTIMES.lock().unwrap();
-        let og = INDEX_ROOTS.lock().unwrap();
+        let rg = lock_or_recover(&INDEX_DIR_MTIMES);
+        let og = lock_or_recover(&INDEX_ROOTS);
         let paths = match pg.as_ref() {
             Some(p) => p,
             None => return -1,
@@ -1487,12 +1516,14 @@ pub extern "C" fn index_save(file_ptr: *const c_char) -> i32 {
         Ok(_) => 0,
         Err(_) => -3,
     }
+})
 }
 
 /// 从落盘文件恢复索引（成功返回 0）。
 /// 兼容 v1（未压缩）与 v2（deflate 压缩）。
 #[no_mangle]
 pub extern "C" fn index_load(file_ptr: *const c_char) -> i32 {
+    ffi_catch!({
     let cpath = unsafe { CStr::from_ptr(file_ptr) };
     let path = cpath.to_string_lossy().to_string();
     let f = match std::fs::File::open(&path) {
@@ -1544,9 +1575,10 @@ pub extern "C" fn index_load(file_ptr: *const c_char) -> i32 {
         _ => return -4,
     };
     *lock_or_recover(&INDEX_PATHS) = Some(paths);
-    *INDEX_DIR_MTIMES.lock().unwrap() = Some(rmt);
-    *INDEX_ROOTS.lock().unwrap() = Some(roots);
+    *lock_or_recover(&INDEX_DIR_MTIMES) = Some(rmt);
+    *lock_or_recover(&INDEX_ROOTS) = Some(roots);
     0
+})
 }
 
 /// 增量刷新：比对各根目录 mtime，未变跳过重扫，仅重扫变化的盘/目录。
@@ -1556,6 +1588,7 @@ pub extern "C" fn index_refresh(
     roots_ptr: *const *const c_char,
     num_roots: usize,
 ) -> i64 {
+    ffi_catch!({
     let mut roots: Vec<std::path::PathBuf> = Vec::new();
     unsafe {
         if roots_ptr.is_null() {
@@ -1584,7 +1617,7 @@ pub extern "C" fn index_refresh(
         let rkey = root.to_string_lossy().to_string();
         let cur = dir_mtime_ns(root);
         let prev = {
-            let rmt = INDEX_DIR_MTIMES.lock().unwrap();
+            let rmt = lock_or_recover(&INDEX_DIR_MTIMES);
             rmt.as_ref().and_then(|m| m.get(&rkey).copied())
         };
         let unchanged = root.exists() && prev.is_some() && cur == prev;
@@ -1598,7 +1631,7 @@ pub extern "C" fn index_refresh(
                 let prefix = format!("{}{}", rkey, sep);
                 v.retain(|p| p.as_str() != rkey.as_str() && !p.starts_with(prefix.as_str()));
             }
-            let mut rmt = INDEX_DIR_MTIMES.lock().unwrap();
+            let mut rmt = lock_or_recover(&INDEX_DIR_MTIMES);
             if let Some(m) = rmt.as_mut() {
                 let prefix = format!("{}{}", rkey, sep);
                 m.retain(|k, _| k.as_str() != rkey.as_str() && !k.starts_with(prefix.as_str()));
@@ -1613,7 +1646,7 @@ pub extern "C" fn index_refresh(
             }
         }
         {
-            let mut rmt = INDEX_DIR_MTIMES.lock().unwrap();
+            let mut rmt = lock_or_recover(&INDEX_DIR_MTIMES);
             if let Some(m) = rmt.as_mut() {
                 m.insert(rkey.clone(), cur.unwrap_or(0));
                 for (k, v) in local_dirs {
@@ -1627,4 +1660,5 @@ pub extern "C" fn index_refresh(
         Some(v) => v.len() as i64,
         None => -3,
     }
+})
 }

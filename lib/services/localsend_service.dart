@@ -589,18 +589,12 @@ class LocalSendService {
     final more = files.length > 3 ? ' 等 ${files.length} 个' : '';
     final accepted = await LanTransferService.instance.decideAccept(
       senderId: senderId,
-      ask: () async {
-        final handler = LanTransferService.instance.confirmHandler;
-        if (handler == null) {
-          return const IncomingDecision(accepted: false, batchDefault: true);
-        }
-        return handler(IncomingRequest(
-          senderId: senderId,
-          senderName: senderName,
-          fileName: '$names$more',
-          fileSize: totalSize,
-        ));
-      },
+      ask: () => LanTransferService.instance.handlerAsk(IncomingRequest(
+            senderId: senderId,
+            senderName: senderName,
+            fileName: '$names$more',
+            fileSize: totalSize,
+          )),
     );
     if (!accepted) {
       req.response.statusCode = HttpStatus.forbidden;

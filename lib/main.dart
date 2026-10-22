@@ -111,13 +111,24 @@ void main(List<String> args) async {
       // Android 全局接收确认：未信任设备发来弹窗（带超时倒计时）。
       // 桌面端在 initDesktop 挂同款；App 在后台时对话框等回到前台再渲染，
       // 超时由 _decideAccept 的 timeout 兜底自动拒收。
+      // ctx 未就绪（后台刚被拉起）只拒本条、不拉黑（batchDefault=false），
+      // 避免用户没被问到就连带 2 分钟静默拒后续（v1.2.13）
       LanTransferService.instance.confirmHandler = (req) async {
-        final ctx = ShareReceiveService.navigatorKey.currentContext;
-        if (ctx == null) {
-          return const IncomingDecision(accepted: false, batchDefault: true);
+        BuildContext? ctx;
+        for (var i = 0; i < 8; i++) {
+          final c = ShareReceiveService.navigatorKey.currentContext;
+          if (c != null && c.mounted) {
+            ctx = c;
+            break;
+          }
+          await Future.delayed(const Duration(milliseconds: 250));
         }
+        if (ctx == null) {
+          return const IncomingDecision(accepted: false, batchDefault: false);
+        }
+        final activeCtx = ctx!;
         final d = await showIncomingConfirmDialog(
-          ctx,
+          activeCtx,
           senderName: req.senderName,
           content: req.fileName,
           sizeBytes: req.fileSize,

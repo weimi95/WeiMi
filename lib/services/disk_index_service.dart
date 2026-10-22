@@ -728,7 +728,27 @@ class DiskIndexService {
         (SettingStore.get<bool>('search_pinyin', true) ? 1 : 0) | (statOn ? 2 : 0);
     final excludes = await ExcludeService.load();
     final eff = q;
-    final res = await Isolate.run(() => _searchSync(eff, limit, flags));
+    var res = await Isolate.run(() => _searchSync(eff, limit, flags));
+    // 空结果自愈（v1.2.13）：Dart 认为索引已就绪（isBuilt）但 Rust 侧
+    // INDEX_PATHS 可能已空——收托盘 releaseMemory 后 Dart 态未同步清、
+    // 或旧版落盘 0 条空索引被当就绪。核对 Rust 真实条数，不符则
+    // 加载/重建后重搜一次，避免「文件明明存在却搜不到」。
+    if (res.isEmpty) {
+      try {
+        final realCount = await count();
+        if (realCount <= 0) {
+          debugPrint('search: index not ready on Rust side, recovering…');
+          await loadRemovablePref();
+          final rc = await loadIndex();
+          if (!(rc == 0 && isBuilt)) {
+            await buildIndex(defaultRoots());
+          }
+          if (isBuilt) {
+            res = await Isolate.run(() => _searchSync(eff, limit, flags));
+          }
+        }
+      } catch (_) {}
+    }
     if (excludes.isEmpty || res.isEmpty) return res;
     return res
         .where((path) => !ExcludeService.isExcluded(path, excludes))

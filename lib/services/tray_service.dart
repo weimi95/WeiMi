@@ -11,6 +11,7 @@ import 'disk_index_service.dart';
 import 'daemon_service.dart';
 import 'lan_transfer_service.dart';
 import 'quick_search_window.dart';
+import 'receive_notify_service.dart';
 import 'share_receive_service.dart';
 import 'trusted_devices_service.dart';
 import 'vault_service.dart';
@@ -134,6 +135,11 @@ class TrayService {
       }
     }
 
+    // 全局接收确认：无论飞传页是否打开，非信任设备发来均弹窗提示（收托盘时也弹）。
+    // 必须在 applyDiscoverSetting 启动 HTTP 服务**之前**挂上——否则启动竞态期内
+    // 到达的未信任请求会拿到 null handler 被直接拒收（v1.2.13 修复）
+    LanTransferService.instance.confirmHandler = _globalConfirmRequest;
+
     // 主程序自身常驻跑微密飞传（替代原独立托盘进程的飞传）
     // 按设置决定是否广播发现（「可被发现」关闭时仍保留 HTTP 接收端口）
     await LanTransferService.instance.applyDiscoverSetting();
@@ -144,8 +150,6 @@ class TrayService {
     if (!_daemonMode) {
       await _initSystemTray();
     }
-    // 全局接收确认：无论飞传页是否打开，非信任设备发来均弹窗提示（收托盘时也弹）
-    LanTransferService.instance.confirmHandler = _globalConfirmRequest;
 
     // 全盘索引定时刷新（目录遍历方案A，已验证可靠）：每 30s 检查一次，
     // 距上次全量构建超过 5 分钟才重建（rebuildIfStale 内部节流 + _building 防重入）。
@@ -369,28 +373,95 @@ String _fmtSize(int bytes) {
 }
 
 /// 全局接收确认弹窗：非信任设备发来文件/文本时由 LanTransferService 调用。
-/// 弹窗前先恢复主窗口（收托盘隐藏时也能看到），信任设备已在 _decideAccept 直收、不会到这里。
+/// v1.2.13 加固（修复「未信任时有时不弹框、且随后 2 分钟内全失败」）：
+/// - 全程容错：openMainWindow / showDialog 任何异常都不向上抛——
+///   旧实现异常会被 _askOnce 吞成「拒收 + 拉黑 2 分钟」，把一次窗口抖动
+///   放大成持续失败
+/// - ctx（navigatorKey）未就绪时短暂重试：UI 启动中/窗口恢复中都可能取空
+/// - showDialog 失败重试一次；最终失败 → 拒收但**不拉黑**，并发通知/ SnackBar
+///   让用户知道「框没弹出来」，而不是无声拒收
 Future<IncomingDecision> _globalConfirmRequest(IncomingRequest req) async {
-  await TrayService.instance.openMainWindow();
-  final ctx = ShareReceiveService.navigatorKey.currentContext;
-  if (ctx == null) {
-    return const IncomingDecision(accepted: false, batchDefault: true);
+  // 先尽量恢复主窗口（收托盘/后台时让用户看见框）；失败不阻断后续
+  try {
+    await TrayService.instance.openMainWindow();
+  } catch (e) {
+    debugPrint('confirm: openMainWindow failed: $e');
   }
-  final d = await showIncomingConfirmDialog(
-    ctx,
-    senderName: req.senderName,
-    content: req.fileName,
-    sizeBytes: req.fileSize,
-    isText: req.fileName == '一条文本消息',
-    countdownSec: LanTransferService.confirmTimeoutSecs(),
-    verifCode: req.verifCode,
-    trustable: req.trustable,
-  );
+  // 窗口恢复后取 ctx（恢复过程可能重建挂载点，最多等 1.5s）
+  BuildContext? ctx;
+  for (var i = 0; i < 6; i++) {
+    final c = ShareReceiveService.navigatorKey.currentContext;
+    if (c != null && c.mounted) {
+      ctx = c;
+      break;
+    }
+    await Future.delayed(const Duration(milliseconds: 250));
+  }
+  if (ctx == null) {
+    debugPrint('confirm: no navigator context after retries');
+    _notifyConfirmFailed(req);
+    return const IncomingDecision(accepted: false, batchDefault: false);
+  }
+  IncomingDecision d;
+  try {
+    d = await showIncomingConfirmDialog(
+      ctx,
+      senderName: req.senderName,
+      content: req.fileName,
+      sizeBytes: req.fileSize,
+      isText: req.fileName == '一条文本消息',
+      countdownSec: LanTransferService.confirmTimeoutSecs(),
+      verifCode: req.verifCode,
+      trustable: req.trustable,
+    );
+  } catch (e) {
+    debugPrint('confirm: showDialog failed: $e');
+    // 挂载抖动：等 300ms 重试一次
+    try {
+      await Future.delayed(const Duration(milliseconds: 300));
+      final c = ShareReceiveService.navigatorKey.currentContext;
+      if (c == null || !c.mounted) {
+        _notifyConfirmFailed(req);
+        return const IncomingDecision(accepted: false, batchDefault: false);
+      }
+      d = await showIncomingConfirmDialog(
+        c,
+        senderName: req.senderName,
+        content: req.fileName,
+        sizeBytes: req.fileSize,
+        isText: req.fileName == '一条文本消息',
+        countdownSec: LanTransferService.confirmTimeoutSecs(),
+        verifCode: req.verifCode,
+        trustable: req.trustable,
+      );
+    } catch (e2) {
+      debugPrint('confirm: showDialog retry failed: $e2');
+      _notifyConfirmFailed(req);
+      return const IncomingDecision(accepted: false, batchDefault: false);
+    }
+  }
   // 勾选信任 → 按设备 ID 持久化（LANDrop 为 secp256k1 公钥 base64）
   if (d.accepted && d.trust && req.trustable && req.senderId.isNotEmpty) {
     await TrustedDevices.instance.add(req.senderId, req.senderName);
   }
   return d;
+}
+
+/// 确认框无法显示时给用户可见反馈（否则电脑端无声拒收，用户无从判断）
+void _notifyConfirmFailed(IncomingRequest req) {
+  try {
+    ReceiveNotifyService.instance.rejected(req.fileName, req.senderName);
+  } catch (_) {}
+  try {
+    final ctx = ShareReceiveService.navigatorKey.currentContext;
+    if (ctx != null && ctx.mounted) {
+      ScaffoldMessenger.of(ctx).showSnackBar(const SnackBar(
+        content: Text('确认框未能显示，本次请求已拒收；请让对方重新发送'),
+        backgroundColor: Colors.orange,
+        duration: Duration(seconds: 6),
+      ));
+    }
+  } catch (_) {}
 }
 
 /// 未信任设备请求确认框（PC UI 态 / 手机端 / 守护进程拉起 UI 三路共用）。
@@ -602,7 +673,17 @@ Future<void> _checkDaemonPending() async {
   try {
     final pending = await DaemonService.fetchPending();
     if (pending.isEmpty) return;
-    final ctx = ShareReceiveService.navigatorKey.currentContext;
+    // ctx 未就绪（UI 刚拉起、挂载中）时短暂重试，别把 daemon 挂着的待确认
+    // 请求直接丢给 30s 超时自动拒（v1.2.13）
+    BuildContext? ctx;
+    for (var i = 0; i < 12; i++) {
+      final c = ShareReceiveService.navigatorKey.currentContext;
+      if (c != null && c.mounted) {
+        ctx = c;
+        break;
+      }
+      await Future.delayed(const Duration(milliseconds: 250));
+    }
     if (ctx == null) return;
     for (final j in pending) {
       final token = j['token'] as String?;

@@ -151,7 +151,8 @@ class LandropService {
     if (_running) return;
     if (!enabled) return;
     await _ensureIdentity();
-    unawaited(refreshSelfIps());
+    // 先同步拿到本机 IP 列表再 announce：定向广播目标依赖它（v1.2.13）
+    await refreshSelfIps();
     _running = true;
     await _startDiscovery();
     await _startServer();
@@ -383,6 +384,23 @@ class LandropService {
     } catch (_) {}
   }
 
+  /// 本机各私网 IPv4 推算的 /24 定向广播地址（与微密 announce 共用
+  /// [LanTransferService.directedBroadcastIps]：LANDrop 桌面端只往逐网卡
+  /// 定向广播 + 组播发发现包，从不发 255.255.255.255——多网卡机器上
+  /// 255.255.255.255 的出口由系统选，经常到不了对方网段。
+  /// v1.2.13：「电脑端发现不了其他电脑上的 LANDrop、手机端却可以」的
+  /// 根因（手机单网卡，255.255.255.255 必中）。
+  Future<List<InternetAddress>> _directedBroadcastTargets() async {
+    final out = <InternetAddress>[];
+    for (final s in await LanTransferService.directedBroadcastIps(_selfIpsCache)) {
+      try {
+        final ia = InternetAddress(s);
+        if (!out.contains(ia)) out.add(ia);
+      } catch (_) {}
+    }
+    return out;
+  }
+
   /// 周期广播：组播 + 广播双发 announce 保活（LANDrop 设备 20s 过期），
   /// 同时发 request 查询包——对方（含真 LANDrop）收到即单播应答，
   /// 覆盖「对方先启动/同机端口被占」场景。
@@ -392,15 +410,20 @@ class LandropService {
   /// 而单播通路往往是通的（我方 query→对方单播应答已证明双向单播可用）。
   /// 手机 LANDrop 是被动设计（不主动 query），只靠组播/广播永远发现
   /// 不了我们——此单播补发让「PC→手机」方向也稳定可达。
+  ///
+  /// v1.2.13：发送目标再加**逐网卡定向广播**（对齐 LANDrop 原生行为），
+  /// 且每轮重加组播成员（虚拟网卡/VPN 后启动时启动时那次 join 覆盖不到）。
   void _announce() {
     final sock = _udpSocket;
     if (sock == null || !_running) return;
+    unawaited(_joinMulticast(sock));
     final announce =
         utf8.encode(json.encode(_discoveryPacket(request: false)));
     final query = utf8.encode(json.encode(_discoveryPacket(request: true)));
     final targets = <InternetAddress>[
       InternetAddress(multicastGroup),
       InternetAddress('255.255.255.255'),
+      ..._directedBroadcastTargets(),
     ];
     for (final d in _devices.values) {
       try {
@@ -497,22 +520,16 @@ class LandropService {
     } else {
       decision = await LanTransferService.instance.decideAcceptDecision(
         senderId: pk,
-        ask: () async {
-          final handler = LanTransferService.instance.confirmHandler;
-          if (handler == null) {
-            return const IncomingDecision(accepted: false, batchDefault: true);
-          }
-          return handler(IncomingRequest(
-            senderId: pk,
-            senderName: senderName,
-            fileName: files.length == 1
-                ? _safeName((first['filename'] as String?) ?? '未命名文件')
-                : '${files.length} 个文件',
-            fileSize: totalSize,
-            trustable: true,
-            verifCode: session.verifCode,
-          ));
-        },
+        ask: () => LanTransferService.instance.handlerAsk(IncomingRequest(
+              senderId: pk,
+              senderName: senderName,
+              fileName: files.length == 1
+                  ? _safeName((first['filename'] as String?) ?? '未命名文件')
+                  : '${files.length} 个文件',
+              fileSize: totalSize,
+              trustable: true,
+              verifCode: session.verifCode,
+            )),
       );
       // 勾选信任 → 按身份公钥持久化
       if (decision.accepted && decision.trust) {

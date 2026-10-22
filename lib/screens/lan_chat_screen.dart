@@ -5,6 +5,8 @@ import 'dart:typed_data';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:file_picker/file_picker.dart';
+import 'package:desktop_drop/desktop_drop.dart';
+import 'package:cross_file/cross_file.dart';
 import 'package:path/path.dart' as p;
 import '../framework/setting_store.dart';
 import '../services/lan_transfer_service.dart';
@@ -47,6 +49,11 @@ class _LanChatScreenState extends State<LanChatScreen> {
   bool _searching = false;
   final TextEditingController _searchCtl = TextEditingController();
 
+  /// 消息列表滚动控制（微信式：最新消息贴底部，新消息自动滚到底）
+  final ScrollController _scrollCtl = ScrollController();
+  bool _firstLoad = true;
+  bool _dragging = false; // 桌面端文件拖入悬停中（高亮提示层）
+
   // 发送进度速度统计（进度对话框用）
   DateTime _progLastT = DateTime.now();
   int _progLastSent = 0;
@@ -80,8 +87,25 @@ class _LanChatScreenState extends State<LanChatScreen> {
     _timer?.cancel();
     _textCtl.dispose();
     _searchCtl.dispose();
+    _scrollCtl.dispose();
     _prog.dispose();
     super.dispose();
+  }
+
+  /// 滚到消息底部（最新一条）。仅在「本就贴近底部」或首次加载时自动滚，
+  /// 不打断用户往上翻历史。700ms 轮询刷新同理。
+  void _scrollToBottom({bool force = false}) {
+    if (!_scrollCtl.hasClients) return;
+    final pos = _scrollCtl.position;
+    final atBottom = pos.pixels >= pos.maxScrollExtent - 60;
+    if (!force && !atBottom) return;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!_scrollCtl.hasClients) return;
+      final target = _scrollCtl.position.maxScrollExtent;
+      if (target <= 0) return;
+      _scrollCtl.animateTo(target,
+          duration: const Duration(milliseconds: 150), curve: Curves.easeOut);
+    });
   }
 
   /// 按会话 key 找活设备。必须走 LandropService.mergeInto 合并口径——
@@ -119,6 +143,8 @@ class _LanChatScreenState extends State<LanChatScreen> {
     }
     if (!_online) _flushTried = false;
     setState(() {});
+    _scrollToBottom(force: _firstLoad);
+    _firstLoad = false;
   }
 
   LandropDevice _toDev(LanPeer p) => LandropDevice(
@@ -148,15 +174,114 @@ class _LanChatScreenState extends State<LanChatScreen> {
     final files =
         res.files.where((f) => f.path != null).map((f) => f.path!).toList();
     if (files.isEmpty) return;
+    await _sendPaths(files);
+  }
+
+  /// 桌面端拖入发送：资源管理器拖文件/文件夹进聊天窗，松手即发
+  /// （离线自动转待发送队列，与附件按钮同一链路）。
+  Future<void> _onDropFiles(List<XFile> files) async {
+    if (_sending) return;
+    final paths =
+        files.where((f) => f.path.isNotEmpty).map((f) => f.path!).toList();
+    if (paths.isEmpty) return;
+    await _sendPaths(paths);
+  }
+
+  /// 发送一组路径（文件/文件夹混合）：展开目录保留层级 → 在线直发 / 离线排队。
+  Future<void> _sendPaths(List<String> paths) async {
+    final entries = await _expandEntries(paths);
+    if (entries.isEmpty || !mounted) return;
+    final hasDir = entries.any((e) => e.isDir);
     if (!_online) {
       if (!_presend) {
         _snack('设备离线，无法发送（可在 设置-微密飞传 开启「离线预发送」）');
         return;
       }
-      await _enqueueFiles(files);
+      if (hasDir) {
+        _snack('文件夹暂不支持离线排队，请设备在线时发送', error: true);
+        return;
+      }
+      await _enqueueFiles(entries.map((e) => e.absPath).toList());
       return;
     }
-    await _sendFiles(files);
+    await _sendEntries(entries);
+  }
+
+  /// 展开待发送条目：文件原样；目录递归收文件，relativeName 保留相对层级
+  /// （LANDrop filename 支持 '/'；微密协议 sendFile 有 relativeName 参数）。
+  Future<List<_SendEntry>> _expandEntries(List<String> paths) async {
+    final out = <_SendEntry>[];
+    for (final path in paths) {
+      bool isDir = false;
+      try {
+        isDir = FileSystemEntity.isDirectorySync(path);
+      } catch (_) {}
+      if (!isDir) {
+        if (File(path).existsSync()) {
+          out.add(_SendEntry(absPath: path, relativeName: p.basename(path)));
+        }
+        continue;
+      }
+      final base = p.basename(path);
+      try {
+        await for (final e in Directory(path).list(recursive: true)) {
+          if (e is File) {
+            out.add(_SendEntry(
+              absPath: e.path,
+              relativeName: '$base/${p.relative(e.path, from: path)}',
+              isDir: true,
+            ));
+          }
+        }
+      } catch (_) {}
+    }
+    return out;
+  }
+
+  Future<void> _sendEntries(List<_SendEntry> entries) async {
+    final peer = _livePeer;
+    if (peer == null || _sending) return;
+    setState(() => _sending = true);
+    try {
+      if (peer.isLandrop) {
+        final dev = _toDev(peer);
+        _resetProgStats();
+        if (!mounted) return;
+        _showProg('准备发送…');
+        final result = await LandropService.instance.sendFilesToDevice(
+          dev,
+          entries
+              .map((e) =>
+                  LandropSendFile(path: e.absPath, filename: e.relativeName))
+              .toList(),
+          onVerifCode: (code) => _progVc = code,
+          onProgress: (cur, sent, total) => _onSendProgress(sent, total),
+        );
+        _hideProg();
+        _snack(result.ok ? '已发送 ${entries.length} 个项目' : '发送失败：${result.error}');
+      } else {
+        for (final e in entries) {
+          _resetProgStats();
+          if (!mounted) return;
+          _showProg('准备发送 ${p.basename(e.absPath)}…');
+          final ok = await LanTransferService.instance.sendFile(
+            peer: peer,
+            filePath: e.absPath,
+            relativeName: e.relativeName,
+            onProgress: (sent, total) => _onSendProgress(sent, total),
+          );
+          _hideProg();
+          _snack(ok ? '已发送 ${e.relativeName}' : '发送失败：${e.relativeName}',
+              error: !ok);
+          if (!ok) break;
+        }
+      }
+    } catch (e) {
+      _hideProg();
+      _snack('发送出错：$e', error: true);
+    } finally {
+      if (mounted) setState(() => _sending = false);
+    }
   }
 
   /// 离线入队：文件
@@ -185,53 +310,6 @@ class _LanChatScreenState extends State<LanChatScreen> {
     ));
     _snack(ok ? '设备离线，已加入待发送队列，上线后自动发出' : '加入待发送队列失败', error: !ok);
     _load();
-  }
-
-  Future<void> _sendFiles(List<String> paths) async {
-    if (_livePeer == null) return;
-    await _sendFilesTo(_livePeer!, paths);
-  }
-
-  Future<void> _sendFilesTo(LanPeer peer, List<String> paths) async {
-    if (_sending) return;
-    setState(() => _sending = true);
-    try {
-      if (peer.isLandrop) {
-        final dev = _toDev(peer);
-        _resetProgStats();
-        if (!mounted) return;
-        _showProg('准备发送…');
-        final result = await LandropService.instance.sendFilesToDevice(
-          dev,
-          paths
-              .map((fp) => LandropSendFile(path: fp, filename: p.basename(fp)))
-              .toList(),
-          onVerifCode: (code) => _progVc = code,
-          onProgress: (cur, sent, total) => _onSendProgress(sent, total),
-        );
-        _hideProg();
-        _snack(result.ok ? '已发送' : '发送失败：${result.error}');
-      } else {
-        for (final path in paths) {
-          _resetProgStats();
-          if (!mounted) return;
-          _showProg('准备发送 ${p.basename(path)}…');
-          final ok = await LanTransferService.instance.sendFile(
-            peer: peer,
-            filePath: path,
-            onProgress: (sent, total) => _onSendProgress(sent, total),
-          );
-          _hideProg();
-          _snack(ok ? '已发送 ${p.basename(path)}' : '发送失败：${p.basename(path)}',
-              error: !ok);
-        }
-      }
-    } catch (e) {
-      _hideProg();
-      _snack('发送出错：$e', error: true);
-    } finally {
-      if (mounted) setState(() => _sending = false);
-    }
   }
 
   Future<void> _sendText() async {
@@ -435,7 +513,9 @@ class _LanChatScreenState extends State<LanChatScreen> {
         _snack('原文件不存在，无法转发', error: true);
         return;
       }
-      await _sendFilesTo(picked, [r.path!]);
+      await _sendEntries([
+        _SendEntry(absPath: r.path!, relativeName: p.basename(r.path!))
+      ]);
     }
   }
 
@@ -500,15 +580,17 @@ class _LanChatScreenState extends State<LanChatScreen> {
         ),
       );
     } else {
-      final items = _buildChatItems(filtered, !_selecting);
-      // 待发送队列气泡排在最新位置（列表 reverse 后 items 末尾 = 最新）
-      items.addAll(_pending.map((s) => _PendingItem(s)));
+      // 微信式布局：时间正序（旧→新），最新消息贴输入框。
+      // _records/_pending 均「最新在前」存储，展示前反转；堆叠分组按正序
+      // 连续同方向文件合成一个气泡（展开列表内也是先发的在上）。
+      final items = _buildChatItems(filtered.reversed.toList(), !_selecting);
+      items.addAll(_pending.reversed.map((s) => _PendingItem(s)));
       list = ListView.builder(
-        reverse: true,
+        controller: _scrollCtl,
         padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
         itemCount: items.length,
         itemBuilder: (ctx, i) {
-          final it = items[items.length - 1 - i];
+          final it = items[i];
           if (it is _PendingItem) {
             return _PendingBubble(
               item: it.s,
@@ -558,6 +640,7 @@ class _LanChatScreenState extends State<LanChatScreen> {
           ),
         Expanded(child: list),
         _Composer(
+          isDesktop: _isDesktop,
           online: _online,
           presend: _presend,
           sending: _sending,
@@ -569,8 +652,94 @@ class _LanChatScreenState extends State<LanChatScreen> {
       ],
     );
 
-    if (!widget.standalone) return body;
+    // 桌面端：整个聊天区接受文件拖入（松手即发，离线自动排队）
+    final content = _isDesktop
+        ? _wrapBody(DropTarget(
+            onDragEntered: (_) => setState(() => _dragging = true),
+            onDragExited: (_) => setState(() => _dragging = false),
+            onDragDone: (d) {
+              setState(() => _dragging = false);
+              _onDropFiles(d.files);
+            },
+            child: body,
+          ))
+        : _wrapBody(body);
+
+    if (!widget.standalone) return content;
     return Scaffold(
+      appBar: AppBar(
+        title: Text(widget.displayName),
+        actions: [
+          if (!_selecting && !_searching) ...[
+            IconButton(
+              icon: const Icon(Icons.search),
+              tooltip: '搜索',
+              onPressed: () => setState(() => _searching = true),
+            ),
+            IconButton(
+              icon: const Icon(Icons.checklist),
+              tooltip: '多选',
+              onPressed: () => setState(() => _selecting = true),
+            ),
+          ],
+          Container(
+            margin: const EdgeInsets.only(right: 12),
+            padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+            decoration: BoxDecoration(
+              color: _online ? Colors.green : Colors.grey,
+              borderRadius: BorderRadius.circular(10),
+            ),
+            child: Text(
+              _online ? '在线' : '离线',
+              style: const TextStyle(color: Colors.white, fontSize: 12),
+            ),
+          ),
+        ],
+      ),
+      body: content,
+    );
+  }
+
+  Widget _wrapBody(Widget inner) {
+    if (!_dragging) return inner;
+    return Stack(
+      children: [
+        inner,
+        Positioned.fill(
+          child: IgnorePointer(
+            child: Container(
+              margin: const EdgeInsets.all(8),
+              decoration: BoxDecoration(
+                color: Theme.of(context).colorScheme.primary.withAlpha(24),
+                borderRadius: BorderRadius.circular(12),
+                border: Border.all(
+                    color: Theme.of(context).colorScheme.primary, width: 2),
+              ),
+              child: Center(
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Icon(Icons.move_to_inbox,
+                        size: 40,
+                        color: Theme.of(context).colorScheme.primary),
+                    const SizedBox(height: 8),
+                    Text(
+                      '松手发送到 ${widget.displayName}',
+                      style: TextStyle(
+                          color: Theme.of(context).colorScheme.primary,
+                          fontWeight: FontWeight.bold),
+                    ),
+                    const Text('离线设备将自动加入待发送队列',
+                        style: TextStyle(fontSize: 12)),
+                  ],
+                ),
+              ),
+            ),
+          ),
+        ),
+      ],
+    );
+  }
       appBar: AppBar(
         title: Text(widget.displayName),
         actions: [
@@ -822,7 +991,8 @@ class _ChatThumb extends StatelessWidget {
   }
 }
 
-class _Composer extends StatelessWidget {
+class _Composer extends StatefulWidget {
+  final bool isDesktop;
   final bool online;
   final bool presend; // 离线预发送开关（offline && !presend → 只读灰条）
   final bool sending;
@@ -831,6 +1001,7 @@ class _Composer extends StatelessWidget {
   final VoidCallback onPick;
   final VoidCallback? onPaste; // 桌面端粘贴发送（null=不显示按钮）
   const _Composer({
+    required this.isDesktop,
     required this.online,
     this.presend = true,
     required this.sending,
@@ -841,8 +1012,37 @@ class _Composer extends StatelessWidget {
   });
 
   @override
+  State<_Composer> createState() => _ComposerState();
+}
+
+class _ComposerState extends State<_Composer> {
+  final FocusNode _focus = FocusNode(debugLabel: 'chat-composer');
+
+  @override
+  void dispose() {
+    _focus.dispose();
+    super.dispose();
+  }
+
+  /// 桌面端键盘策略（对齐微信 PC 版）：Enter 发送、Shift+Enter 换行。
+  /// Flutter 多行 TextField 的 Enter 默认插换行，必须在此拦截才兑现
+  /// 「回车发送」；发送中吞掉 Enter 防重复发送。
+  KeyEventResult _onKey(FocusNode node, KeyEvent event) {
+    if (event is! KeyDownEvent) return KeyEventResult.ignored;
+    final isEnter = event.logicalKey == LogicalKeyboardKey.enter ||
+        event.logicalKey == LogicalKeyboardKey.numpadEnter;
+    if (!isEnter) return KeyEventResult.ignored;
+    if (HardwareKeyboard.instance.isShiftPressed) {
+      return KeyEventResult.ignored; // Shift+Enter 换行
+    }
+    if (widget.sending) return KeyEventResult.handled;
+    widget.onSendText();
+    return KeyEventResult.handled;
+  }
+
+  @override
   Widget build(BuildContext context) {
-    if (!online && !presend) {
+    if (!widget.online && !widget.presend) {
       return Container(
         padding: const EdgeInsets.all(14),
         color: Colors.grey.shade100,
@@ -856,7 +1056,7 @@ class _Composer extends StatelessWidget {
     return Column(
       mainAxisSize: MainAxisSize.min,
       children: [
-        if (!online)
+        if (!widget.online)
           Container(
             padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
             color: Colors.orange.shade50,
@@ -884,43 +1084,54 @@ class _Composer extends StatelessWidget {
             children: [
               IconButton(
                 icon: const Icon(Icons.attach_file),
-                tooltip: online ? '发送文件/文件夹' : '选择要排队的文件',
-                onPressed: sending ? null : onPick,
+                tooltip: widget.online ? '发送文件/文件夹' : '选择要排队的文件',
+                onPressed: widget.sending ? null : widget.onPick,
               ),
-              if (onPaste != null && online)
+              if (widget.onPaste != null && widget.online)
                 IconButton(
                   icon: const Icon(Icons.content_paste),
                   tooltip: '粘贴并发送剪贴板文本',
-                  onPressed: sending ? null : onPaste,
+                  onPressed: widget.sending ? null : widget.onPaste,
                 ),
               Expanded(
                 child: TextField(
-                  controller: controller,
+                  controller: widget.controller,
+                  focusNode: _focus,
+                  onKeyEvent: _onKey,
                   minLines: 1,
-                  maxLines: 4,
+                  // 桌面：最多 4 行（Shift+Enter 换行）；手机：单行 + 动作键发送
+                  maxLines: widget.isDesktop ? 4 : 1,
+                  textInputAction:
+                      widget.isDesktop ? null : TextInputAction.send,
+                  onSubmitted:
+                      widget.isDesktop ? null : (_) => widget.onSendText(),
                   decoration: InputDecoration(
-                    hintText:
-                        online ? '输入文本，回车发送' : '输入文本，发送后排队待设备上线',
+                    hintText: widget.isDesktop
+                        ? 'Enter 发送 · Shift+Enter 换行'
+                        : '输入文本…',
                     border: const OutlineInputBorder(),
                     isCollapsed: true,
                     contentPadding: const EdgeInsets.symmetric(
                         horizontal: 12, vertical: 10),
                   ),
-                  onSubmitted: (_) => onSendText(),
                 ),
               ),
-              const SizedBox(width: 6),
-              IconButton(
-                icon: sending
-                    ? const SizedBox(
-                        width: 18,
-                        height: 18,
-                        child: CircularProgressIndicator(strokeWidth: 2),
-                      )
-                    : Icon(online ? Icons.send : Icons.schedule_send),
-                tooltip: online ? '发送' : '加入待发送队列',
-                onPressed: sending ? null : onSendText,
-              ),
+              // 桌面端发送入口 = Enter / 拖拽（右下角按钮冗余，v1.2.13 去掉）；
+              // 手机无物理键盘，保留发送/排队按钮。
+              if (!widget.isDesktop) ...[
+                const SizedBox(width: 6),
+                IconButton(
+                  icon: widget.sending
+                      ? const SizedBox(
+                          width: 18,
+                          height: 18,
+                          child: CircularProgressIndicator(strokeWidth: 2),
+                        )
+                      : Icon(widget.online ? Icons.send : Icons.schedule_send),
+                  tooltip: widget.online ? '发送' : '加入待发送队列',
+                  onPressed: widget.sending ? null : widget.onSendText,
+                ),
+              ],
             ],
           ),
         ),
@@ -1214,4 +1425,13 @@ class _SelectionBar extends StatelessWidget {
           ],
         ),
       );
+}
+
+/// 待发送条目：绝对路径 + 展示/传输用名（目录展开后带相对层级）。
+class _SendEntry {
+  final String absPath;
+  final String relativeName;
+  final bool isDir; // 是否由目录展开而来（离线排队拒收目录时提示用）
+  const _SendEntry(
+      {required this.absPath, required this.relativeName, this.isDir = false});
 }

@@ -26,7 +26,7 @@ use std::os::windows::ffi::{OsStrExt, OsStringExt};
 use std::path::PathBuf;
 use std::ptr::null_mut;
 
-use crate::{scan_roots, INDEX_PATHS};
+use crate::{lock_or_recover, scan_roots, INDEX_PATHS};
 
 /// 目录 FRN 表：(盘符, FRN) → (父 FRN, 目录名)
 /// key 带盘符：FRN 仅卷内唯一，跨卷必须靠盘符区分。
@@ -684,9 +684,9 @@ fn sync_volume(root: &str, full_rebuild: bool) -> VolumeSync {
     };
     let jd_ref: &UsnJournalData = jd_opt.as_ref().unwrap_or(&fake_jd);
     let prefix = root_prefix(root);
-    let mut state = USN_STATE.lock().unwrap();
+    let mut state = lock_or_recover(&USN_STATE);
     let st = state.get_or_insert_with(UsnState::new);
-    let mut pg = INDEX_PATHS.lock().unwrap();
+    let mut pg = lock_or_recover(&INDEX_PATHS);
     let paths = match pg.as_mut() {
         Some(v) => v,
         None => {
@@ -776,7 +776,7 @@ fn fallback_scan(root: &str) {
         return;
     }
     let (local_paths, _dirs) = scan_roots(&[path]);
-    let mut pg = INDEX_PATHS.lock().unwrap();
+    let mut pg = lock_or_recover(&INDEX_PATHS);
     if let Some(v) = pg.as_mut() {
         v.extend(local_paths);
     }
@@ -789,6 +789,7 @@ fn fallback_scan(root: &str) {
 /// 索引未建立（未 build/load）返回 -3。
 #[no_mangle]
 pub extern "C" fn usn_sync(roots_ptr: *const *const c_char, num_roots: usize) -> i64 {
+    ffi_catch!({
     let mut roots: Vec<String> = Vec::new();
     unsafe {
         if roots_ptr.is_null() {
@@ -807,18 +808,18 @@ pub extern "C" fn usn_sync(roots_ptr: *const *const c_char, num_roots: usize) ->
         return -2;
     }
     {
-        let g = INDEX_PATHS.lock().unwrap();
+        let g = lock_or_recover(&INDEX_PATHS);
         if g.is_none() {
             return -3;
         }
     }
     // 确保 USN 状态已初始化
     {
-        let mut st = USN_STATE.lock().unwrap();
+        let mut st = lock_or_recover(&USN_STATE);
         st.get_or_insert_with(UsnState::new);
     }
     // 待合并 rename 每次 sync 重新配对
-    PENDING_RENAMES.lock().unwrap().clear();
+    lock_or_recover(&PENDING_RENAMES).clear();
 
     for root in &roots {
         let drive = match drive_letter(root) {
@@ -833,24 +834,27 @@ pub extern "C" fn usn_sync(roots_ptr: *const *const c_char, num_roots: usize) ->
             fallback_scan(root);
         }
     }
-    let g = INDEX_PATHS.lock().unwrap();
+    let g = lock_or_recover(&INDEX_PATHS);
     match g.as_ref() {
         Some(v) => v.len() as i64,
         None => -3,
     }
+})
 }
 
 /// 全量 USN 重建（journal 变化/索引文件损坏时紧接 index_build 调用）
 #[no_mangle]
 pub extern "C" fn usn_rebuild(roots_ptr: *const *const c_char, num_roots: usize) -> i64 {
+    ffi_catch!({
     // 先清空旧卷状态，强制每卷走 enum_full 全量
     {
-        let mut st = USN_STATE.lock().unwrap();
+        let mut st = lock_or_recover(&USN_STATE);
         if let Some(s) = st.as_mut() {
             s.volumes.clear();
         }
     }
     usn_sync(roots_ptr, num_roots)
+})
 }
 
 const USN_MAGIC: [u8; 4] = [0x57, 0x4d, 0x55, 0x53]; // "WMUS"
@@ -858,6 +862,7 @@ const USN_MAGIC: [u8; 4] = [0x57, 0x4d, 0x55, 0x53]; // "WMUS"
 /// 落盘 USN 状态（目录 FRN 表 + 各卷 journal 位置）
 #[no_mangle]
 pub extern "C" fn usn_table_save(file_ptr: *const c_char) -> i32 {
+    ffi_catch!({
     let cpath = unsafe { CStr::from_ptr(file_ptr) };
     let path = cpath.to_string_lossy().to_string();
     let f = match File::create(&path) {
@@ -865,7 +870,7 @@ pub extern "C" fn usn_table_save(file_ptr: *const c_char) -> i32 {
         Err(_) => return -2,
     };
     let mut w = BufWriter::new(f);
-    let st = USN_STATE.lock().unwrap();
+    let st = lock_or_recover(&USN_STATE);
     let st = match st.as_ref() {
         Some(s) => s,
         None => return -1,
@@ -916,11 +921,13 @@ pub extern "C" fn usn_table_save(file_ptr: *const c_char) -> i32 {
         Ok(_) => 0,
         Err(_) => -3,
     }
+})
 }
 
 /// 从落盘文件恢复 USN 状态（成功返回 0）
 #[no_mangle]
 pub extern "C" fn usn_table_load(file_ptr: *const c_char) -> i32 {
+    ffi_catch!({
     let cpath = unsafe { CStr::from_ptr(file_ptr) };
     let path = cpath.to_string_lossy().to_string();
     let f = match File::open(&path) {
@@ -1002,36 +1009,44 @@ pub extern "C" fn usn_table_load(file_ptr: *const c_char) -> i32 {
         let name = String::from_utf8_lossy(&buf).into_owned();
         table.insert((drive, frn), (parent, name));
     }
-    *USN_STATE.lock().unwrap() = Some(UsnState { table, volumes });
+    *lock_or_recover(&USN_STATE) = Some(UsnState { table, volumes });
     0
+})
 }
 
 /// 当前是否具备 USN 索引状态（已 load 或已 sync）
 #[no_mangle]
 pub extern "C" fn usn_table_ready() -> i32 {
-    let st = USN_STATE.lock().unwrap();
+    ffi_catch!({
+    let st = lock_or_recover(&USN_STATE);
     match st.as_ref() {
         Some(s) if !s.table.is_empty() || !s.volumes.is_empty() => 1,
         _ => 0,
     }
+})
 }
 
 /// 已应用的 USN 记录累计数（sync 前后取差值即本次变更量）
 #[no_mangle]
 pub extern "C" fn usn_changes() -> u64 {
+    ffi_catch!({
     USN_CHANGES.load(std::sync::atomic::Ordering::Relaxed)
+})
 }
 
 /// 释放 USN 状态内存
 #[no_mangle]
 pub extern "C" fn usn_table_free() {
-    *USN_STATE.lock().unwrap() = None;
-    PENDING_RENAMES.lock().unwrap().clear();
+    ffi_catch!({
+    *lock_or_recover(&USN_STATE) = None;
+    lock_or_recover(&PENDING_RENAMES).clear();
+})
 }
 
 /// 卷是否为 NTFS 且 USN journal 可用（Dart 侧展示索引模式用）
 #[no_mangle]
 pub extern "C" fn usn_volume_supported(root_ptr: *const c_char) -> i32 {
+    ffi_catch!({
     let croot = unsafe { CStr::from_ptr(root_ptr) };
     let root = croot.to_string_lossy().to_string();
     let drive = match drive_letter(&root) {
@@ -1052,6 +1067,7 @@ pub extern "C" fn usn_volume_supported(root_ptr: *const c_char) -> i32 {
     } else {
         0
     }
+})
 }
 
 // ==================== 单元测试（纯逻辑，无需真实卷） ====================
