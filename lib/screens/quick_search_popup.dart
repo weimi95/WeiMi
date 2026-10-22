@@ -16,6 +16,7 @@ import '../services/quick_search_window.dart';
 import '../services/search_history_service.dart';
 import '../services/system_open_service.dart';
 import '../widgets/file_thumbnail.dart';
+import '../widgets/search_syntax.dart';
 import 'package:url_launcher/url_launcher.dart';
 
 /// 快捷搜索浮窗（双击 Ctrl 呼出）。
@@ -428,7 +429,9 @@ class _QuickSearchPopupState extends State<QuickSearchPopup> {
 
   void _onQueryChanged() {
     _debounce?.cancel();
-    _debounce = Timer(const Duration(milliseconds: 150), _runSearch);
+    final delayMs =
+        int.tryParse(SettingStore.get<String>('qs_search_delay', '300')) ?? 300;
+    _debounce = Timer(Duration(milliseconds: delayMs), _runSearch);
     setState(() {});
     _syncWindowSize();
   }
@@ -456,7 +459,9 @@ class _QuickSearchPopupState extends State<QuickSearchPopup> {
     if (!mounted) return;
     setState(() => _searching = true);
     final limit = SettingStore.get<int>('qs_result_limit', 50);
-    final paths = await DiskIndexService.search(q, limit: limit);
+    final paths = await DiskIndexService.search(
+        SearchOpts.load().apply(q),
+        limit: limit);
     if (!mounted) return;
     setState(() {
       _hits = paths.map(_Hit.new).toList();
@@ -651,6 +656,7 @@ class _QuickSearchPopupState extends State<QuickSearchPopup> {
                       height: 14,
                       child: CircularProgressIndicator(strokeWidth: 2),
                     ),
+                  SearchOptsButton(onChanged: (_) => _runSearch()),
                   IconButton(
                     tooltip: '打开主界面',
                     icon: const Icon(Icons.open_in_full, size: 18),
@@ -754,98 +760,145 @@ class _QuickSearchPopupState extends State<QuickSearchPopup> {
   }
 
   Widget _buildBody(ThemeData theme) {
+    // 预设类型宏筛选条（与文件页同款；点击直接改查询串，走既有 listener 重搜）
+    final macroBar = Padding(
+      padding: const EdgeInsets.only(top: 4, bottom: 2),
+      child: SearchMacroBar(
+        query: _controller.text,
+        onQuery: (q) {
+          _controller.text = q;
+          _controller.selection = TextSelection.collapsed(offset: q.length);
+        },
+      ),
+    );
     if (!_indexReady) {
-      return const Center(
-        child: Padding(
-          padding: EdgeInsets.all(32),
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              CircularProgressIndicator(),
-              SizedBox(height: 12),
-              Text('正在准备全盘索引…', style: TextStyle(fontSize: 13)),
-            ],
+      return Column(
+        children: [
+          macroBar,
+          const Expanded(
+            child: Center(
+              child: Padding(
+                padding: EdgeInsets.all(32),
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    CircularProgressIndicator(),
+                    SizedBox(height: 12),
+                    Text('正在准备全盘索引…', style: TextStyle(fontSize: 13)),
+                  ],
+                ),
+              ),
+            ),
           ),
-        ),
+        ],
       );
     }
     final q = _controller.text.trim();
     if (q.isEmpty) {
       // 聚焦无输入：搜索历史
       if (_history.isEmpty) {
-        return Center(
-          child: Padding(
-            padding: const EdgeInsets.all(32),
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                Icon(Icons.keyboard_command_key,
-                    size: 40, color: theme.hintColor),
-                const SizedBox(height: 12),
-                Text('输入文件名关键字，搜索全盘文件',
-                    style: TextStyle(fontSize: 13, color: theme.hintColor)),
-                const SizedBox(height: 4),
-                Text('支持 * ? 通配符、"引号"精准、a | b、!排除、ext:pdf、拼音',
-                    style: TextStyle(fontSize: 12, color: theme.hintColor)),
-                const SizedBox(height: 4),
-                Text('搜到的文件可直接加密、解密或发送到手机',
-                    style: TextStyle(fontSize: 12, color: theme.hintColor)),
-              ],
-            ),
-          ),
-        );
-      }
-      return ListView(
-        padding: const EdgeInsets.symmetric(vertical: 4),
-        children: [
-          Padding(
-            padding: const EdgeInsets.fromLTRB(14, 6, 14, 2),
-            child: Row(
-              children: [
-                Text('搜索历史',
-                    style: TextStyle(
-                        fontSize: 12,
-                        color: theme.hintColor,
-                        fontWeight: FontWeight.w600)),
-                const Spacer(),
-                TextButton(
-                  onPressed: () async {
-                    await SearchHistoryService.clear();
-                    await _reloadHistory();
-                  },
-                  child: const Text('清空', style: TextStyle(fontSize: 12)),
+        return Column(
+          children: [
+            macroBar,
+            Expanded(
+              child: Center(
+                child: Padding(
+                  padding: const EdgeInsets.all(32),
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Icon(Icons.keyboard_command_key,
+                          size: 40, color: theme.hintColor),
+                      const SizedBox(height: 12),
+                      Text('输入文件名关键字，搜索全盘文件',
+                          style: TextStyle(fontSize: 13, color: theme.hintColor)),
+                      const SizedBox(height: 4),
+                      Text('支持 * ? 通配符、"引号"精准、a | b、!排除、ext:pdf、拼音',
+                          style: TextStyle(fontSize: 12, color: theme.hintColor)),
+                      const SizedBox(height: 4),
+                      Text('搜到的文件可直接加密、解密或发送到手机',
+                          style: TextStyle(fontSize: 12, color: theme.hintColor)),
+                    ],
+                  ),
                 ),
-              ],
-            ),
-          ),
-          for (final h in _history)
-            // pointer-down 即填词：tap-up 前失焦会摘掉列表导致 onTap 被吞
-            Listener(
-              onPointerDown: (_) => _useHistory(h),
-              child: ListTile(
-                dense: true,
-                leading: Icon(Icons.history, size: 18, color: theme.hintColor),
-                title: Text(h, style: const TextStyle(fontSize: 13)),
               ),
             ),
+          ],
+        );
+      }
+      return Column(
+        children: [
+          macroBar,
+          Expanded(
+            child: ListView(
+              padding: const EdgeInsets.symmetric(vertical: 4),
+              children: [
+                Padding(
+                  padding: const EdgeInsets.fromLTRB(14, 6, 14, 2),
+                  child: Row(
+                    children: [
+                      Text('搜索历史',
+                          style: TextStyle(
+                              fontSize: 12,
+                              color: theme.hintColor,
+                              fontWeight: FontWeight.w600)),
+                      const Spacer(),
+                      TextButton(
+                        onPressed: () async {
+                          await SearchHistoryService.clear();
+                          await _reloadHistory();
+                        },
+                        child: const Text('清空', style: TextStyle(fontSize: 12)),
+                      ),
+                    ],
+                  ),
+                ),
+                for (final h in _history)
+                  // pointer-down 即填词：tap-up 前失焦会摘掉列表导致 onTap 被吞
+                  Listener(
+                    onPointerDown: (_) => _useHistory(h),
+                    child: ListTile(
+                      dense: true,
+                      leading: Icon(Icons.history,
+                          size: 18, color: theme.hintColor),
+                      title: Text(h, style: const TextStyle(fontSize: 13)),
+                    ),
+                  ),
+              ],
+            ),
+          ),
         ],
       );
     }
     if (_hits.isEmpty && !_searching) {
-      return Center(
-        child: Text('没有找到「$q」相关文件',
-            style: TextStyle(fontSize: 13, color: theme.hintColor)),
+      return Column(
+        children: [
+          macroBar,
+          Expanded(
+            child: Center(
+              child: Text('没有找到「$q」相关文件',
+                  style: TextStyle(fontSize: 13, color: theme.hintColor)),
+            ),
+          ),
+        ],
       );
     }
     // 一屏 9 条按页展示（滚轮翻页见外层 Listener）
-    return ListView(
-      padding: EdgeInsets.zero,
+    return Column(
       children: [
-        for (final i in _pageItems)
-          if (i >= _guideIndex)
-            _buildGuideRow(theme)
-          else
-            _buildResultRow(theme, i),
+        macroBar,
+        Expanded(
+          child: ListView(
+            padding: EdgeInsets.zero,
+            children: [
+              for (final i in _pageItems)
+                if (i >= _guideIndex)
+                  _buildGuideRow(theme)
+                else
+                  _buildResultRow(theme, i),
+            ],
+          ),
+        ),
       ],
     );
   }

@@ -92,6 +92,22 @@ class QuickSearchModule extends FeatureModule {
           type: SettingType.boolean,
           defaultValue: false,
         ),
+        SettingDef(
+          key: 'qs_search_delay',
+          title: '输入搜索延迟',
+          icon: Icons.speed_outlined,
+          subtitle: '停止输入多久后开始搜索（主界面搜索框与浮窗共用）',
+          group: '搜索语法',
+          type: SettingType.choice,
+          defaultValue: '300',
+          options: const ['100', '150', '300', '500'],
+          optionLabels: const {
+            '100': '0.1 秒（最灵敏）',
+            '150': '0.15 秒',
+            '300': '0.3 秒（默认）',
+            '500': '0.5 秒（最省电）',
+          },
+        ),
       ];
 
   @override

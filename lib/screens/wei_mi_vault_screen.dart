@@ -23,6 +23,7 @@ import '../services/view_prefs_service.dart';
 import '../services/vault_service.dart';
 import '../widgets/file_selection_bar.dart';
 import '../widgets/file_thumbnail.dart';
+import '../widgets/search_syntax.dart';
 import 'file_filter_sheet.dart';
 import 'lan_transfer_screen.dart';
 import 'vault_browser_screen.dart';
@@ -137,6 +138,7 @@ class WeiMiVaultScreenState extends State<WeiMiVaultScreen> {
   bool _globalSearching = false;
   bool _indexBuilding = false;
   Timer? _fileDebounce;
+  int _lastSearchMs = 0; // 最近一次全盘搜索耗时（状态栏展示）
 
   // ============ 类型筛选（目录内容 / 展开子项 / 全盘搜索结果共用） ============
   FileCategory? _filterCat; // null = 全部
@@ -176,8 +178,9 @@ class WeiMiVaultScreenState extends State<WeiMiVaultScreen> {
     }
     // 有输入即收起历史面板
     if (_showSearchHistory) setState(() => _showSearchHistory = false);
-    _fileDebounce =
-        Timer(const Duration(milliseconds: 300), _runFileGlobalSearch);
+    final delayMs =
+        int.tryParse(SettingStore.get<String>('qs_search_delay', '300')) ?? 300;
+    _fileDebounce = Timer(Duration(milliseconds: delayMs), _runFileGlobalSearch);
   }
 
   /// 聚焦搜索框且无输入时展示历史记录（点击外部/有输入即收起）
@@ -280,8 +283,11 @@ class WeiMiVaultScreenState extends State<WeiMiVaultScreen> {
         if (!mounted) return;
         setState(() => _indexBuilding = false);
       }
-      final paths = await DiskIndexService.search(q);
+      final sw = Stopwatch()..start();
+      final paths = await DiskIndexService.search(SearchOpts.load().apply(q));
+      sw.stop();
       if (!mounted) return;
+      _lastSearchMs = sw.elapsedMilliseconds;
       // 落一条搜索历史（去重 + 按 qs_history_limit 裁剪），供下次聚焦搜索框展示
       unawaited(() async {
         await SearchHistoryService.record(q);
@@ -843,6 +849,9 @@ class WeiMiVaultScreenState extends State<WeiMiVaultScreen> {
       }
       text = '共 ${items.length} 项 · 已选 ${_selectedPaths.length} 个 · '
           '合计 ${_fmtBytes(total)}';
+    } else if (_globalResults != null) {
+      text = '共 ${items.length} 项 · $dirs 个文件夹 · $files 个文件'
+          '${_lastSearchMs > 0 ? ' · 耗时 ${_lastSearchMs}ms' : ''}';
     } else {
       text = '共 ${items.length} 项 · $dirs 个文件夹 · $files 个文件';
     }
@@ -1802,6 +1811,19 @@ class WeiMiVaultScreenState extends State<WeiMiVaultScreen> {
                   children: [
                     // 固定顶部搜索框（根视图与浏览视图都显示）
                     if (!_selecting) _buildFileSearchField(),
+                    // 预设类型宏筛选条（有查询词时才显示，点击即改查询串）
+                    if (!_selecting && _fileQuery.isNotEmpty)
+                      Padding(
+                        padding: const EdgeInsets.only(bottom: 2),
+                        child: SearchMacroBar(
+                          query: _fileQuery,
+                          onQuery: (q) {
+                            _fileSearchCtrl.text = q;
+                            _fileSearchCtrl.selection =
+                                TextSelection.collapsed(offset: q.length);
+                          },
+                        ),
+                      ),
                     // 搜索历史面板（聚焦搜索框且无输入时展示）
                     if (!_selecting) _buildSearchHistoryPanel(),
                     // 当前类型筛选提示（点击 × 清除）
@@ -1858,6 +1880,16 @@ class WeiMiVaultScreenState extends State<WeiMiVaultScreen> {
           suffixIcon: Row(
             mainAxisSize: MainAxisSize.min,
             children: [
+              SearchOptsButton(
+                onChanged: (_) {
+                  // 菜单开关变更即重搜（空词不搜）
+                  if (_fileQuery.isNotEmpty) {
+                    _fileDebounce?.cancel();
+                    _fileDebounce = Timer(
+                        const Duration(milliseconds: 50), _runFileGlobalSearch);
+                  }
+                },
+              ),
               IconButton(
                 icon: Icon(
                   _filterCat == null
