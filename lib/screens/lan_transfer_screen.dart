@@ -231,39 +231,9 @@ class _LanTransferScreenState extends State<LanTransferScreen> {
     if (!mounted) return;
     final ips = await _svc.localIPv4s();
     if (!mounted) return;
-    // LANDrop 兼容层设备按 IP 合并：已有微密/LocalSend 条目的物理设备
-    // 只挂链路信息（ldPort/ldPkB64），纯 LANDrop 设备才单独立项。
-    final peers = <LanPeer>[..._svc.peers];
-    for (final d in LandropService.instance.devices) {
-      final idx = peers.indexWhere((p) => p.ip == d.address);
-      if (idx >= 0) {
-        final old = peers[idx];
-        peers[idx] = LanPeer(
-          id: old.id,
-          name: old.name,
-          ip: old.ip,
-          httpPort: old.httpPort,
-          trusted: old.trusted,
-          lastSeen: old.lastSeen,
-          protocol: old.protocol,
-          https: old.https,
-          lsPort: old.lsPort,
-          lsHttps: old.lsHttps,
-          ldPort: d.port,
-          ldPkB64: d.publicKey,
-        );
-      } else {
-        peers.add(LanPeer(
-          id: d.publicKey, // LANDrop 信任按身份公钥持久化
-          name: d.name,
-          ip: d.address,
-          httpPort: d.port,
-          trusted: d.trusted,
-          lastSeen: d.lastSeen,
-          protocol: 'landrop',
-        ));
-      }
-    }
+    // LANDrop 兼容层设备按 IP 合并（共享 LandropService.mergeInto，
+    // 与聊天窗「活 peer」查找同口径——曾出现列表在线/聊天窗离线的割裂）
+    final peers = LandropService.mergeInto(_svc.peers);
     setState(() {
       // 排序兜底：微密设备永远排在 LocalSend / LANDrop 设备前面
       int rank(LanPeer p) =>
@@ -921,32 +891,6 @@ class _LanTransferScreenState extends State<LanTransferScreen> {
 
   // ============ 其他 UI 动作 ============
 
-  Future<void> _editName() async {
-    final controller = TextEditingController(text: _selfName);
-    final r = await showDialog<String>(
-      context: context,
-      builder: (ctx) => AlertDialog(
-        title: const Text('本机名称'),
-        content: TextField(
-          controller: controller,
-          maxLength: 20,
-          decoration: const InputDecoration(hintText: '对方设备列表里显示的名字'),
-        ),
-        actions: [
-          TextButton(
-              onPressed: () => Navigator.pop(ctx), child: const Text('取消')),
-          TextButton(
-              onPressed: () => Navigator.pop(ctx, controller.text),
-              child: const Text('保存')),
-        ],
-      ),
-    );
-    if (r != null && r.trim().isNotEmpty && mounted) {
-      await _svc.setSelfName(r.trim());
-      setState(() => _selfName = r.trim());
-    }
-  }
-
   String _fmtSize(int bytes) {
     if (bytes < 1024) return '$bytes B';
     if (bytes < 1024 * 1024) return '${(bytes / 1024).toStringAsFixed(1)} KB';
@@ -1038,7 +982,6 @@ class _LanTransferScreenState extends State<LanTransferScreen> {
             if (_fwMissing || _fwLsMissing || _fwLdMissing) _buildFirewallCard(),
             const SizedBox(height: 12),
             if (_pendingText != null || _pendingFiles.isNotEmpty) _buildPendingCard(),
-            _buildWebItem(),
             const SizedBox(height: 12),
             _sectionHeader('设备会话（在线 · 历史记录 · 已信任）'),
             if (items.isEmpty) _emptyHint() else ...items.map(_buildConvTile),
@@ -1064,7 +1007,10 @@ class _LanTransferScreenState extends State<LanTransferScreen> {
     );
   }
 
+  /// 本机卡（v1.2.11 合并原「本机」+「网页快传」两张卡）：
+  /// 名称/改名 + 本机 IP + 网页快传网址/复制 + 接收状态一句说明。
   Widget _buildSelfCard() {
+    final urls = _webUrls;
     return Container(
       margin: const EdgeInsets.only(bottom: 12),
       padding: const EdgeInsets.all(14),
@@ -1087,20 +1033,43 @@ class _LanTransferScreenState extends State<LanTransferScreen> {
                 ),
               ),
               IconButton(
-                icon: const Icon(Icons.edit, size: 18),
-                tooltip: '改名',
-                onPressed: _editName,
+                icon: const Icon(Icons.copy, size: 18),
+                tooltip: '复制快传地址',
+                onPressed: () {
+                  Clipboard.setData(ClipboardData(
+                      text: urls.isEmpty
+                          ? 'http://$_selfIp:$_selfHttpPort'
+                          : urls.join('\n')));
+                  if (mounted) {
+                    ScaffoldMessenger.of(context).showSnackBar(
+                        const SnackBar(content: Text('已复制网页快传地址')));
+                  }
+                },
               ),
             ],
           ),
+          const SizedBox(height: 6),
           Text(
-            _selfIps.isEmpty ? '本机 IP：获取中…' : '本机 IP：${_selfIps.join('、')}',
-            style: TextStyle(fontSize: 12, color: Colors.grey.shade600),
+            '飞传网页版',
+            style: TextStyle(
+                fontSize: 11,
+                color: Colors.grey.shade500,
+                fontWeight: FontWeight.w500),
           ),
-          const SizedBox(height: 8),
+          const SizedBox(height: 2),
           Text(
-            '允许接收文件（托盘常驻）',
-            style: TextStyle(fontSize: 13, color: Colors.green.shade700),
+            urls.isEmpty ? '获取中…' : urls.join('\n'),
+            style: const TextStyle(
+                fontSize: 15, fontWeight: FontWeight.w600, color: Colors.teal),
+          ),
+          const SizedBox(height: 4),
+          Text(
+            _selfWebShare
+                ? '允许接收文件（托盘常驻）· 同一 WiFi 下用浏览器打开此地址，即可发送文件/文本给本机'
+                : '允许接收文件（托盘常驻）· 飞传网页版已在设置中关闭',
+            style: TextStyle(
+                fontSize: 12,
+                color: _selfWebShare ? Colors.grey.shade600 : Colors.orange),
           ),
         ],
       ),
@@ -1134,64 +1103,6 @@ class _LanTransferScreenState extends State<LanTransferScreen> {
               _pendingFiles = [];
             }),
             child: const Text('取消'),
-          ),
-        ],
-      ),
-    );
-  }
-
-  /// 网页快传：固定项（类文件传输助手），点复制地址可分享给同 WiFi 设备。
-  Widget _buildWebItem() {
-    return Container(
-      margin: const EdgeInsets.only(bottom: 12),
-      padding: const EdgeInsets.all(14),
-      decoration: BoxDecoration(
-        color: Colors.teal.withAlpha(15),
-        borderRadius: BorderRadius.circular(12),
-        border: Border.all(color: Colors.teal.withAlpha(50)),
-      ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Row(
-            children: [
-              const Icon(Icons.language, size: 20, color: Colors.teal),
-              const SizedBox(width: 8),
-              const Expanded(
-                child: Text('网页快传',
-                    style:
-                        TextStyle(fontWeight: FontWeight.w600, fontSize: 15)),
-              ),
-              IconButton(
-                icon: const Icon(Icons.copy, size: 18),
-                tooltip: '复制地址',
-                onPressed: () {
-                  final urls = _webUrls;
-                  Clipboard.setData(ClipboardData(
-                      text: urls.isEmpty
-                          ? 'http://$_selfIp:$_selfHttpPort'
-                          : urls.join('\n')));
-                  if (mounted) {
-                    ScaffoldMessenger.of(context).showSnackBar(
-                        const SnackBar(content: Text('已复制网页快传地址')));
-                  }
-                },
-              ),
-            ],
-          ),
-          Text(
-            _webUrls.isEmpty ? 'http://…' : _webUrls.join('\n'),
-            style: const TextStyle(
-                fontSize: 15, fontWeight: FontWeight.w600, color: Colors.teal),
-          ),
-          const SizedBox(height: 4),
-          Text(
-            _selfWebShare
-                ? '同一 WiFi 下任何设备用浏览器打开此地址，即可发送文件/文本给本机'
-                : '网页快传已在设置中关闭',
-            style: TextStyle(
-                fontSize: 12,
-                color: _selfWebShare ? Colors.grey.shade600 : Colors.orange),
           ),
         ],
       ),

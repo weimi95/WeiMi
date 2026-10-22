@@ -72,6 +72,46 @@ class LandropService {
   final Map<String, LandropDevice> _devices = {};
   List<LandropDevice> get devices => _devices.values.toList();
 
+  /// 把本层（LANDrop）设备合并进 peers 列表——飞传页设备列表与聊天窗
+  /// 「活 peer」查找共用同一套合并口径。LANDrop 设备只存在于
+  /// [LandropService.devices]，不合并这层会导致列表页显示在线、点进
+  /// 聊天窗却因 `_peerById` 取不到而判离线（v1.2.11 修复根因）。
+  static List<LanPeer> mergeInto(List<LanPeer> peers) {
+    final out = <LanPeer>[...peers];
+    for (final d in instance.devices) {
+      final idx = out.indexWhere((p) => p.ip == d.address);
+      if (idx >= 0) {
+        // 已有微密/LocalSend 条目的物理设备：只挂 LANDrop 链路信息
+        final old = out[idx];
+        out[idx] = LanPeer(
+          id: old.id,
+          name: old.name,
+          ip: old.ip,
+          httpPort: old.httpPort,
+          trusted: old.trusted,
+          lastSeen: old.lastSeen,
+          protocol: old.protocol,
+          https: old.https,
+          lsPort: old.lsPort,
+          lsHttps: old.lsHttps,
+          ldPort: d.port,
+          ldPkB64: d.publicKey,
+        );
+      } else {
+        out.add(LanPeer(
+          id: d.publicKey, // LANDrop 信任按身份公钥持久化
+          name: d.name,
+          ip: d.address,
+          httpPort: d.port,
+          trusted: d.trusted,
+          lastSeen: d.lastSeen,
+          protocol: 'landrop',
+        ));
+      }
+    }
+    return out;
+  }
+
   /// true = 52637 被占（同机装着真 LANDrop）已降级临时端口。
   /// 降级期间收不到目的端口 52637 的组播/广播包，唯一入向通路是
   /// 「我方 query → 对方单播应答到临时端口」——LANDrop 满足（被动设计
@@ -346,19 +386,33 @@ class LandropService {
   /// 周期广播：组播 + 广播双发 announce 保活（LANDrop 设备 20s 过期），
   /// 同时发 request 查询包——对方（含真 LANDrop）收到即单播应答，
   /// 覆盖「对方先启动/同机端口被占」场景。
+  ///
+  /// v1.2.11：额外对**已发现设备 IP 单播**同内容。组播/广播在某些
+  /// 路由器（AP 隔离/公共 Wi-Fi）或本机 52637 被占降级时不可达，
+  /// 而单播通路往往是通的（我方 query→对方单播应答已证明双向单播可用）。
+  /// 手机 LANDrop 是被动设计（不主动 query），只靠组播/广播永远发现
+  /// 不了我们——此单播补发让「PC→手机」方向也稳定可达。
   void _announce() {
     final sock = _udpSocket;
     if (sock == null || !_running) return;
     final announce =
         utf8.encode(json.encode(_discoveryPacket(request: false)));
     final query = utf8.encode(json.encode(_discoveryPacket(request: true)));
+    final targets = <InternetAddress>[
+      InternetAddress(multicastGroup),
+      InternetAddress('255.255.255.255'),
+    ];
+    for (final d in _devices.values) {
+      try {
+        targets.add(InternetAddress(d.address));
+      } catch (_) {}
+    }
     for (final data in [announce, query]) {
-      try {
-        sock.send(data, InternetAddress(multicastGroup), port);
-      } catch (_) {}
-      try {
-        sock.send(data, InternetAddress('255.255.255.255'), port);
-      } catch (_) {}
+      for (final t in targets) {
+        try {
+          sock.send(data, t, port);
+        } catch (_) {}
+      }
     }
   }
 

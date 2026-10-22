@@ -84,8 +84,12 @@ class _LanChatScreenState extends State<LanChatScreen> {
     super.dispose();
   }
 
+  /// 按会话 key 找活设备。必须走 LandropService.mergeInto 合并口径——
+  /// LANDrop 设备不在 LanTransferService.peers 里，不合并会导致列表页
+  /// 显示在线、点进聊天窗却判离线（v1.2.11 修复根因）。
   LanPeer? _peerById(String key) {
-    for (final p in LanTransferService.instance.peers) {
+    for (final p in LandropService.mergeInto(
+        LanTransferService.instance.peers)) {
       if (p.id == key) return p;
     }
     return null;

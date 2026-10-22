@@ -84,3 +84,4 @@ downloads/
 # 本地下载的发布资产不入库
 releases/
 daemon/target/
+dist/

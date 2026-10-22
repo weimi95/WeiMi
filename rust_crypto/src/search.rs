@@ -338,7 +338,9 @@ fn parse_query(input: &str, mut flags: Flags) -> Parsed {
         if pending_or {
             if or_group.is_empty() && !factors.is_empty() {
                 // a | b：把前一个因子拉进 OR 组
-                or_group.push(factors.pop().unwrap());
+                if let Some(prev) = factors.pop() {
+                    or_group.push(prev);
+                }
             }
             or_group.push(node);
             pending_or = false;
@@ -356,7 +358,7 @@ fn parse_query(input: &str, mut flags: Flags) -> Parsed {
     }
     let root = match factors.len() {
         0 => None,
-        1 => Some(factors.pop().unwrap()),
+        1 => factors.pop(),
         _ => Some(Node::And(factors)),
     };
     let mut needs_stat = false;
@@ -380,6 +382,11 @@ fn parse_query(input: &str, mut flags: Flags) -> Parsed {
 /// 进程级缓存（按文件名），上限 15 万条防失控。
 static PY_CACHE: Mutex<Option<HashMap<String, (String, String)>>> = Mutex::new(None);
 const PY_CACHE_CAP: usize = 150_000;
+
+/// 带 panic 兜底的互斥锁（防 poison 连环 panic，详见 lib.rs lock_or_recover）。
+fn lock_or_recover<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    m.lock().unwrap_or_else(|e| e.into_inner())
+}
 
 fn has_han(s: &str) -> bool {
     s.chars().any(|c| ('\u{4E00}'..='\u{9FFF}').contains(&c))
@@ -411,7 +418,7 @@ fn pinyin_uncached(name_lower: &str) -> (String, String) {
 
 fn pinyin_of(name_lower: &str) -> (String, String) {
     {
-        let g = PY_CACHE.lock().unwrap();
+        let g = lock_or_recover(&PY_CACHE);
         if let Some(m) = g.as_ref() {
             if let Some(hit) = m.get(name_lower) {
                 return hit.clone();
@@ -419,7 +426,7 @@ fn pinyin_of(name_lower: &str) -> (String, String) {
         }
     }
     let r = pinyin_uncached(name_lower);
-    let mut g = PY_CACHE.lock().unwrap();
+    let mut g = lock_or_recover(&PY_CACHE);
     let m = g.get_or_insert_with(HashMap::new);
     if m.len() < PY_CACHE_CAP {
         m.insert(name_lower.to_string(), r.clone());
@@ -475,7 +482,7 @@ impl<'a> FileCtx<'a> {
         if self.path_lower.is_none() {
             self.path_lower = Some(self.path.to_lowercase());
         }
-        self.path_lower.as_deref().unwrap()
+        self.path_lower.as_deref().unwrap_or("")
     }
 }
 
@@ -1001,5 +1008,24 @@ mod tests {
         assert!(run(&paths(), "", 10, f()).is_empty());
         let out = run(&paths(), "*", 2, f());
         assert_eq!(out.lines().count(), 2);
+    }
+
+    #[test]
+    fn test_malformed_queries_never_panic() {
+        // v1.2.11 防闪退回归：畸形/边界查询串必须安全走完（曾因 unwrap panic
+        // 跨 FFI abort 宿主进程，表现为输入搜索词 UI 即闪退）。
+        for q in [
+            "|", "||", "a|", "|a", "a|b|", "!", "!!", "! ", "a !", "!|",
+            "\"", "\"\"", "\"abc", "a\"b", "<", ">", "<>", "()", "(", ")",
+            "regex:", "regex:[", "regex:(", "ext:", "ext:;", "ext:;;",
+            "size:", "size:>", "size:>abc", "size:>1", "size:1..2..3",
+            "dm:", "dm:>", "dm:2026", "dm:2026-13-45", "dc:a..b",
+            "case:", "wholeword:", "path:", "\\", "\\\\", "*", "?", "**",
+            "a b c d e f g", "   ", "\t\n", "!", "!!a", "!a!", "a!b",
+            "中文|拼音", "🎉", "\u{0}\u{1}", "a\u{FFFF}b",
+        ] {
+            let _ = run(&paths(), q, 10, f());
+            let _ = parse_query(q, f());
+        }
     }
 }

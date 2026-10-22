@@ -25,7 +25,6 @@ import '../widgets/file_selection_bar.dart';
 import '../widgets/file_thumbnail.dart';
 import '../widgets/search_syntax.dart';
 import 'file_filter_sheet.dart';
-import 'lan_transfer_screen.dart';
 import 'vault_browser_screen.dart';
 
 /// 缩略图档位 → 宫格单元格最大宽度（手机默认「中」，与 PC 一致降认知负担）
@@ -2062,7 +2061,7 @@ class WeiMiVaultScreenState extends State<WeiMiVaultScreen> {
         padding: const EdgeInsets.only(bottom: 24),
         children: [
           if (Platform.isAndroid && !_storageGranted) _permissionBanner,
-          // 快捷操作：加密 / 解密 / 微密飞传
+          // 快捷操作：加密 / 解密
           Padding(
             padding: const EdgeInsets.fromLTRB(12, 8, 12, 4),
             child: Row(
@@ -2084,15 +2083,6 @@ class WeiMiVaultScreenState extends State<WeiMiVaultScreen> {
                     color: Colors.green,
                     onTap: () =>
                         widget.onDecryptFiles?.call() ?? _pickAndDecrypt(),
-                  ),
-                ),
-                const SizedBox(width: 10),
-                Expanded(
-                  child: _actionCard(
-                    icon: Icons.lan_outlined,
-                    label: '微密飞传',
-                    color: Colors.teal,
-                    onTap: _openLanTransfer,
                   ),
                 ),
               ],
@@ -2199,13 +2189,6 @@ class WeiMiVaultScreenState extends State<WeiMiVaultScreen> {
           ],
         ),
       ),
-    );
-  }
-
-  void _openLanTransfer() {
-    Navigator.push(
-      context,
-      MaterialPageRoute(builder: (context) => const LanTransferScreen()),
     );
   }
 

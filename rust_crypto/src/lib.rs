@@ -1154,7 +1154,7 @@ pub(crate) fn index_skip_dir(name: &str) -> bool {
 /// 初始化空索引（USN 全量重建前调用：INDEX_PATHS 置空 Vec，usn_sync 往里填）
 #[no_mangle]
 pub extern "C" fn index_init() -> i32 {
-    *INDEX_PATHS.lock().unwrap() = Some(Vec::new());
+    *lock_or_recover(&INDEX_PATHS) = Some(Vec::new());
     *INDEX_DIR_MTIMES.lock().unwrap() = Some(HashMap::new());
     *INDEX_ROOTS.lock().unwrap() = Some(Vec::new());
     0
@@ -1182,7 +1182,7 @@ pub extern "C" fn index_build(roots_ptr: *const *const c_char, num_roots: usize)
 
     let (final_paths, final_dirs) = scan_roots(&roots);
     let n = final_paths.len() as i64;
-    *INDEX_PATHS.lock().unwrap() = Some(final_paths);
+    *lock_or_recover(&INDEX_PATHS) = Some(final_paths);
     let root_strs: Vec<String> = roots.iter().map(|p| p.to_string_lossy().to_string()).collect();
     *INDEX_DIR_MTIMES.lock().unwrap() = Some(final_dirs);
     *INDEX_ROOTS.lock().unwrap() = Some(root_strs);
@@ -1191,7 +1191,7 @@ pub extern "C" fn index_build(roots_ptr: *const *const c_char, num_roots: usize)
 
 #[no_mangle]
 pub extern "C" fn index_count() -> i64 {
-    match INDEX_PATHS.lock().unwrap().as_ref() {
+    match lock_or_recover(&INDEX_PATHS).as_ref() {
         Some(v) => v.len() as i64,
         None => -1,
     }
@@ -1201,7 +1201,7 @@ pub extern "C" fn index_count() -> i64 {
 /// 收托盘/隐藏窗口时调用，内存随 drop 归还；下次搜索前 rebuildIfStale 会重建。
 #[no_mangle]
 pub extern "C" fn index_free() {
-    *INDEX_PATHS.lock().unwrap() = None;
+    *lock_or_recover(&INDEX_PATHS) = None;
     *INDEX_DIR_MTIMES.lock().unwrap() = None;
     *INDEX_ROOTS.lock().unwrap() = None;
 }
@@ -1226,6 +1226,10 @@ pub extern "C" fn index_search(
 
 /// 搜索引擎 v2 入口（v1.2.6）。flags: bit0=拼音转拼 bit1=允许 stat 类函数（size:/dm:/dc:）。
 /// 语法与打分见 search.rs 模块注释。
+///
+/// v1.2.11：extern "C" 边界 panic 会直接 abort 整个宿主进程（曾导致 UI 输入
+/// 搜索词即闪退、托盘残留）。这里用 catch_unwind 兜底：引擎内部任何 panic
+/// 都降级为返回 -4（Dart 侧视为无结果），绝不死进程。
 #[no_mangle]
 pub extern "C" fn index_search2(
     query_ptr: *const c_char,
@@ -1237,6 +1241,28 @@ pub extern "C" fn index_search2(
     if out_len.is_null() {
         return -3;
     }
+    let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        index_search2_inner(query_ptr, limit, flags, out_ptr, out_len)
+    }));
+    match r {
+        Ok(code) => code,
+        Err(_) => {
+            eprintln!("rust_crypto: index_search2 panicked (degraded to empty)");
+            unsafe {
+                *out_len = 0;
+            }
+            -4
+        }
+    }
+}
+
+fn index_search2_inner(
+    query_ptr: *const c_char,
+    limit: usize,
+    flags: u32,
+    out_ptr: *mut u8,
+    out_len: *mut usize,
+) -> i32 {
     let query = if query_ptr.is_null() {
         String::new()
     } else {
@@ -1250,7 +1276,7 @@ pub extern "C" fn index_search2(
         pinyin: flags & search::FLAG_PINYIN != 0,
         stat: flags & search::FLAG_STAT != 0,
     };
-    let guard = INDEX_PATHS.lock().unwrap();
+    let guard = lock_or_recover(&INDEX_PATHS);
     let data = match guard.as_ref() {
         Some(d) => d,
         None => return -1,
@@ -1270,6 +1296,13 @@ pub extern "C" fn index_search2(
     0
 }
 
+/// 带 panic 兜底的互斥锁：Mutex 一旦被 poison，内部数据依然完好可用
+/// （ poison 只表示上次持锁时发生了 panic）。FFI 库里对 poison 锁再 unwrap
+/// 会造成连环 panic → abort 进程，统一走这里恢复。
+fn lock_or_recover<T>(m: &std::sync::Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    m.lock().unwrap_or_else(|e| e.into_inner())
+}
+
 /// 启动自检抽样：按 LCG 伪随机取 n 条路径（\n 连接）。
 /// 同 seed 结果可复现；n > 总数时全量。只读不写，O(n)。
 #[no_mangle]
@@ -1282,7 +1315,7 @@ pub extern "C" fn index_sample(
     if out_len.is_null() {
         return -3;
     }
-    let guard = INDEX_PATHS.lock().unwrap();
+    let guard = lock_or_recover(&INDEX_PATHS);
     let data = match guard.as_ref() {
         Some(d) => d,
         None => return -1,
@@ -1407,7 +1440,7 @@ pub extern "C" fn index_save(file_ptr: *const c_char) -> i32 {
 
     // 先在内存里组 body（拿锁期间完成，不做 IO）
     let body = {
-        let pg = INDEX_PATHS.lock().unwrap();
+        let pg = lock_or_recover(&INDEX_PATHS);
         let rg = INDEX_DIR_MTIMES.lock().unwrap();
         let og = INDEX_ROOTS.lock().unwrap();
         let paths = match pg.as_ref() {
@@ -1510,7 +1543,7 @@ pub extern "C" fn index_load(file_ptr: *const c_char) -> i32 {
         }
         _ => return -4,
     };
-    *INDEX_PATHS.lock().unwrap() = Some(paths);
+    *lock_or_recover(&INDEX_PATHS) = Some(paths);
     *INDEX_DIR_MTIMES.lock().unwrap() = Some(rmt);
     *INDEX_ROOTS.lock().unwrap() = Some(roots);
     0
@@ -1541,7 +1574,7 @@ pub extern "C" fn index_refresh(
         return -2;
     }
     {
-        let g = INDEX_PATHS.lock().unwrap();
+        let g = lock_or_recover(&INDEX_PATHS);
         if g.is_none() {
             return -3;
         }
@@ -1560,7 +1593,7 @@ pub extern "C" fn index_refresh(
         }
         // 移除该根旧条目
         {
-            let mut pg = INDEX_PATHS.lock().unwrap();
+            let mut pg = lock_or_recover(&INDEX_PATHS);
             if let Some(v) = pg.as_mut() {
                 let prefix = format!("{}{}", rkey, sep);
                 v.retain(|p| p.as_str() != rkey.as_str() && !p.starts_with(prefix.as_str()));
@@ -1574,7 +1607,7 @@ pub extern "C" fn index_refresh(
         // 重扫该根并并入
         let (local_paths, local_dirs) = scan_roots(&[root.clone()]);
         if !local_paths.is_empty() {
-            let mut pg = INDEX_PATHS.lock().unwrap();
+            let mut pg = lock_or_recover(&INDEX_PATHS);
             if let Some(v) = pg.as_mut() {
                 v.extend(local_paths);
             }
@@ -1589,7 +1622,7 @@ pub extern "C" fn index_refresh(
             }
         }
     }
-    let g = INDEX_PATHS.lock().unwrap();
+    let g = lock_or_recover(&INDEX_PATHS);
     match g.as_ref() {
         Some(v) => v.len() as i64,
         None => -3,
