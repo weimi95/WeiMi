@@ -73,6 +73,25 @@ class QuickSearchModule extends FeatureModule {
           type: SettingType.boolean,
           defaultValue: true,
         ),
+        SettingDef(
+          key: 'search_pinyin',
+          title: '拼音搜索',
+          icon: Icons.abc_outlined,
+          subtitle: '输入 douyin 或 dy 命中「抖音」等中文文件名（v1.2.6）',
+          group: '搜索语法',
+          type: SettingType.boolean,
+          defaultValue: true,
+        ),
+        SettingDef(
+          key: 'search_stat_filters',
+          title: '大小/日期筛选语法',
+          icon: Icons.filter_alt_outlined,
+          subtitle:
+              '搜索框支持 size:>100mb、dm:today、dc:2026-01-01 等筛选（默认关，需读文件元数据稍慢）',
+          group: '搜索语法',
+          type: SettingType.boolean,
+          defaultValue: false,
+        ),
       ];
 
   @override

@@ -12,6 +12,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 
 import 'rust_crypto.dart';
 import 'exclude_service.dart';
+import '../framework/setting_store.dart';
 
 /// 全盘文件名索引（方案A：Rust 多线程遍历 + 进程内存索引 + 落盘持久化 + 增量刷新）
 ///
@@ -710,35 +711,47 @@ class DiskIndexService {
   }
 
   /// 全盘搜索（后台 isolate），返回匹配文件路径列表。
+  /// 结果已按相关性打分排序（v1.2.6 搜索引擎 v2：精确>前缀>词边界>子串>仅路径，
+  /// 哈希乱码/临时文件降权），顺序即最终排序。
+  /// 支持 Everything 式语法：通配符 * ?、"引号"、AND(空格)/OR(|)/NOT(!)、
+  /// case:/wholeword:/path:/regex:/ext:/size:/dm:/dc:/audio:/video:/image:/doc:/zip:/exe:。
   /// 结果按用户排除列表兜底过滤（覆盖从旧落盘索引加载、排除规则后改的场景）
   static Future<List<String>> search(String query, {int limit = 300}) async {
-    final q = query.trim();
+    var q = query.trim();
     if (q.isEmpty || !isBuilt) return const [];
+    // size:/dm:/dc: 需要 stat 文件元数据，设置开关默认关闭（关闭时剔除这些条件）
+    final statOn = SettingStore.get<bool>('search_stat_filters', false);
+    if (!statOn) {
+      q = q.replaceAll(RegExp(r'\b(?:size|dm|dc|datemodified|datecreated):\S*'), ' ').trim();
+    }
+    final flags =
+        (SettingStore.get<bool>('search_pinyin', true) ? 1 : 0) | (statOn ? 2 : 0);
     final excludes = await ExcludeService.load();
-    final res = await Isolate.run(() => _searchSync(q, limit));
+    final eff = q;
+    final res = await Isolate.run(() => _searchSync(eff, limit, flags));
     if (excludes.isEmpty || res.isEmpty) return res;
     return res
         .where((path) => !ExcludeService.isExcluded(path, excludes))
         .toList();
   }
 
-  static List<String> _searchSync(String query, int limit) {
+  static List<String> _searchSync(String query, int limit, int flags) {
     final lib = RustCrypto.ensureLib();
     final searchFn = lib.lookupFunction<
-        ffi.Int32 Function(ffi.Pointer<ffi.Char>, ffi.Size,
+        ffi.Int32 Function(ffi.Pointer<ffi.Char>, ffi.Size, ffi.Uint32,
             ffi.Pointer<ffi.Uint8>, ffi.Pointer<ffi.Size>),
-        int Function(ffi.Pointer<ffi.Char>, int, ffi.Pointer<ffi.Uint8>,
-            ffi.Pointer<ffi.Size>)>('index_search');
+        int Function(ffi.Pointer<ffi.Char>, int, int, ffi.Pointer<ffi.Uint8>,
+            ffi.Pointer<ffi.Size>)>('index_search2');
     final qPtr = query.toNativeUtf8().cast<ffi.Char>();
     final lenPtr = calloc<ffi.Size>();
     try {
-      var rc = searchFn(qPtr, limit, ffi.nullptr, lenPtr);
+      var rc = searchFn(qPtr, limit, flags, ffi.nullptr, lenPtr);
       if (rc != 0) return const [];
       var len = lenPtr.value;
       if (len == 0) return const [];
       final buf = calloc<ffi.Uint8>(len);
       try {
-        rc = searchFn(qPtr, limit, buf, lenPtr);
+        rc = searchFn(qPtr, limit, flags, buf, lenPtr);
         if (rc != 0) return const [];
         len = lenPtr.value;
         final text =

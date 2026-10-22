@@ -24,6 +24,8 @@ mod vault;
 mod archive;
 // LANDrop v2 协议加密原语（kx/secp256k1/BLAKE2b/ChaCha20-Poly1305-IETF，libsodium 对拍）
 mod landrop;
+// 全盘搜索引擎 v2（v1.2.6）：排序打分 + Everything 式语法（搜索升级方案 M1+M2）
+mod search;
 
 const NONCE_SIZE: usize = 12;
 const TAG_SIZE: usize = 16;
@@ -950,7 +952,7 @@ static INDEX_ROOTS: std::sync::Mutex<Option<Vec<String>>> = std::sync::Mutex::ne
 static INDEX_EXCLUDES: std::sync::Mutex<Option<Vec<String>>> = std::sync::Mutex::new(None);
 
 /// 无依赖通配符匹配：`*` 匹配任意字符（含路径分隔符），`?` 匹配单个字符
-fn wildcard_match(pat: &[u8], text: &[u8]) -> bool {
+pub(crate) fn wildcard_match(pat: &[u8], text: &[u8]) -> bool {
     let (mut pi, mut ti) = (0usize, 0usize);
     let (mut star, mut mark) = (usize::MAX, 0usize);
     while ti < text.len() {
@@ -1211,43 +1213,49 @@ pub extern "C" fn index_search(
     out_ptr: *mut u8,
     out_len: *mut usize,
 ) -> i32 {
+    // 老入口兼容：默认开拼音、开 stat 类函数（size:/dm:/dc:）。
+    // 开关级控制走 index_search2（Dart 侧按设置拼 flags）。
+    index_search2(
+        query_ptr,
+        limit,
+        search::FLAG_PINYIN | search::FLAG_STAT,
+        out_ptr,
+        out_len,
+    )
+}
+
+/// 搜索引擎 v2 入口（v1.2.6）。flags: bit0=拼音转拼 bit1=允许 stat 类函数（size:/dm:/dc:）。
+/// 语法与打分见 search.rs 模块注释。
+#[no_mangle]
+pub extern "C" fn index_search2(
+    query_ptr: *const c_char,
+    limit: usize,
+    flags: u32,
+    out_ptr: *mut u8,
+    out_len: *mut usize,
+) -> i32 {
     if out_len.is_null() {
         return -3;
     }
     let query = if query_ptr.is_null() {
         String::new()
     } else {
-        unsafe { CStr::from_ptr(query_ptr) }
-            .to_string_lossy()
-            .to_lowercase()
+        unsafe { CStr::from_ptr(query_ptr) }.to_string_lossy().to_string()
+    };
+    let fl = search::Flags {
+        case: false,
+        word: false,
+        path: false,
+        regex: false,
+        pinyin: flags & search::FLAG_PINYIN != 0,
+        stat: flags & search::FLAG_STAT != 0,
     };
     let guard = INDEX_PATHS.lock().unwrap();
     let data = match guard.as_ref() {
         Some(d) => d,
         None => return -1,
     };
-    let mut results: Vec<&str> = Vec::new();
-    for p in data {
-        let bytes = p.as_bytes();
-        // 文件名起点 = 最后一个路径分隔符之后
-        let mut start = 0usize;
-        let mut i = bytes.len();
-        while i > 0 {
-            i -= 1;
-            if bytes[i] == b'/' || bytes[i] == b'\\' {
-                start = i + 1;
-                break;
-            }
-        }
-        let name = &p[start..];
-        if name.to_lowercase().contains(&query) {
-            results.push(p.as_str());
-            if results.len() >= limit {
-                break;
-            }
-        }
-    }
-    let joined = results.join("\n");
+    let joined = search::run(data, &query, limit, fl);
     let out = joined.as_bytes();
     unsafe {
         if out_ptr.is_null() {
@@ -1586,4 +1594,4 @@ pub extern "C" fn index_refresh(
         Some(v) => v.len() as i64,
         None => -3,
     }
-}
+}
