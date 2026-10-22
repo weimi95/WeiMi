@@ -612,7 +612,27 @@ class _QuickSearchPopupState extends State<QuickSearchPopup> {
       focusNode: _keyboardFocus,
       autofocus: true,
       onKeyEvent: (event) {
-        if (event is KeyDownEvent) _handleKey(event.logicalKey);
+        if (event is KeyDownEvent) {
+          // 键盘一按即聚焦搜索框（v1.2.12）：呼出默认显示常用网格，但玩家
+          // 习惯直接打字搜索——可打印字符（且无 Ctrl/Alt 修饰）按下时把焦点
+          // 转进输入框，并把这个字符补录进去（焦点刚到，TextField 收不到此键）。
+          // 中文输入法：首键 a-z 在此转焦点，IME 随后激活，后续拼音正常进框。
+          if (!_inputFocus.hasFocus &&
+              !HardwareKeyboard.instance.isControlPressed &&
+              !HardwareKeyboard.instance.isAltPressed) {
+            final ch = event.character;
+            if (ch != null &&
+                ch.isNotEmpty &&
+                ch.codeUnits.every((c) => c >= 0x20 && c != 0x7F)) {
+              _inputFocus.requestFocus();
+              _controller.text += ch;
+              _controller.selection =
+                  TextSelection.collapsed(offset: _controller.text.length);
+              return;
+            }
+          }
+          _handleKey(event.logicalKey);
+        }
       },
       child: Scaffold(
         backgroundColor: theme.colorScheme.surface,
@@ -634,13 +654,16 @@ class _QuickSearchPopupState extends State<QuickSearchPopup> {
                     child: TextField(
                       controller: _controller,
                       focusNode: _inputFocus,
+                      // 不设 autofocus：呼出默认展示常用网格（老板要求），
+                      // 键盘一按由外层 KeyboardListener 转焦点进来。
+                      // 不设 onSubmitted：Enter 统一走 KeyboardListener 冒泡
+                      // 路径，避免「输入框提交 + 快捷键」双触发打开两次。
                       onTap: () {
                         if (!_showHistory) {
                           setState(() => _showHistory = true);
                           _syncWindowSize();
                         }
                       },
-                      onSubmitted: (_) => _openItem(_selected),
                       decoration: InputDecoration(
                         isDense: true,
                         border: InputBorder.none,
