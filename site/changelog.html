@@ -131,7 +131,7 @@ footer { margin-top: 2.6rem; color: var(--muted); font-size: 0.88rem; }
 <main>
   <a class="back" href="/weimi/">← 返回官网首页</a>
   <header>
-    <h1>微密文件 <span class="grad">WeiMi</span> · 更新日志<span class="badge">v1.1.01</span></h1>
+    <h1>微密文件 <span class="grad">WeiMi</span> · 更新日志<span class="badge">v1.2.0</span></h1>
     <p class="sub">
       按时间倒序记录每一版改了什么，方便日后回看「某个功能是哪一版加的」。
       下载最新版见<a href="/weimi/">官网首页</a>。
@@ -140,6 +140,15 @@ footer { margin-top: 2.6rem; color: var(--muted); font-size: 0.88rem; }
 
   <ul class="log">
     <li class="current">
+      <span class="ver">v1.2.0</span><span class="date">2026-10-21</span>
+      <ul class="changes">
+        <li><strong>LANDrop 兼容（跨 App 互传）</strong>：与开源传输工具 LANDrop 双向互通——对方装没装微密都能传。同一 WiFi 下自动发现 LANDrop 设备（含官方 LANDrop App），飞传页三类设备统一列表显示（微密 / LocalSend / LANDrop，同 IP 自动合并），设置页可一键开关</li>
+        <li><strong>传输全程加密 + 6 位验证码</strong>：LANDrop 链路走 X25519 密钥交换 + ChaCha20-Poly1305 逐记录加密、secp256k1 身份签名；首次接收弹窗显示 6 位验证码，与对方设备当面核对，勾选信任后免确认直收（信任按设备身份公钥持久化）</li>
+        <li><strong>文件夹 / 大文件 / 中文名全支持</strong>：超过 64KB 自动分片续传，文件修改时间与权限原样恢复，拒收有明确反馈；Windows 防火墙自动放行 52637 端口（热点/公用网络不再拦）</li>
+        <li><strong>协议级质量保障</strong>：加密原语（Rust 引擎）经 libsodium 官方测试向量逐项对拍，并与真实 LANDrop 2.7.2 双向互通实测——字节、修改时间、验证码逐项断言全过</li>
+      </ul>
+    </li>
+    <li>
       <span class="ver">v1.1.01</span><span class="date">2026-10-21</span>
       <ul class="changes">
         <li><strong>同批传输只确认一次</strong>：一次分享多个文件时，确认框新增「同批后续文件也按此处理」（默认勾选）——这次点接收/拒收，同一设备紧接着发来的文件就按此办理，不再逐个弹窗打扰；勾选拒收则后续直接拒，勾选接收则 2 分钟内直达</li>

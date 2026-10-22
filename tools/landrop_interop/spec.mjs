@@ -5,7 +5,9 @@
 // 密码学直接用 libsodium-wrappers + secp256k1（与 Dart 侧 FFI 调用的 Rust 原语同源，
 // Rust 原语已用同一套向量逐字节对拍，见 rust_crypto/tests/landrop_vectors.json）。
 import net from 'net';
+import dgram from 'dgram';
 import fs from 'fs';
+import os from 'os';
 import path from 'path';
 import sodium from 'libsodium-wrappers';
 import secp from 'secp256k1';
@@ -356,4 +358,181 @@ export async function specSendFiles({
   });
   s.close();
   return { verifCode: s.verifCode, peerName: di.data.name };
+}
+
+// ==================== 规范发现层（= 我方发现端） ====================
+// 镜像 lib/services/landrop_service.dart 的发现逻辑（v1.2.1 起）：
+//   - bind 52637 被占 → 降级临时端口 + 每 5s 重试抢回（rebind）
+//   - 周期 announce + query 双发（组播 + 广播）——LANDrop 被动设计，
+//     不主动查就发现不了先启动的对方
+//   - 只按身份公钥判自（同主机对方包也来自本机 IP，按 IP 判自会误杀）
+//   - 任何 discoverable 包（含 request 查询包）都先登记设备再按需应答
+export class SpecDiscovery {
+  static MULTICAST_GROUP = '239.192.52.63';
+  static PORT = 52637;
+
+  constructor({
+    identitySk, identityPkB64,
+    deviceName = '微密文件(spec)',
+    deviceType = 'windows',
+    serverPort = 0,
+    announceIntervalMs = 10000,
+    rebindIntervalMs = 5000,
+  }) {
+    this.identitySk = identitySk;
+    this.identityPkB64 = identityPkB64;
+    this.deviceName = deviceName;
+    this.deviceType = deviceType;
+    this.serverPort = serverPort;
+    this.announceIntervalMs = announceIntervalMs;
+    this.rebindIntervalMs = rebindIntervalMs;
+    this.sock = dgram.createSocket('udp4');
+    this.port = 0;
+    this.degraded = false;
+    this.devices = new Map(); // pk -> {publicKey,name,type,address,port,lastSeen}
+    this.rxLog = [];         // {addr, port, request}
+    this.queryCount = 0;     // 发出的 query 包数（announce+query 双发验证）
+    this.rebindCount = 0;
+    this.timer = null;
+    this.rebindTimer = null;
+    this.stopped = false;
+
+    this.sock.on('message', (msg, rinfo) => this._onMessage(msg, rinfo));
+  }
+
+  start() {
+    return new Promise((resolve, reject) => {
+      const onReady = (degraded) => {
+        this.sock.removeAllListeners('error');
+        this.port = this.sock.address().port;
+        this.degraded = degraded;
+        try { this.sock.setBroadcast(true); } catch {}
+        try { this.sock.setMulticastTTL(32); } catch {}
+        this._joinMulticast();
+        this.timer = setInterval(() => {
+          this._joinMulticast();
+          this.announce();
+        }, this.announceIntervalMs);
+        if (degraded) {
+          this.rebindTimer = setInterval(() => this.rebindNow(),
+            this.rebindIntervalMs);
+        }
+        this.announce(); // 启动即播一轮（ Dart _startDiscovery 后立即 _announce）
+        resolve({ port: this.port, degraded });
+      };
+      this.sock.on('error', (e) => {
+        if (e.code === 'EADDRINUSE') {
+          this.sock.bind(0, () => onReady(true));
+        } else {
+          reject(e);
+        }
+      });
+      this.sock.bind(SpecDiscovery.PORT, () => onReady(false));
+    });
+  }
+
+  _joinMulticast() {
+    for (const addrs of Object.values(os.networkInterfaces())) {
+      for (const a of addrs) {
+        if (a.family !== 'IPv4' || a.internal) continue;
+        try { this.sock.addMembership(SpecDiscovery.MULTICAST_GROUP, a.address); }
+        catch {}
+      }
+    }
+  }
+
+  _packet(request = false) {
+    return {
+      request,
+      supported_versions: ['v2'],
+      public_key: this.identityPkB64,
+      port: this.serverPort,
+      device_info: { name: this.deviceName, type: this.deviceType },
+      discoverable: true,
+    };
+  }
+
+  /// 周期广播：组播 + 广播 × (announce + query)（与 Dart _announce 一致）
+  announce() {
+    if (this.stopped) return;
+    for (const request of [false, true]) {
+      const data = Buffer.from(JSON.stringify(this._packet(request)));
+      if (request) this.queryCount++;
+      for (const [host, dstPort] of [
+        [SpecDiscovery.MULTICAST_GROUP, SpecDiscovery.PORT],
+        ['255.255.255.255', SpecDiscovery.PORT],
+      ]) {
+        try { this.sock.send(data, dstPort, host); } catch {}
+      }
+    }
+  }
+
+  _onMessage(msg, rinfo) {
+    let packet;
+    try {
+      packet = JSON.parse(msg.toString());
+    } catch {
+      return;
+    }
+    const pk = packet.public_key || '';
+    if (!pk) return;
+    this.rxLog.push({ addr: rinfo.address, port: rinfo.port, request: !!packet.request });
+    // 只按身份公钥判自（同主机并存的对方包源 IP 也是本机 IP，按 IP 判自会误杀）
+    if (pk === this.identityPkB64) return;
+    if (packet.discoverable !== true) {
+      this.devices.delete(pk); // 对方关掉可被发现 → 摘除
+      return;
+    }
+    // announce 与查询包都带完整设备信息 → 先登记，再按需单播应答
+    const info = packet.device_info || {};
+    this.devices.set(pk, {
+      publicKey: pk,
+      name: info.name || '未知设备',
+      type: info.type || '',
+      address: rinfo.address,
+      port: packet.port || SpecDiscovery.PORT,
+      lastSeen: Date.now(),
+    });
+    if (packet.request === true) {
+      // 对方在主动查询 → 单播应答（LANDrop 对广播/组播查询都回单播）
+      try {
+        this.sock.send(Buffer.from(JSON.stringify(this._packet(false))),
+          rinfo.port, rinfo.address);
+      } catch {}
+    }
+  }
+
+  /// 重试 bind 52637（降级恢复路径；测试用手动触发）
+  rebindNow() {
+    if (this.stopped || !this.degraded) return Promise.resolve(false);
+    return new Promise((resolve) => {
+      const s2 = dgram.createSocket('udp4');
+      s2.on('error', () => { try { s2.close(); } catch {} resolve(false); });
+      s2.bind(SpecDiscovery.PORT, () => {
+        try { s2.setBroadcast(true); } catch {}
+        try { s2.setMulticastTTL(32); } catch {}
+        const old = this.sock;
+        this.sock = s2;
+        this.port = s2.address().port;
+        this.degraded = false;
+        this.rebindCount++;
+        s2.on('message', (msg, rinfo) => this._onMessage(msg, rinfo));
+        this._joinMulticast();
+        clearInterval(this.rebindTimer);
+        this.rebindTimer = null;
+        try { old.close(); } catch {}
+        this.announce();
+        resolve(true);
+      });
+    });
+  }
+
+  stop() {
+    this.stopped = true;
+    clearInterval(this.timer);
+    clearInterval(this.rebindTimer);
+    this.timer = null;
+    this.rebindTimer = null;
+    try { this.sock.close(); } catch {}
+  }
 }
