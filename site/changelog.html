@@ -140,6 +140,14 @@ footer { margin-top: 2.6rem; color: var(--muted); font-size: 0.88rem; }
 
   <ul class="log">
     <li class="current">
+      <span class="ver">v1.2.1</span><span class="date">2026-10-22</span>
+      <ul class="changes">
+        <li><strong>LANDrop 发现更可靠</strong>：主动查询 + 应答双管齐下——LANDrop 先启动、或两边装在同一台电脑上，现在都能互相发现；端口被占时自动降级并定时重试抢回</li>
+        <li><strong>开机自启可只进托盘</strong>：设置→通用→桌面端新增「开机自启时进入托盘」——开机后自动运行但只留托盘图标、不弹窗口，从托盘菜单随时打开主界面（手动双击图标仍正常出窗口）</li>
+        <li><strong>与真实 LANDrop 深度对拍</strong>：发现层用真实 LANDrop 2.7.2 代码逐包对拍（查询/应答/登记/判自），局域网实测多台真实 LANDrop 设备自动发现</li>
+      </ul>
+    </li>
+    <li>
       <span class="ver">v1.2.0</span><span class="date">2026-10-21</span>
       <ul class="changes">
         <li><strong>LANDrop 兼容（跨 App 互传）</strong>：与开源传输工具 LANDrop 双向互通——对方装没装微密都能传。同一 WiFi 下自动发现 LANDrop 设备（含官方 LANDrop App），飞传页三类设备统一列表显示（微密 / LocalSend / LANDrop，同 IP 自动合并），设置页可一键开关</li>
