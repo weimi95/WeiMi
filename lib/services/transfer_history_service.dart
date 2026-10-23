@@ -55,18 +55,15 @@ class TransferHistoryService {
 
   /// 确保已从磁盘载入并返回记录（最新在前）
   Future<List<TransferRecord>> load() async {
-    await _ensureLoaded();
+    await ensureLoaded();
     return List.unmodifiable(_records);
   }
 
-  Future<String> _resolveFilePath() async {
-    if (_filePath != null) return _filePath!;
-    final docs = await getApplicationDocumentsDirectory();
-    _filePath = p.join(docs.path, 'transfer_history.json');
-    return _filePath!;
-  }
-
-  Future<void> _ensureLoaded() async {
+  /// 确保历史已从磁盘载入（幂等）。conversations()/recordsFor() 的调用方
+  /// 必须先 await 本方法——二者本身是同步读内存，不触发加载；
+  /// 曾因只有 add() 触发加载，导致「聊天窗点进去无历史、发一条消息后
+  /// 全部历史+旧设备才一次性冒出来」（2026-10-23 实机故障）。
+  Future<void> ensureLoaded() async {
     if (_loaded) return;
     _loaded = true;
     await _loadRetention();
@@ -83,6 +80,13 @@ class TransferHistoryService {
     }
     // 启动即按保留时长清一次过期记录
     await applyRetention();
+  }
+
+  Future<String> _resolveFilePath() async {
+    if (_filePath != null) return _filePath!;
+    final docs = await getApplicationDocumentsDirectory();
+    _filePath = p.join(docs.path, 'transfer_history.json');
+    return _filePath!;
   }
 
   /// 按保留时长清除过期记录（**只清记录，不动已接收的文件**）。
@@ -156,7 +160,7 @@ class TransferHistoryService {
   /// 新增一条记录（最新在前）。文本超长截断存储。
   /// 长驻进程顺带做保留期检查（最旧一条过期才触发清理，均摊零开销）。
   Future<void> add(TransferRecord record) async {
-    await _ensureLoaded();
+    await ensureLoaded();
     if (_retentionDays > 0 &&
         _records.isNotEmpty &&
         _records.last.time.isBefore(
@@ -178,7 +182,7 @@ class TransferHistoryService {
   /// 删除记录；deleteFiles=true 时连文件一起删（文本记录无文件，跳过）。
   /// 返回实际删除的文件数。
   Future<int> deleteRecords(List<String> ids, {bool deleteFiles = false}) async {
-    await _ensureLoaded();
+    await ensureLoaded();
     int fileCount = 0;
     if (deleteFiles) {
       for (final r in _records.where((r) => ids.contains(r.id))) {
@@ -201,7 +205,7 @@ class TransferHistoryService {
   /// 把选中文件记录批量移动到目标目录，成功后更新记录里的 path。
   /// 返回成功移动数。
   Future<int> moveFiles(List<String> ids, String targetDir) async {
-    await _ensureLoaded();
+    await ensureLoaded();
     int moved = 0;
     for (int i = 0; i < _records.length; i++) {
       final r = _records[i];
@@ -240,7 +244,7 @@ class TransferHistoryService {
   }
 
   Future<void> clearAll() async {
-    await _ensureLoaded();
+    await ensureLoaded();
     _records.clear();
     await _persist();
   }
@@ -400,12 +404,31 @@ class Conversation {
 }
 
 extension TransferHistoryConversations on TransferHistoryService {
+  /// peerName → 已知 peerKey 映射（仅来自带 peerKey 的记录）。
+  /// daemon 转录的历史记录（peerKey=null）按 peerName 并入同名已知会话，
+  /// 否则同一设备会裂成两个会话（如「一加11」+「hn0n…」）。
+  Map<String, String> _nameToKey() {
+    final m = <String, String>{};
+    for (final r in _records) {
+      final k = r.peerKey;
+      if (k != null && k.isNotEmpty && r.peerName.isNotEmpty) {
+        m[r.peerName] = k;
+      }
+    }
+    return m;
+  }
+
+  /// 记录归属 key：peerKey 优先，其次按 peerName 映射，最后 peerName 兜底。
+  String _keyOf(TransferRecord r, Map<String, String> nameToKey) =>
+      r.peerKey ?? nameToKey[r.peerName] ?? r.peerName;
+
   /// 所有会话（按最后活动时间降序）。旧记录无 peerKey 时按 peerName 兜底聚合，
   /// 与在线设备 key 可能不完全一致——在线会话在 UI 层由 _peers 驱动，这里只覆盖离线。
   List<Conversation> conversations() {
+    final nameToKey = _nameToKey();
     final Map<String, List<TransferRecord>> groups = {};
     for (final r in _records) {
-      final key = r.peerKey ?? r.peerName;
+      final key = _keyOf(r, nameToKey);
       groups.putIfAbsent(key, () => []).add(r);
     }
     final out = <Conversation>[];
@@ -424,7 +447,13 @@ extension TransferHistoryConversations on TransferHistoryService {
     return out;
   }
 
-  /// 某会话的全部记录（最新在前）。
-  List<TransferRecord> recordsFor(String peerKey) =>
-      _records.where((r) => (r.peerKey ?? r.peerName) == peerKey).toList();
+  /// 某会话的全部记录（最新在前）。无 peerKey 的旧记录按 peerName
+  /// 映射并入（与 conversations() 同口径），否则点开在线会话看不到
+  /// daemon 时代收到的历史。
+  List<TransferRecord> recordsFor(String peerKey) {
+    final nameToKey = _nameToKey();
+    return _records
+        .where((r) => _keyOf(r, nameToKey) == peerKey)
+        .toList();
+  }
 }

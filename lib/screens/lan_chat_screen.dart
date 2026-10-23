@@ -10,6 +10,7 @@ import 'package:desktop_drop/desktop_drop.dart';
 import 'package:cross_file/cross_file.dart';
 import 'package:path/path.dart' as p;
 import '../framework/setting_store.dart';
+import '../services/file_viewer_service.dart';
 import '../services/lan_transfer_service.dart';
 import '../services/landrop_service.dart';
 import '../services/pending_send_service.dart';
@@ -121,6 +122,9 @@ class _LanChatScreenState extends State<LanChatScreen> {
   }
 
   Future<void> _load() async {
+    // conversations()/recordsFor() 同步读内存不触发加载；进窗首拍先确保
+    // 磁盘历史已载入，否则点开就是空聊天窗（历史要等发消息 add() 才出现）
+    await TransferHistoryService.instance.ensureLoaded();
     final r = await TransferHistoryService.instance.recordsFor(widget.peerKey);
     if (!mounted) return;
     _records = r;
@@ -423,12 +427,69 @@ class _LanChatScreenState extends State<LanChatScreen> {
   }
 
   void _onRecordTap(TransferRecord r) {
+    // 微信式：点击=打开内容本身。文件走内置查看器（图片/视频/文本/PDF），
+    // 不支持的格式 FileViewerService 自动交给系统打开；文本弹全文查看。
     if (r.kind == 'file' && r.path != null) {
-      TransferHistoryService.instance.openParentDirectory(r.path!);
+      unawaited(FileViewerService.openFile(context, r.path!));
+      return;
+    }
+    if (r.kind == 'text' && r.text != null) {
+      _showTextDetail(r);
     }
   }
 
-  void _onRecordLongPress(TransferRecord r) {
+  /// 文本消息全文查看（点击文本气泡）。
+  void _showTextDetail(TransferRecord r) {
+    showModalBottomSheet(
+      context: context,
+      builder: (ctx) => SafeArea(
+        child: Padding(
+          padding: const EdgeInsets.fromLTRB(16, 16, 16, 12),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Row(children: [
+                Text(r.peerName,
+                    style: const TextStyle(
+                        fontWeight: FontWeight.bold, fontSize: 13)),
+                const Spacer(),
+                Text(r.time.toString().substring(0, 16),
+                    style:
+                        TextStyle(color: Colors.grey.shade500, fontSize: 12)),
+              ]),
+              const SizedBox(height: 10),
+              Flexible(
+                child: SingleChildScrollView(
+                  child: SelectableText(r.text ?? '',
+                      style: const TextStyle(fontSize: 15, height: 1.4)),
+                ),
+              ),
+              const SizedBox(height: 10),
+              SizedBox(
+                width: double.infinity,
+                child: FilledButton.tonalIcon(
+                  icon: const Icon(Icons.copy, size: 18),
+                  label: const Text('复制全文'),
+                  onPressed: () {
+                    Clipboard.setData(ClipboardData(text: r.text ?? ''));
+                    Navigator.pop(ctx);
+                    _snack('已复制');
+                  },
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  void _onRecordLongPress(TransferRecord r) => _showRecordMenu(r);
+
+  /// 长按/右键菜单（微信式）：复制 / 多选 / 另存为 / 在文件夹中显示 /
+  /// 转发给其他设备 / 删除。
+  void _showRecordMenu(TransferRecord r) {
     showModalBottomSheet(
       context: context,
       builder: (ctx) => SafeArea(
@@ -438,13 +499,44 @@ class _LanChatScreenState extends State<LanChatScreen> {
             if (r.kind == 'text' && r.text != null)
               ListTile(
                 leading: const Icon(Icons.copy),
-                title: const Text('复制文本'),
+                title: const Text('复制'),
                 onTap: () {
                   Clipboard.setData(ClipboardData(text: r.text!));
                   Navigator.pop(ctx);
                   _snack('已复制');
                 },
               ),
+            if (r.kind == 'file' && r.path != null)
+              ListTile(
+                leading: const Icon(Icons.drive_file_move_outline),
+                title: const Text('另存为'),
+                onTap: () async {
+                  Navigator.pop(ctx);
+                  final dir = await FilePicker.platform.getDirectoryPath(
+                      dialogTitle: '选择保存位置');
+                  if (dir == null) return;
+                  final target = p.join(dir, p.basename(r.path!));
+                  try {
+                    final bak = '$target (${DateTime.now().millisecondsSinceEpoch % 10000})';
+                    final t = File(target).existsSync() ? File(bak) : File(target);
+                    await File(r.path!).copy(t.path);
+                    _snack('已保存到 ${p.dirname(t.path)}');
+                  } catch (e) {
+                    _snack('保存失败：$e');
+                  }
+                },
+              ),
+            ListTile(
+              leading: const Icon(Icons.checklist),
+              title: const Text('多选'),
+              onTap: () {
+                Navigator.pop(ctx);
+                setState(() {
+                  _selecting = true;
+                  _selected.add(r.id);
+                });
+              },
+            ),
             if (r.kind == 'file' && r.path != null)
               ListTile(
                 leading: const Icon(Icons.folder_open),
@@ -608,6 +700,7 @@ class _LanChatScreenState extends State<LanChatScreen> {
               selectedIds: _selected,
               onTap: _onItemTap,
               onLongPress: _onItemLongPress,
+              onSecondaryTap: () => _onItemLongPress(it.recs.last),
             );
           }
           final r = (it as _SingleItem).r;
@@ -617,6 +710,7 @@ class _LanChatScreenState extends State<LanChatScreen> {
             selecting: _selecting,
             onTap: () => _onItemTap(r),
             onLongPress: () => _onItemLongPress(r),
+            onSecondaryTap: () => _onItemLongPress(r),
           );
         },
       );
@@ -747,12 +841,14 @@ class _Bubble extends StatelessWidget {
   final TransferRecord record;
   final VoidCallback onTap;
   final VoidCallback onLongPress;
+  final VoidCallback? onSecondaryTap; // 桌面右键 = 长按菜单
   final bool selected;
   final bool selecting;
   const _Bubble({
     required this.record,
     required this.onTap,
     required this.onLongPress,
+    this.onSecondaryTap,
     this.selected = false,
     this.selecting = false,
   });
@@ -771,6 +867,7 @@ class _Bubble extends StatelessWidget {
       child: GestureDetector(
         onTap: onTap,
         onLongPress: onLongPress,
+        onSecondaryTap: onSecondaryTap,
         child: Container(
           margin: const EdgeInsets.symmetric(vertical: 4),
           constraints: const BoxConstraints(maxWidth: 280),
@@ -1355,12 +1452,14 @@ class _StackBubble extends StatefulWidget {
   final Set<String> selectedIds;
   final void Function(TransferRecord) onTap;
   final void Function(TransferRecord) onLongPress;
+  final VoidCallback? onSecondaryTap; // 桌面右键（末一条）= 长按菜单
   const _StackBubble({
     required this.recs,
     required this.selecting,
     required this.selectedIds,
     required this.onTap,
     required this.onLongPress,
+    this.onSecondaryTap,
   });
   @override
   State<_StackBubble> createState() => _StackBubbleState();
@@ -1406,6 +1505,7 @@ class _StackBubbleState extends State<_StackBubble> {
               ...widget.recs.map((r) => GestureDetector(
                     onTap: () => widget.onTap(r),
                     onLongPress: () => widget.onLongPress(r),
+                    onSecondaryTap: widget.onSecondaryTap,
                     child: Container(
                       margin: const EdgeInsets.only(top: 4),
                       padding: const EdgeInsets.all(6),

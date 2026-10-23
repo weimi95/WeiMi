@@ -307,6 +307,9 @@ class DaemonService {
               text: j['text'] as String?,
               size: (j['size'] as num?)?.toInt() ?? 0,
               peerName: (j['peerName'] as String?) ?? '',
+              // daemon 1.2.16 起带 peerId（发送方 identityId，与发现层同源）；
+              // 旧记录无此字段按 peerName 兜底聚合
+              peerKey: (j['peerId'] as String?),
               time: ms > 0
                   ? DateTime.fromMillisecondsSinceEpoch(ms)
                   : DateTime.now(),

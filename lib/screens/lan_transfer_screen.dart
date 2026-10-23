@@ -344,6 +344,11 @@ class _LanTransferScreenState extends State<LanTransferScreen> {
 
   Future<void> _poll() async {
     if (!mounted) return;
+    // 会话列表依赖历史记录（conversations() 同步读内存不触发加载），
+    // 轮询首拍先确保磁盘历史已载入，否则启动初期列表只有在线设备，
+    // 历史会话要等第一条新消息 add() 才冒出来（2026-10-23 实机故障）
+    await TransferHistoryService.instance.ensureLoaded();
+    if (!mounted) return;
     final ips = await _svc.localIPv4s();
     if (!mounted) return;
     // LANDrop 兼容层设备按 IP 合并（共享 LandropService.mergeInto，

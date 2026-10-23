@@ -985,6 +985,7 @@ fn record_history(
     ok: bool,
     text: Option<&str>,
     path: Option<&str>,
+    peer_id: Option<&str>,
 ) {
     let docs = {
         let cfg = CONFIG.lock().unwrap();
@@ -996,6 +997,8 @@ fn record_history(
         return;
     }
     let p = Path::new(&docs).join("daemon_transfers.jsonl");
+    // peerId = 发送方 identityId（UI 会话 key 同源）。缺了它 UI 侧按
+    // peerName 兜底聚合，同一设备会裂成两个会话（v1.2.16 实机故障）。
     let obj = serde_json::json!({
         "kind": kind,
         "direction": "in",
@@ -1004,6 +1007,7 @@ fn record_history(
         "path": path,
         "size": size,
         "peerName": peer,
+        "peerId": peer_id,
         "time": now_ms(),
         "ok": ok,
         "via": "daemon",
@@ -1454,6 +1458,7 @@ fn handle_client(mut stream: TcpStream) {
                         true,
                         None,
                         Some(&save.to_string_lossy()),
+                        None,
                     );
                 }
                 Err(e) => {
@@ -1463,7 +1468,7 @@ fn handle_client(mut stream: TcpStream) {
                         500,
                         &serde_json::json!({"ok": false, "error": e.to_string()}),
                     );
-                    record_history("file", &name, 0, &from, false, None, None);
+                    record_history("file", &name, 0, &from, false, None, None, None);
                 }
             }
         }
@@ -1491,6 +1496,7 @@ fn handle_client(mut stream: TcpStream) {
                 &from,
                 true,
                 Some(&text),
+                None,
                 None,
             );
         }
@@ -1577,9 +1583,10 @@ fn handle_client(mut stream: TcpStream) {
                             false,
                             None,
                             None,
+                            Some(&sender_id),
                         );
                     } else {
-                        record_history("file", &hint, fsize, &sender_name, false, None, None);
+                        record_history("file", &hint, fsize, &sender_name, false, None, None, Some(&sender_id));
                     }
                     return;
                 }
@@ -1600,6 +1607,7 @@ fn handle_client(mut stream: TcpStream) {
                     true,
                     Some(&text),
                     None,
+                    Some(&sender_id),
                 );
             } else {
                 let fname = {
@@ -1639,6 +1647,7 @@ fn handle_client(mut stream: TcpStream) {
                             true,
                             None,
                             Some(&save.to_string_lossy()),
+                            Some(&sender_id),
                         );
                     }
                     Err(e) => {
@@ -1648,7 +1657,7 @@ fn handle_client(mut stream: TcpStream) {
                             500,
                             &serde_json::json!({"ok": false, "error": e.to_string()}),
                         );
-                        record_history("file", &name, 0, &sender_name, false, None, None);
+                        record_history("file", &name, 0, &sender_name, false, None, None, Some(&sender_id));
                     }
                 }
             }
@@ -2078,6 +2087,7 @@ fn ws_frame(opcode: u8, payload: &[u8]) -> Vec<u8> {
     out
 }
 
+#[derive(Debug)]
 enum WsErr {
     Closed,
     Timeout,
@@ -2152,23 +2162,34 @@ impl WsConn {
         if len > 64 * 1024 * 1024 {
             return None; // 协议保护：单帧上限 64MB
         }
-        let total = off + len + if masked { 4 } else { 0 };
-        if self.buf.len() < total {
+        // 布局：header(off) + [mask 4B] + payload(len)。客户端帧必带 mask，
+        // mask 紧跟在长度之后、payload 之前——旧代码切 payload 没跳过 mask，
+        // 把 masked payload 前 4 字节当 mask、mask+payload 前 6 字节当 payload
+        // 去异或，所有客户端帧全被解成乱码 → JSON 解析失败 → 房间永远空
+        //（2026-10-23 v1.2.16 实机故障：网页版"等待其他设备"永不出设备）。
+        let mut mask: Option<[u8; 4]> = None;
+        if masked {
+            if self.buf.len() < off + 4 {
+                return None;
+            }
+            mask = Some([
+                self.buf[off],
+                self.buf[off + 1],
+                self.buf[off + 2],
+                self.buf[off + 3],
+            ]);
+            off += 4;
+        }
+        if self.buf.len() < off + len {
             return None;
         }
         let mut payload = self.buf[off..off + len].to_vec();
-        if masked {
-            let mk = [
-                self.buf[off + len],
-                self.buf[off + len + 1],
-                self.buf[off + len + 2],
-                self.buf[off + len + 3],
-            ];
+        if let Some(mk) = mask {
             for (i, b) in payload.iter_mut().enumerate() {
                 *b ^= mk[i % 4];
             }
         }
-        self.buf.drain(..total);
+        self.buf.drain(..off + len);
         Some((b0, payload))
     }
 }
@@ -2377,7 +2398,7 @@ fn ws_route_binary(
                     &format!("收到网页文件：{}\n来自 {}", name, visitor),
                 );
                 maybe_open_recv_dir(&p);
-                record_history("file", &name, size, visitor, true, None, path_str.as_deref());
+                record_history("file", &name, size, visitor, true, None, path_str.as_deref(), None);
             }
             let _ = tx.send(ws_frame(
                 1,
@@ -2659,6 +2680,7 @@ fn handle_ws(stream: TcpStream, head: &RequestHead, leftover: Vec<u8>) {
                         true,
                         Some(&text),
                         None,
+                        None,
                     );
                 } else if let Some(devid) = to.strip_prefix("d:").map(|s| s.to_string()) {
                     let devname = {
@@ -2894,6 +2916,57 @@ mod ws_tests {
     fn pct_encode_known() {
         assert_eq!(pct_encode("a b"), "a%20b");
         assert_eq!(pct_encode("灰"), "%E7%81%B0");
+    }
+
+    #[test]
+    fn ws_read_masked_client_frame() {
+        // 2026-10-23 实机故障回归：客户端帧必带 mask（RFC 6455），旧 try_parse
+        // 切 payload 没跳过 4 字节 mask key，所有客户端帧被解成乱码 →
+        // 房间永远空（网页版"等待其他设备"）。本测试用客户端编码逐字节喂入，
+        // 必须还原出明文；两个连发帧不得串位。
+        // RFC 6455 §5.7 示例：payload "Hello" + mask 0x37fa213d
+        // 线上字节：81 85 37 fa 21 3d 7f 9f 4d 51 58
+        // 建一条真连接仅为持有 TcpStream；帧数据全部预置在 buf，read_frame
+        // 不会触碰网络。
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        std::thread::spawn(move || {
+            let (_srv, _) = listener.accept().unwrap();
+            std::thread::sleep(std::time::Duration::from_secs(10));
+        });
+        let stream = std::net::TcpStream::connect(addr).unwrap();
+        let mut c = WsConn::new(
+            stream,
+            vec![0x81, 0x85, 0x37, 0xfa, 0x21, 0x3d, 0x7f, 0x9f, 0x4d, 0x51, 0x58],
+        );
+        let (b0, payload) = c.read_frame().unwrap();
+        assert_eq!(b0, 0x81);
+        assert_eq!(payload, b"Hello");
+
+        // 连发两帧（长度 126 编码 + 无 mask 服务器风格不适用客户端，仍用 mask）
+        let mk = [0x11u8, 0x22, 0x33, 0x44];
+        let mk_frame = |text: &str| {
+            let p = text.as_bytes();
+            let mut f = vec![0x81u8];
+            if p.len() < 126 {
+                f.push(0x80 | p.len() as u8);
+            } else {
+                f.push(0x80 | 126);
+                f.extend_from_slice(&(p.len() as u16).to_be_bytes());
+            }
+            f.extend_from_slice(&mk);
+            f.extend(p.iter().enumerate().map(|(i, b)| b ^ mk[i % 4]));
+            f
+        };
+        let a = mk_frame("{\"t\":\"hello\",\"name\":\"测试设备\"}");
+        let b = mk_frame("{\"t\":\"text\",\"to\":\"app\",\"text\":\"hi\"}");
+        c.buf.extend_from_slice(&a);
+        c.buf.extend_from_slice(&b);
+        let (_, p1) = c.read_frame().unwrap();
+        assert_eq!(String::from_utf8(p1).unwrap(), "{\"t\":\"hello\",\"name\":\"测试设备\"}");
+        let (_, p2) = c.read_frame().unwrap();
+        assert_eq!(String::from_utf8(p2).unwrap(), "{\"t\":\"text\",\"to\":\"app\",\"text\":\"hi\"}");
+        assert!(c.buf.is_empty());
     }
 }
 
