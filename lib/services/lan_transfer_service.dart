@@ -601,7 +601,8 @@ class LanTransferService {
     if (_manualProbing) return const [];
     _manualProbing = true;
     try {
-      final bool match(String ip) =>
+      // 局部函数不能加 final（CI 实证：Can't have modifier 'final' here）
+      bool match(String ip) =>
           e.isSubnet ? ip.startsWith('${e.subnet}.') : ip == e.ip;
       final before = <String>{
         for (final p in _peers.values)
