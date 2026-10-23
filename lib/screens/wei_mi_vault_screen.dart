@@ -1820,6 +1820,9 @@ class WeiMiVaultScreenState extends State<WeiMiVaultScreen> {
                             _fileSearchCtrl.text = q;
                             _fileSearchCtrl.selection =
                                 TextSelection.collapsed(offset: q.length);
+                            // 程序赋值 .text 不触发 TextField.onChanged，
+                            // 必须手动走搜索链路（否则点击筛选条无反应）
+                            _onFileSearchChanged(q);
                           },
                         ),
                       ),

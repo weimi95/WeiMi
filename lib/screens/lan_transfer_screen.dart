@@ -967,10 +967,24 @@ class _LanTransferScreenState extends State<LanTransferScreen> {
   /// （在线设备排在上方并标注在线/离线）+ 网页客户端。点开任意项进入与设备的聊天窗口。
   Widget _buildBody() {
     final convs = TransferHistoryService.instance.conversations();
+    // 网页会话统一 key 'web'（_keyOf 已把 'ws_'/网页访客 旧记录归并进来），
+    // 单独取出，与在线网页客户端合并成一张卡（v1.2.17 修「多个网页客户端」）
+    Conversation? webConv;
+    for (final c in convs) {
+      if (c.key == 'web') {
+        webConv = c;
+        break;
+      }
+    }
     final peerConvs = convs.where((c) => c.key != 'web').toList();
     final convByKey = <String, Conversation>{for (final c in peerConvs) c.key: c};
     final items = <_ConvItem>[];
+    LanPeer? webPeer; // 任一在线网页客户端（daemon 模式 'ws_' 前缀）
     for (final p in _peers) {
+      if (p.id.startsWith('ws_')) {
+        webPeer ??= p;
+        continue;
+      }
       final c = convByKey.remove(p.id);
       items.add(_ConvItem(p.id, _aliases[p.id] ?? (c?.name ?? p.name),
           c?.preview, c?.lastTime, true, p, c?.count ?? 0,
@@ -992,6 +1006,21 @@ class _LanTransferScreenState extends State<LanTransferScreen> {
     for (final t in TrustedDevices.instance.all) {
       if (covered.contains(t.key)) continue;
       items.add(_ConvItem(t.key, t.value, '已信任', null, false, null, 0));
+    }
+    // 网页传输统一一张会话卡（仅 Windows daemon 模式展示；手机端网页访客
+    // 走通知，不出卡）。在线=任一网页客户端连着；点击进 'web' 会话聊天窗。
+    if (Platform.isWindows && (webPeer != null || webConv != null)) {
+      items.add(_ConvItem(
+        'web',
+        _aliases['web'] ?? webPeer?.name ?? webConv?.name ?? '网页客户端',
+        webConv?.preview,
+        webConv?.lastTime,
+        webPeer != null,
+        webPeer,
+        webConv?.count ?? 0,
+        unread: webConv != null &&
+            TransferHistoryService.instance.isUnread('web', webConv.lastTime),
+      ));
     }
     // 在线排上方（按协议 rank）；离线按最后活动时间降序
     items.sort((a, b) {
@@ -1171,10 +1200,14 @@ class _LanTransferScreenState extends State<LanTransferScreen> {
     final peer = item.peer;
     final isLs = peer?.isLocalSend ?? false;
     final isLd = peer?.isLandrop ?? false;
-    // 手机长按 / 桌面右击 → 设备菜单（信任/重命名/删除）；onTap 仍走打开会话
+    final isWebConv = item.key == 'web';
+    // 手机长按 / 桌面右击 → 设备菜单（信任/重命名/删除）；网页会话走专用菜单
+    // （重命名存 alias 'web' / 删除记录；信任 ws 会话 id 无意义）
     return GestureDetector(
-      onLongPress: () => _showPeerMenu(item),
-      onSecondaryTap: () => _showPeerMenu(item),
+      onLongPress:
+          isWebConv ? _showWebConvMenu : () => _showPeerMenu(item),
+      onSecondaryTap:
+          isWebConv ? _showWebConvMenu : () => _showPeerMenu(item),
       child: Container(
         margin: const EdgeInsets.only(bottom: 8),
         decoration: BoxDecoration(
@@ -1554,6 +1587,84 @@ class _LanTransferScreenState extends State<LanTransferScreen> {
         ),
       ),
     );
+  }
+
+  /// 网页会话菜单（长按/右击「网页客户端」卡）：重命名（alias 存 'web'）/ 删除记录
+  Future<void> _showWebConvMenu() async {
+    await showModalBottomSheet(
+      context: context,
+      builder: (ctx) => SafeArea(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            ListTile(
+              title: Text(_aliases['web'] ?? '网页客户端',
+                  style: const TextStyle(fontWeight: FontWeight.bold)),
+              subtitle: const Text('网页传输会话'),
+            ),
+            const Divider(height: 1),
+            ListTile(
+              leading: const Icon(Icons.drive_file_rename_outline),
+              title: const Text('重命名'),
+              onTap: () {
+                Navigator.pop(ctx);
+                _renameWebConv();
+              },
+            ),
+            ListTile(
+              leading: const Icon(Icons.delete_outline, color: Colors.red),
+              title: Text('删除会话记录',
+                  style: TextStyle(color: Colors.red.shade700)),
+              subtitle: const Text('删除与网页端的全部传输记录（不删除已接收的文件）'),
+              onTap: () async {
+                Navigator.pop(ctx);
+                final recs =
+                    await TransferHistoryService.instance.recordsFor('web');
+                await TransferHistoryService.instance
+                    .deleteRecords(recs.map((r) => r.id).toList());
+                if (!mounted) return;
+                _toast('已删除网页会话记录');
+                _poll();
+              },
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Future<void> _renameWebConv() async {
+    final controller = TextEditingController(text: _aliases['web'] ?? '');
+    final name = await showDialog<String>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('重命名网页客户端'),
+        content: TextField(
+          controller: controller,
+          autofocus: true,
+          maxLength: 30,
+          decoration: const InputDecoration(
+            hintText: '留空恢复默认名称',
+            helperText: '别名只影响本机显示，对方无感',
+          ),
+        ),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.pop(ctx),
+              child: const Text('取消')),
+          TextButton(
+              onPressed: () => Navigator.pop(ctx, controller.text),
+              child: const Text('保存')),
+        ],
+      ),
+    );
+    controller.dispose();
+    if (name == null || !mounted) return;
+    await DeviceAliasService.instance.setAlias('web', name);
+    final m = await DeviceAliasService.instance.load();
+    if (!mounted) return;
+    setState(() => _aliases = m);
+    _toast(name.trim().isEmpty ? '已恢复默认名称' : '已重命名为「${name.trim()}」');
   }
 
   Future<void> _toggleTrust(LanPeer peer, bool trusted) async {

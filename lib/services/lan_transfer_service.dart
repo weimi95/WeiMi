@@ -2082,7 +2082,9 @@ function done(el, text, ok) {
           path: filePath,
           size: total,
           peerName: peer.name,
-          peerKey: peer.id,
+          // 网页会话统一 key 'web'：peer.id 是 'ws_<WS会话id>'，浏览器每次
+          // 刷新都变，用它落记录会把同一网页端裂成多个会话
+          peerKey: 'web',
           time: DateTime.now(),
           ok: true,
         ));
@@ -2115,7 +2117,7 @@ function done(el, text, ok) {
           text: text,
           size: text.length,
           peerName: peer.name,
-          peerKey: peer.id,
+          peerKey: 'web', // 网页会话统一 key（同上）
           time: DateTime.now(),
           ok: true,
         ));

@@ -184,6 +184,12 @@ class LandropService {
     _devices.clear();
     _udpSocket?.close();
     _udpSocket = null;
+    for (final s in _querySockets.values) {
+      try {
+        s.close();
+      } catch (_) {}
+    }
+    _querySockets.clear();
     await _server?.close();
     _server = null;
     _serverPort = 0;
@@ -305,8 +311,8 @@ class LandropService {
     }).catchError((_) {});
   }
 
-  void _onDiscoveryDatagram(RawSocketEvent event) {
-    final sock = _udpSocket;
+  void _onDiscoveryDatagram(RawSocketEvent event, [RawDatagramSocket? src]) {
+    final sock = src ?? _udpSocket;
     if (sock == null) return;
     final datagram = sock.receive();
     if (datagram == null) return;
@@ -407,6 +413,37 @@ class LandropService {
     return out;
   }
 
+  /// v1.2.17：逐网卡发送 socket（key=网卡 IP）。真实 LANDrop 对每个网卡
+  /// setMulticastInterface 后组播 + 定向广播各发一遍（源 IP=该网卡 IP）。
+  /// Dart 无法对 wildcard socket 指定组播出口——多网卡机器（Wintun/ZeroTier
+  /// 等隧道）上组播/255.255.255.255 的出口由系统路由挑，经常走错网卡：
+  /// 轻则包出不去，重则源 IP 是隧道 IP、被对端 LANDrop 的 isSelf()（按
+  /// 源 IP 是否在本机网卡列表判自）当成自己的包直接丢弃——「电脑端发现
+  /// 不了其他电脑的 LANDrop、手机端（单网卡）却可以」的根因。
+  final Map<String, RawDatagramSocket> _querySockets = {};
+
+  /// 按当前网卡清单同步逐网卡 socket（每轮 announce 前调，网卡变化即重建）。
+  void _syncQuerySockets() {
+    final want = _selfIpsCache.toSet();
+    for (final ip in List.of(_querySockets.keys)) {
+      if (!want.contains(ip)) {
+        try {
+          _querySockets.remove(ip)!.close();
+        } catch (_) {}
+      }
+    }
+    for (final ip in want) {
+      if (_querySockets.containsKey(ip)) continue;
+      try {
+        final s =
+            RawDatagramSocket.bind(InternetAddress(ip), 0, reuseAddress: false);
+        s.broadcastEnabled = true;
+        s.listen((e) => _onDiscoveryDatagram(e, s));
+        _querySockets[ip] = s;
+      } catch (_) {}
+    }
+  }
+
   /// 周期广播：组播 + 广播双发 announce 保活（LANDrop 设备 20s 过期），
   /// 同时发 request 查询包——对方（含真 LANDrop）收到即单播应答，
   /// 覆盖「对方先启动/同机端口被占」场景。
@@ -419,10 +456,15 @@ class LandropService {
   ///
   /// v1.2.13：发送目标再加**逐网卡定向广播**（对齐 LANDrop 原生行为），
   /// 且每轮重加组播成员（虚拟网卡/VPN 后启动时启动时那次 join 覆盖不到）。
-  void _announce() {
+  ///
+  /// v1.2.17：每轮刷新本机 IP 缓存（开机自启时网卡可能还没拿到 DHCP 租约，
+  /// 启动时抓的列表会永远过期）+ 逐网卡 socket 发送（见 _querySockets）。
+  Future<void> _announce() async {
     final sock = _udpSocket;
     if (sock == null || !_running) return;
     unawaited(_joinMulticast(sock));
+    await refreshSelfIps();
+    _syncQuerySockets();
     final announce =
         utf8.encode(json.encode(_discoveryPacket(request: false)));
     final query = utf8.encode(json.encode(_discoveryPacket(request: true)));
@@ -431,17 +473,26 @@ class LandropService {
       InternetAddress('255.255.255.255'),
       ..._directedBroadcastTargets(),
     ];
-    for (final d in _devices.values) {
-      try {
-        targets.add(InternetAddress(d.address));
-      } catch (_) {}
-    }
     for (final data in [announce, query]) {
+      // 主 socket（52637/降级端口）：wildcard 发送，协议对齐 LANDrop
       for (final t in targets) {
         try {
           sock.send(data, t, port);
         } catch (_) {}
       }
+      // 逐网卡 socket：源 IP=该网卡 IP，组播出口与定向广播都锁死物理网卡
+      for (final s in _querySockets.values) {
+        for (final t in targets) {
+          try {
+            s.send(data, t, port);
+          } catch (_) {}
+        }
+      }
+    }
+    for (final d in _devices.values) {
+      try {
+        sock.send(query, InternetAddress(d.address), port);
+      } catch (_) {}
     }
   }
 

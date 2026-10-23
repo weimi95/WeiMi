@@ -411,16 +411,29 @@ extension TransferHistoryConversations on TransferHistoryService {
     final m = <String, String>{};
     for (final r in _records) {
       final k = r.peerKey;
-      if (k != null && k.isNotEmpty && r.peerName.isNotEmpty) {
-        m[r.peerName] = k;
-      }
+      if (k == null || k.isEmpty || r.peerName.isEmpty) continue;
+      if (k.startsWith('ws_')) continue; // 网页会话统一 'web'（见 _keyOf）
+      m[r.peerName] = k;
     }
     return m;
   }
 
   /// 记录归属 key：peerKey 优先，其次按 peerName 映射，最后 peerName 兜底。
-  String _keyOf(TransferRecord r, Map<String, String> nameToKey) =>
-      r.peerKey ?? nameToKey[r.peerName] ?? r.peerName;
+  /// 网页传输统一归 'web' 会话：
+  /// - peerKey 为 'ws_' 前缀（v1.2.16 daemon 模式曾按 WS 会话 id 落记录，
+  ///   浏览器每次刷新 id 都变 → 同一网页端裂成多个会话）；
+  /// - 旧记录 peerKey=null 且 peerName 以「网页访客(/网页客户端(」开头
+  ///   （daemon 按连接命名，无稳定 id）。
+  String _keyOf(TransferRecord r, Map<String, String> nameToKey) {
+    final k = r.peerKey;
+    if (k != null && k.isNotEmpty) {
+      if (k == 'web' || k.startsWith('ws_')) return 'web';
+      return k;
+    }
+    final n = r.peerName;
+    if (n.startsWith('网页访客(') || n.startsWith('网页客户端(')) return 'web';
+    return nameToKey[n] ?? n;
+  }
 
   /// 所有会话（按最后活动时间降序）。旧记录无 peerKey 时按 peerName 兜底聚合，
   /// 与在线设备 key 可能不完全一致——在线会话在 UI 层由 _peers 驱动，这里只覆盖离线。

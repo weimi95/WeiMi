@@ -114,8 +114,17 @@ class _LanChatScreenState extends State<LanChatScreen> {
   /// LANDrop 设备不在 LanTransferService.peers 里，不合并会导致列表页
   /// 显示在线、点进聊天窗却判离线（v1.2.11 修复根因）。
   LanPeer? _peerById(String key) {
-    for (final p in LandropService.mergeInto(
-        LanTransferService.instance.peers)) {
+    final merged = LandropService.mergeInto(
+        LanTransferService.instance.peers);
+    // 网页会话统一 key 'web'：解析到任一在线网页客户端
+    // （daemon 模式 LanPeer.id 为 'ws_<WS会话id>' 前缀）
+    if (key == 'web') {
+      for (final p in merged) {
+        if (p.id.startsWith('ws_')) return p;
+      }
+      return null;
+    }
+    for (final p in merged) {
       if (p.id == key) return p;
     }
     return null;

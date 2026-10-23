@@ -12,8 +12,10 @@
 //!     {"cmd":"quit"}
 //!     {"cmd":"get_pending"}             -> {"ok":true,"pending":[...]}  (reply)
 //!     {"cmd":"confirm","token":..,"accept":bool} -> {"ok":true,"found":bool} (reply)
-//! - ui_active=true  -> daemon releases UDP/HTTP ports (UI hosts transfer)
-//! - ui_active=false -> daemon starts announce + HTTP receive (tray mode)
+//! - v1.2.17+: ui_active no longer releases ports (UI never binds 52345/52346
+//!   since the web page moved into the daemon); it only affects the receive
+//!   confirm path (launch UI for user confirmation). Ports are held whenever
+//!   discover_enabled OR web_share_enabled.
 //! - Tray menu: open UI (CreateProcess exe_path) / quit daemon
 //! - Trust policy in tray mode: trusted devices (docs_dir/trusted_devices.json)
 //!   auto-accept; untrusted -> ask user via UI (launch + pending map, 30s
@@ -1424,7 +1426,7 @@ fn handle_client(mut stream: TcpStream) {
                 );
                 return;
             }
-            let from = format!("网页访客({})", remote_ip);
+            let from = format!("网页客户端({})", remote_ip);
             let name = safe_file_name(if head.query_name.is_empty() {
                 "unnamed"
             } else {
@@ -1458,7 +1460,7 @@ fn handle_client(mut stream: TcpStream) {
                         true,
                         None,
                         Some(&save.to_string_lossy()),
-                        None,
+                        Some("web"),
                     );
                 }
                 Err(e) => {
@@ -1468,7 +1470,7 @@ fn handle_client(mut stream: TcpStream) {
                         500,
                         &serde_json::json!({"ok": false, "error": e.to_string()}),
                     );
-                    record_history("file", &name, 0, &from, false, None, None, None);
+                    record_history("file", &name, 0, &from, false, None, None, Some("web"));
                 }
             }
         }
@@ -1481,7 +1483,7 @@ fn handle_client(mut stream: TcpStream) {
                 );
                 return;
             }
-            let from = format!("网页访客({})", remote_ip);
+            let from = format!("网页客户端({})", remote_ip);
             let body = read_body_all(&mut stream, leftover, content_length, chunked);
             let text = String::from_utf8_lossy(&body).to_string();
             write_json(&mut stream, 200, &serde_json::json!({"ok": true}));
@@ -1497,7 +1499,7 @@ fn handle_client(mut stream: TcpStream) {
                 true,
                 Some(&text),
                 None,
-                None,
+                Some("web"),
             );
         }
         ("POST", "/weimi/send") | ("POST", "/weimi/text") => {
@@ -2271,7 +2273,7 @@ fn ws_inbound_finish(inb: &mut WsInbound) {
     *inb = WsInbound::default();
 }
 
-/// out 方向的传输记录（网页访客经本机转发给其他设备）
+/// out 方向的传输记录（网页客户端经本机转发给其他设备）
 fn record_history_out(
     kind: &str,
     name: &str,
@@ -2398,7 +2400,7 @@ fn ws_route_binary(
                     &format!("收到网页文件：{}\n来自 {}", name, visitor),
                 );
                 maybe_open_recv_dir(&p);
-                record_history("file", &name, size, visitor, true, None, path_str.as_deref(), None);
+                record_history("file", &name, size, visitor, true, None, path_str.as_deref(), Some("web"));
             }
             let _ = tx.send(ws_frame(
                 1,
@@ -2592,7 +2594,7 @@ fn handle_ws(stream: TcpStream, head: &RequestHead, leftover: Vec<u8>) {
         };
 
         if eff_op == 2 {
-            let visitor = format!("网页访客({})", peer_name);
+            let visitor = format!("网页客户端({})", peer_name);
             ws_route_binary(&mut inb, &data, &tx, &visitor);
             continue;
         }
@@ -2666,7 +2668,7 @@ fn handle_ws(stream: TcpStream, head: &RequestHead, leftover: Vec<u8>) {
                 if text.is_empty() {
                     continue;
                 }
-                let from = format!("网页访客({})", peer_name);
+                let from = format!("网页客户端({})", peer_name);
                 if to == "app" {
                     balloon(
                         "微密飞传",
@@ -2680,7 +2682,7 @@ fn handle_ws(stream: TcpStream, head: &RequestHead, leftover: Vec<u8>) {
                         true,
                         Some(&text),
                         None,
-                        None,
+                        Some("web"),
                     );
                 } else if let Some(devid) = to.strip_prefix("d:").map(|s| s.to_string()) {
                     let devname = {
@@ -2796,7 +2798,7 @@ fn handle_ws(stream: TcpStream, head: &RequestHead, leftover: Vec<u8>) {
                     match up {
                         Some(mut up) => {
                             let sender_id = format!("web-{}", remote_ip);
-                            let from = format!("网页访客({})", peer_name);
+                            let from = format!("网页客户端({})", peer_name);
                             let req = format!(
                                 "POST /weimi/send HTTP/1.1\r\nHost: {}\r\nX-Weimi-App: weimi\r\nX-Sender-Id: {}\r\nX-Sender-Name: {}\r\nX-File-Name: {}\r\nX-File-Size: {}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
                                 addr,
@@ -3027,9 +3029,13 @@ fn transfer_loop() {
                 loop {
                     {
                         let cfg = CONFIG.lock().unwrap();
+                        // v1.2.17 起 UI（Windows）不再自绑 52345/52346，网页版也由
+                        // daemon 承载 → ui_active 不再触发端口让位（否则主界面一开
+                        // 网页版就 ERR_CONNECTION_REFUSED）；发现或网页任一开启即
+                        // 持有端口（网页版也不随「可被发现」开关连带下线）。
                         let on = cfg
                             .as_ref()
-                            .map(|c| !c.ui_active && c.discover_enabled)
+                            .map(|c| c.discover_enabled || c.web_share_enabled)
                             .unwrap_or(false);
                         if !on {
                             TRANSFER_ON.store(false, Ordering::Relaxed);
