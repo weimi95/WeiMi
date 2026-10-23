@@ -6,6 +6,7 @@ import 'package:path_provider/path_provider.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import 'lan_transfer_service.dart';
+import 'landrop_service.dart';
 import 'transfer_history_service.dart';
 import '../framework/setting_store.dart';
 
@@ -151,10 +152,27 @@ class DaemonService {
         }(),
         // 接收后自动打开文件夹（托盘模式收文件由守护进程执行开目录）
         'open_recv_dir': SettingStore.get<bool>('lan_open_recv_folder', false),
+        // v1.2.19：LANDrop 保活材料——UI 收托盘后由 daemon 接管 LANDrop
+        // 发现层（announce/query），身份 pk 必须与 UI 侧同一把，否则对端
+        // TOFU 信任列表（按 pk 持久化）失效要重新信任
+        'landrop_on': LandropService.enabled,
+        'landrop_pk': await _landropIdentityPk(),
       };
       return _sendLine(jsonEncode(cfg));
     } catch (_) {
       return false;
+    }
+  }
+
+  /// LANDrop 身份公钥（daemon 托盘保活用）。拿不到返回空串（保活不激活，
+  /// 不影响其他功能）。
+  static Future<String> _landropIdentityPk() async {
+    try {
+      final ld = LandropService.instance;
+      await ld.ensureIdentity();
+      return ld.identityPkB64;
+    } catch (_) {
+      return '';
     }
   }
 

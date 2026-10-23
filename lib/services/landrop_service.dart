@@ -229,6 +229,10 @@ class LandropService {
     _identityPkB64 = base64.encode(pk);
   }
 
+  /// 公开身份就绪入口（幂等）。v1.2.19：daemon 推配置时要带 LANDrop 身份
+  /// pk（托盘保活用同一把钥匙，保对端 TOFU 信任不裂），可能早于 start()。
+  Future<void> ensureIdentity() => _ensureIdentity();
+
   // ============ 发现层 ============
 
   Future<void> _startDiscovery() async {

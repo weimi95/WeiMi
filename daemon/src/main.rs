@@ -55,6 +55,11 @@ struct Config {
     untrusted_confirm: bool,
     untrusted_confirm_secs: u32,
     open_recv_dir: bool,
+    /// LANDrop 兼容总开关（设置→微密飞传→LANDrop 兼容）
+    landrop_on: bool,
+    /// LANDrop 身份公钥 base64（Dart landrop_service 持久化，UI 启动时同步。
+    /// daemon 托盘保活用同一把 pk，保对端 TOFU 信任不裂）
+    landrop_pk: String,
 }
 
 static CONFIG: Mutex<Option<Config>> = Mutex::new(None);
@@ -408,6 +413,34 @@ extern "system" {
     ) -> u32;
 }
 
+#[link(name = "ws2_32")]
+extern "system" {
+    fn setsockopt(
+        s: u64,
+        level: i32,
+        optname: i32,
+        optval: *const u8,
+        optlen: i32,
+    ) -> i32;
+}
+const SOL_SOCKET: i32 = 0xffff;
+const SO_BROADCAST: i32 = 0x0020;
+
+/// 给 std UdpSocket 开广播权限（Windows 发 255.255.255.255 / 定向广播必须）。
+fn enable_broadcast(sock: &std::net::UdpSocket) {
+    use std::os::windows::io::AsRawSocket;
+    let one: [u8; 4] = [1, 0, 0, 0];
+    unsafe {
+        setsockopt(
+            sock.as_raw_socket(),
+            SOL_SOCKET,
+            SO_BROADCAST,
+            one.as_ptr(),
+            one.len() as i32,
+        );
+    }
+}
+
 // ==================== helpers ====================
 
 fn to_wide(s: &str) -> Vec<u16> {
@@ -464,6 +497,297 @@ fn local_ipv4s() -> Vec<String> {
         }
     });
     out
+}
+
+// ============ 配置持久化（v1.2.19） ============
+// daemon 重启（开机自启直进托盘）后内存配置丢失，LANDrop 身份 pk 等材料
+// 要能恢复，否则保活要等 UI 启动同步过一次才激活。文件放 daemon.exe 同目录
+// （便携安装可写；写失败静默跳过，不影响其他功能）。
+fn config_file_path() -> Option<std::path::PathBuf> {
+    let p = std::env::current_exe().ok()?;
+    Some(p.with_file_name("daemon_config.json"))
+}
+
+fn save_config() {
+    let Some(path) = config_file_path() else { return };
+    let cfg = CONFIG.lock().unwrap();
+    let Some(c) = cfg.as_ref() else { return };
+    let json = serde_json::json!({
+        "device_id": c.device_id,
+        "device_name": c.device_name,
+        "discover_enabled": c.discover_enabled,
+        "web_share_enabled": c.web_share_enabled,
+        "untrusted_confirm": c.untrusted_confirm,
+        "untrusted_confirm_secs": c.untrusted_confirm_secs,
+        "open_recv_dir": c.open_recv_dir,
+        "receive_dir": c.receive_dir,
+        "landrop_on": c.landrop_on,
+        "landrop_pk": c.landrop_pk,
+    });
+    if let Ok(txt) = serde_json::to_string_pretty(&json) {
+        let _ = std::fs::write(path, txt);
+    }
+}
+
+fn load_config() {
+    let Some(path) = config_file_path() else { return };
+    let Ok(txt) = std::fs::read_to_string(&path) else { return };
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(&txt) else { return };
+    let mut cfg = CONFIG.lock().unwrap();
+    let c = cfg.get_or_insert_with(Config::default);
+    let mut n = 0usize;
+    macro_rules! take_str {
+        ($k:literal, $f:ident) => {
+            if let Some(s) = v.get($k).and_then(|x| x.as_str()) {
+                if !s.is_empty() {
+                    c.$f = s.to_string();
+                    n += 1;
+                }
+            }
+        };
+    }
+    take_str!("device_id", device_id);
+    take_str!("device_name", device_name);
+    take_str!("receive_dir", receive_dir);
+    take_str!("landrop_pk", landrop_pk);
+    if let Some(b) = v.get("discover_enabled").and_then(|x| x.as_bool()) {
+        c.discover_enabled = b;
+        n += 1;
+    }
+    if let Some(b) = v.get("web_share_enabled").and_then(|x| x.as_bool()) {
+        c.web_share_enabled = b;
+        n += 1;
+    }
+    if let Some(b) = v.get("untrusted_confirm").and_then(|x| x.as_bool()) {
+        c.untrusted_confirm = b;
+        n += 1;
+    }
+    if let Some(b) = v.get("open_recv_dir").and_then(|x| x.as_bool()) {
+        c.open_recv_dir = b;
+        n += 1;
+    }
+    if let Some(b) = v.get("landrop_on").and_then(|x| x.as_bool()) {
+        c.landrop_on = b;
+        n += 1;
+    }
+    if let Some(s) = v.get("untrusted_confirm_secs").and_then(|x| x.as_u64()) {
+        c.untrusted_confirm_secs = s as u32;
+        n += 1;
+    }
+    // daemon 刚起，UI 必然不在跑
+    c.ui_active = false;
+    if n > 0 {
+        log(&format!("config loaded from disk ({} fields)", n));
+    }
+}
+
+// ============ LANDrop 发现保活（v1.2.19，托盘模式） ============
+// 背景：LANDrop 发现层（UDP 52637 组播 announce/query）原先只存在于 Dart UI
+// 进程（landrop_service.dart）。关主界面进托盘后 UI 退出，没人发 announce →
+// 手机 LANDrop APP（被动设计只收 announce）永远发现不了电脑端微密。
+// 本模块在 daemon 内补一份：ui_active=false 时接管 announce + query 应答，
+// 身份 pk 由 UI 经 apply 同步（保对端 TOFU 信任列表不裂）。
+const LANDROP_PORT: u16 = 52637;
+const LANDROP_GROUP: &str = "239.192.52.63";
+const LANDROP_ANNOUNCE_SECS: u64 = 10;
+
+/// 本网卡 /24 定向广播地址（对齐 Dart _directedBroadcastTargets）
+fn directed_broadcast_ips() -> Vec<String> {
+    local_ipv4s()
+        .into_iter()
+        .map(|ip| {
+            let p: Vec<&str> = ip.split('.').collect();
+            if p.len() == 4 {
+                format!("{}.{}.{}.255", p[0], p[1], p[2])
+            } else {
+                ip
+            }
+        })
+        .collect()
+}
+
+/// 保活激活条件：UI 不在跑 + 用户没关 LANDrop 兼容 + 已同步到身份 pk
+fn landrop_active() -> Option<(String, String)> {
+    let cfg = CONFIG.lock().unwrap();
+    let c = cfg.as_ref()?;
+    if c.ui_active || !c.landrop_on || c.landrop_pk.is_empty() {
+        return None;
+    }
+    Some((c.landrop_pk.clone(), c.device_name.clone()))
+}
+
+/// LANDrop 发现包 JSON（与真实 LANDrop 及 Dart 侧字段完全一致）
+fn landrop_packet(pk: &str, name: &str, port: u16, request: bool) -> Vec<u8> {
+    serde_json::json!({
+        "request": request,
+        "supported_versions": ["v2"],
+        "public_key": pk,
+        "port": port,
+        "device_info": {"name": name, "type": "pc"},
+        "discoverable": true,
+    })
+    .to_string()
+    .into_bytes()
+}
+
+/// 托盘模式 LANDrop 发现保活主循环。
+/// - UI 活跃（ui_active=true）：完全静默并释放 52637，把发现层交还 Dart
+/// - UI 收托盘（ui_active=false）：bind 52637（被真 LANDrop 占用则降级
+///   临时端口、5s 重试抢回），每 10s 发 announce+query，对收到的 query
+///   单播应答
+/// - 逐网卡发送 socket（绑源 IP）绕开系统路由挑选：防 Wintun/ZeroTier
+///   虚拟网卡（metric 最低）把组播/广播吞进隧道（v1.2.17 同款修复）
+fn landrop_discovery_loop() {
+    let mut main: Option<std::net::UdpSocket> = None; // 收包 + 单播应答
+    let mut degraded = false; // 52637 被占（同机装着真 LANDrop）
+    let mut senders: Vec<(String, std::net::UdpSocket)> = Vec::new();
+    let mut last_send =
+        std::time::Instant::now() - std::time::Duration::from_secs(3600);
+    let mut last_rebind = std::time::Instant::now();
+    let mut last_drained = 0usize;
+    loop {
+        let Some((pk, name)) = landrop_active() else {
+            // UI 接管：释放 52637 给 Dart landrop_service
+            if let Some(s) = main.take() {
+                log("landrop: ui active, releasing 52637");
+                drop(s);
+                degraded = false;
+            }
+            senders.clear();
+            std::thread::sleep(Duration::from_secs(2));
+            continue;
+        };
+        if main.is_none() {
+            match std::net::UdpSocket::bind(("0.0.0.0", LANDROP_PORT)) {
+                Ok(s) => {
+                    let _ = s.set_read_timeout(Some(Duration::from_millis(500)));
+                    log("landrop: tray-mode discovery active on 52637");
+                    main = Some(s);
+                    degraded = false;
+                }
+                Err(e) => {
+                    if !degraded {
+                        degraded = true;
+                        log(&format!(
+                            "landrop: 52637 bind failed: {} (raw={:?}), degraded to temp port",
+                            e,
+                            e.raw_os_error()
+                        ));
+                    }
+                    match std::net::UdpSocket::bind(("0.0.0.0", 0)) {
+                        Ok(s) => {
+                            let _ = s.set_read_timeout(Some(Duration::from_millis(500)));
+                            main = Some(s);
+                        }
+                        Err(e) => {
+                            log(&format!("landrop: udp bind failed: {}", e));
+                            std::thread::sleep(Duration::from_secs(2));
+                            continue;
+                        }
+                    }
+                }
+            }
+        }
+        // degraded（真 LANDrop 占了 52637）时每 5s 重试抢回：对方退出后
+        // 无感恢复主端口（对齐 Dart _rebindTimer）
+        if degraded && main.is_some() && last_rebind.elapsed() >= Duration::from_secs(5) {
+            last_rebind = std::time::Instant::now();
+            if let Ok(s) = std::net::UdpSocket::bind(("0.0.0.0", LANDROP_PORT)) {
+                let _ = s.set_read_timeout(Some(Duration::from_millis(500)));
+                if let Some(old) = main.replace(s) {
+                    drop(old);
+                }
+                degraded = false;
+                log("landrop: rebind 52637 OK");
+            }
+        }
+        // 收包：query → 无条件单播应答（LANDrop 协议语义）；判自跳过。
+        // **必须整轮排空**：我方每 10s 往组播/广播/定向广播发 announce+query
+        // （4 socket × 6 目标 × 2 类型 ≈ 48 包），主 socket 0.0.0.0:52637 会把
+        // 这些自回声全部收回来。若每轮只 recv 一次（500ms 超时）+sleep 500ms，
+        // 处理速率 2 包/秒追不上 4.8 包/秒的自回流量，backlog 持续增长，
+        // 对端 query 的应答延迟被拖到分钟级（实测单播 query 2 秒内无应答）。
+        // 排空后每轮把所有待处理包一次做完，自回声当轮消化。
+        if let Some(s) = &main {
+            let mut buf = [0u8; 4096];
+            let mut drained = 0usize;
+            loop {
+                match s.recv_from(&mut buf) {
+                    Ok((n, src)) => {
+                        drained += 1;
+                        if let Ok(v) =
+                            serde_json::from_slice::<serde_json::Value>(&buf[..n])
+                        {
+                            let from_pk =
+                                v.get("public_key").and_then(|x| x.as_str()).unwrap_or("");
+                            if from_pk == pk.as_str() {
+                                // 自己逐网卡 socket 的回声
+                            } else {
+                                log(&format!(
+                                    "landrop: recv from {} pk={}",
+                                    src,
+                                    &from_pk[..from_pk.len().min(12)]
+                                ));
+                                if v.get("request").and_then(|x| x.as_bool()) == Some(true) {
+                                    let pkt = landrop_packet(
+                                        &pk,
+                                        &name,
+                                        HTTP_PORT.load(Ordering::Relaxed),
+                                        false,
+                                    );
+                                    let _ = s.send_to(&pkt, src);
+                                    log("landrop: query answered");
+                                }
+                            }
+                        }
+                    }
+                    // 排空完成：读超时/非阻塞即缓冲区已空
+                    Err(_) => break,
+                }
+            }
+            last_drained = drained;
+        }
+        // 周期发包：announce + query → 组播 + 全网广播 + 逐网卡定向广播
+        if last_send.elapsed() >= Duration::from_secs(LANDROP_ANNOUNCE_SECS) {
+            last_send = std::time::Instant::now();
+            let port = HTTP_PORT.load(Ordering::Relaxed);
+            let announce = landrop_packet(&pk, &name, port, false);
+            let query = landrop_packet(&pk, &name, port, true);
+            let ips = local_ipv4s();
+            senders.retain(|(ip, _)| ips.contains(ip));
+            for ip in &ips {
+                if senders.iter().any(|(i, _)| i == ip) {
+                    continue;
+                }
+                if let Ok(s) = std::net::UdpSocket::bind((ip.as_str(), 0)) {
+                    enable_broadcast(&s);
+                    senders.push((ip.clone(), s));
+                }
+            }
+            let mut targets: Vec<String> = vec![
+                format!("{}:{}", LANDROP_GROUP, LANDROP_PORT),
+                format!("255.255.255.255:{}", LANDROP_PORT),
+            ];
+            targets.extend(
+                directed_broadcast_ips()
+                    .into_iter()
+                    .map(|ip| format!("{}:{}", ip, LANDROP_PORT)),
+            );
+            for (_, s) in &senders {
+                for t in &targets {
+                    let _ = s.send_to(&announce, t.as_str());
+                    let _ = s.send_to(&query, t.as_str());
+                }
+            }
+            log(&format!(
+                "landrop: sent announce+query ({} sockets x {} targets), drained {} pkt/round",
+                senders.len(),
+                targets.len(),
+                last_drained
+            ));
+        }
+        std::thread::sleep(Duration::from_millis(500));
+    }
 }
 
 /// Load the app icon: try the configured exe (ExtractIconEx), else .ico beside
@@ -3492,6 +3816,13 @@ struct PushMsg {
     exe_path: String,
     #[serde(default)]
     ui_active: bool,
+    /// v1.2.19：LANDrop 保活材料（老 UI 不带 → default，保活不激活）
+    /// landrop_on 用 Option：老 UI 的 apply 不带此字段时不得把 daemon
+    /// 已同步到的开关冲掉（None=不动，Some=设置）
+    #[serde(default)]
+    landrop_on: Option<bool>,
+    #[serde(default)]
+    landrop_pk: String,
     #[serde(default)]
     token: String,
     #[serde(default)]
@@ -3809,6 +4140,12 @@ fn config_server() {
                             }
                         }
                         c.ui_active = msg.ui_active;
+                        if let Some(v) = msg.landrop_on {
+                            c.landrop_on = v;
+                        }
+                        if !msg.landrop_pk.is_empty() {
+                            c.landrop_pk = msg.landrop_pk;
+                        }
                         log(&format!(
                             "apply: ui_active={} discover={} web={} confirm={} recv_dir={} open_dir={}",
                             c.ui_active,
@@ -3819,6 +4156,8 @@ fn config_server() {
                             c.open_recv_dir
                         ));
                         *cfg = Some(c);
+                        drop(cfg);
+                        save_config();
                     }
                     _ => {}
                 }
@@ -3849,8 +4188,10 @@ fn main() {
     }
     log("daemon starting");
 
+    load_config();
     std::thread::spawn(config_server);
     std::thread::spawn(transfer_loop);
+    std::thread::spawn(landrop_discovery_loop);
     hotkey_thread();
 
     unsafe {
