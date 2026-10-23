@@ -169,6 +169,19 @@ class DaemonService {
     return res != null && res['found'] == true;
   }
 
+  /// 取 daemon 发现的微密设备列表（精简版：Windows 上 daemon 永久持有发现端口，
+  /// UI 不再自绑 52346，改由本方法轮询）。返回 [{id,name,ip,httpPort}]。
+  static Future<List<Map<String, dynamic>>> listPeers() async {
+    final res = await _sendRecv('{"cmd":"listPeers"}');
+    if (res == null) return const [];
+    final list = res['peers'];
+    if (list is! List) return const [];
+    return list
+        .whereType<Map>()
+        .map((e) => e.map((k, v) => MapEntry(k as String, v)))
+        .toList();
+  }
+
   /// 把守护进程期间收到的文件/文本记录（daemon_transfers.jsonl）合并进
   /// UI 传输历史。按字节偏移增量读取（prefs 存已读偏移），不会重复入账。
   static Future<void> mergeDaemonHistory() async {

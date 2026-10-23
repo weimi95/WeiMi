@@ -319,34 +319,6 @@ class _LanTransferScreenState extends State<LanTransferScreen> {
 
   // ============ 发送流程 ============
 
-  Future<void> _startSendMenu() async {
-    final choice = await showModalBottomSheet<String>(
-      context: context,
-      builder: (ctx) => SafeArea(
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            ListTile(
-              leading: const Icon(Icons.insert_drive_file_outlined),
-              title: const Text('发送文件'),
-              onTap: () => Navigator.pop(ctx, 'file'),
-            ),
-            ListTile(
-              leading: const Icon(Icons.chat_bubble_outline),
-              title: const Text('发送文本'),
-              onTap: () => Navigator.pop(ctx, 'text'),
-            ),
-          ],
-        ),
-      ),
-    );
-    if (choice == 'file') {
-      _startSendFiles();
-    } else if (choice == 'text') {
-      _startSendText();
-    }
-  }
-
   Future<LanPeer?> _pickPeer() async {
     if (_peers.isEmpty) {
       if (mounted) {
@@ -399,21 +371,6 @@ class _LanTransferScreenState extends State<LanTransferScreen> {
     if (d.hasLandropLink) links.add('LANDrop');
     if (links.isEmpty) return '微密';
     return '微密+${links.join('+')}';
-  }
-
-  Future<void> _startSendFiles() async {
-    final peer = await _pickPeer();
-    if (peer == null || !mounted) return;
-
-    final result = await FilePicker.platform.pickFiles(
-      type: FileType.any,
-      allowMultiple: true,
-    );
-    if (result == null || result.files.isEmpty || !mounted) return;
-    final files =
-        result.files.where((f) => f.path != null).map((f) => f.path!).toList();
-    if (files.isEmpty) return;
-    await _sendFilesTo(peer, files);
   }
 
   /// 发送文件夹（仅微密设备：自研协议按相对路径落盘，保留目录结构）。
@@ -676,34 +633,6 @@ class _LanTransferScreenState extends State<LanTransferScreen> {
         duration: const Duration(seconds: 6),
       ));
     }
-  }
-
-  Future<void> _startSendText() async {
-    final controller = TextEditingController();
-    final text = await showDialog<String>(
-      context: context,
-      builder: (ctx) => AlertDialog(
-        title: const Text('发送文本'),
-        content: TextField(
-          controller: controller,
-          maxLines: 6,
-          autofocus: true,
-          maxLength: 10000,
-          decoration: const InputDecoration(hintText: '输入要发送的文本内容'),
-        ),
-        actions: [
-          TextButton(
-              onPressed: () => Navigator.pop(ctx), child: const Text('取消')),
-          TextButton(
-              onPressed: () => Navigator.pop(ctx, controller.text),
-              child: const Text('下一步')),
-        ],
-      ),
-    );
-    if (text == null || text.trim().isEmpty || !mounted) return;
-    final peer = await _pickPeer();
-    if (peer == null || !mounted) return;
-    await _sendTextTo(peer, text);
   }
 
   Future<void> _sendTextTo(LanPeer peer, String text) async {
@@ -990,15 +919,6 @@ class _LanTransferScreenState extends State<LanTransferScreen> {
             _buildNote(),
             const SizedBox(height: 80),
           ],
-        ),
-        Positioned(
-          right: 16,
-          bottom: 16,
-          child: FloatingActionButton.extended(
-            onPressed: _startSendMenu,
-            icon: const Icon(Icons.send),
-            label: const Text('发送'),
-          ),
         ),
       ],
     );

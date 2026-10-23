@@ -62,6 +62,37 @@ static TASKBAR_MSG: AtomicU32 = AtomicU32::new(0);
 /// 接收完成计数（自动开目录的批内去抖：2 秒内连收多个文件只开一次目录）
 static RECV_TICK: AtomicU64 = AtomicU64::new(0);
 
+/// 局域网发现的本机可达对端（微密协议）。daemon 永久持有发现端口，收到
+/// announce/reply 即入表，15s 无更新则过期。UI（Windows）不再自绑 52345/52346，
+/// 改由 listPeers 拉取此表，彻底消灭双进程抢端口。
+#[derive(Clone)]
+struct Peer {
+    id: String,
+    name: String,
+    ip: String,
+    port: u16,
+    last_seen: u64,
+}
+static PEERS: Mutex<Vec<Peer>> = Mutex::new(Vec::new());
+
+fn upsert_peer(id: &str, name: &str, ip: &str, port: u16) {
+    let mut peers = PEERS.lock().unwrap();
+    if let Some(p) = peers.iter_mut().find(|p| p.id == id) {
+        p.name = name.to_string();
+        p.ip = ip.to_string();
+        p.port = port;
+        p.last_seen = now_ms();
+    } else {
+        peers.push(Peer {
+            id: id.to_string(),
+            name: name.to_string(),
+            ip: ip.to_string(),
+            port,
+            last_seen: now_ms(),
+        });
+    }
+}
+
 fn log(msg: &str) {
     use std::fmt::Write as _;
     let mut line = String::new();
@@ -1654,7 +1685,7 @@ button:disabled{opacity:.5}
 <div class="card">
   <div class="logo">&#128274;</div>
   <h1>微密飞传 · 网页版</h1>
-  <p class="tip">电脑处于托盘模式：文件将直接保存到电脑的接收目录</p>
+  <p class="tip">通过浏览器把文件或文本发送到这台电脑，将存入接收目录</p>
   <div id="drop">点击选择文件，或拖拽到此处</div>
   <input id="file" type="file" multiple>
   <textarea id="txt" placeholder="或粘贴一段文本…"></textarea>
@@ -1721,7 +1752,7 @@ fn transfer_loop() {
             let cfg = CONFIG.lock().unwrap();
             let on = cfg
                 .as_ref()
-                .map(|c| !c.ui_active && c.discover_enabled)
+                .map(|c| c.discover_enabled)
                 .unwrap_or(false);
             if !on {
                 drop(cfg);
@@ -1780,6 +1811,10 @@ fn transfer_loop() {
                     }
                     if !TRANSFER_ON.load(Ordering::Relaxed) {
                         break;
+                    }
+                    {
+                        let cutoff = now_ms().saturating_sub(15000);
+                        PEERS.lock().unwrap().retain(|p| p.last_seen >= cutoff);
                     }
                     if tick % 2 == 0 {
                         broadcast_announce(&sock);
@@ -1872,13 +1907,24 @@ fn udp_recv_loop(sock: Arc<UdpSocket>) {
                 if m.get("id").and_then(|v| v.as_str()) == Some(c.device_id.as_str()) {
                     continue;
                 }
+                // 记录对端到设备表（announce/reply 都带 httpPort，可定位其接收端口）
+                let self_id = c.device_id.clone();
+                let self_name = c.device_name.clone();
+                let http_port = HTTP_PORT.load(Ordering::Relaxed);
+                let id = m.get("id").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                let name = m.get("name").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                let port = m.get("httpPort").and_then(|v| v.as_u64()).unwrap_or(0) as u16;
+                drop(cfg);
+                if !id.is_empty() && port != 0 {
+                    upsert_peer(&id, &name, &src.ip().to_string(), port);
+                }
                 if m.get("action").and_then(|v| v.as_str()) == Some("announce") {
                     let reply = serde_json::json!({
                         "app": MAGIC,
                         "action": "reply",
-                        "id": c.device_id,
-                        "name": c.device_name,
-                        "httpPort": HTTP_PORT.load(Ordering::Relaxed),
+                        "id": self_id,
+                        "name": self_name,
+                        "httpPort": http_port,
                         "v": 1,
                     });
                     let _ = sock.send_to(
@@ -2018,6 +2064,25 @@ fn config_server() {
                             .collect();
                         drop(map);
                         let resp = serde_json::json!({"ok": true, "pending": items});
+                        let _ = s.write_all(format!("{}\n", resp).as_bytes());
+                        let _ = s.flush();
+                        break 'outer;
+                    }
+                    "listPeers" => {
+                        let peers = PEERS.lock().unwrap();
+                        let items: Vec<serde_json::Value> = peers
+                            .iter()
+                            .map(|p| {
+                                serde_json::json!({
+                                    "id": p.id,
+                                    "name": p.name,
+                                    "ip": p.ip,
+                                    "httpPort": p.port,
+                                })
+                            })
+                            .collect();
+                        drop(peers);
+                        let resp = serde_json::json!({"ok": true, "peers": items});
                         let _ = s.write_all(format!("{}\n", resp).as_bytes());
                         let _ = s.flush();
                         break 'outer;

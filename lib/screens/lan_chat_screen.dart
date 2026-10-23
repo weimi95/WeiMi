@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:io';
 import 'dart:typed_data';
+import 'dart:ui' as ui;
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -870,75 +871,162 @@ class _Bubble extends StatelessWidget {
       '${t.hour.toString().padLeft(2, '0')}:${t.minute.toString().padLeft(2, '0')}';
 }
 
-/// 聊天文件气泡缩略图（图片/视频）：复用文件页底层能力——
-/// 图片 Image.file 降采样、视频 Windows 走系统缩略图首帧 / Android 原生抽帧，
-/// 加载失败或文件已删时回退类型图标盒。
-class _ChatThumb extends StatelessWidget {
+/// 聊天文件气泡缩略图（图片/视频）：微信式——按图片真实宽高比自适应尺寸
+/// （竖图限高、横图限宽），完整显示不裁切（BoxFit.contain）。
+/// 复用文件页底层能力——图片 Image.file 降采样、视频 Windows 走系统缩略图
+/// 首帧 / Android 原生抽帧，加载失败或文件已删时回退类型图标盒。
+class _ChatThumb extends StatefulWidget {
   final String path;
   final String name;
-  final double height;
+  final double fallbackHeight; // 宽高比未知时的占位高度
   const _ChatThumb({
     required this.path,
     required this.name,
-    this.height = 140,
+    this.fallbackHeight = 140,
   });
 
   @override
+  State<_ChatThumb> createState() => _ChatThumbState();
+}
+
+class _ChatThumbState extends State<_ChatThumb> {
+  // 微信式尺寸约束：横图限宽、竖图限高，过窄/过扁时兜最小边保证可点。
+  static const double _maxW = 210, _maxH = 260, _minW = 64, _minH = 48;
+
+  Size? _ratio; // 内容真实宽高比（解码小图获得，等比不变形）
+
+  @override
+  void initState() {
+    super.initState();
+    _resolve();
+  }
+
+  @override
+  void didUpdateWidget(covariant _ChatThumb old) {
+    super.didUpdateWidget(old);
+    if (old.path != widget.path || old.name != widget.name) {
+      _ratio = null;
+      _resolve();
+    }
+  }
+
+  Future<void> _resolve() async {
+    final name = widget.name;
+    Size? ratio;
+    try {
+      if (FileThumbs.isImage(name)) {
+        ratio = await _decodeFile(widget.path);
+      } else if (FileThumbs.isVideo(name)) {
+        if (Platform.isWindows) {
+          final tp =
+              await WindowsThumbnailProvider.getThumbnailFile(widget.path);
+          if (tp != null && File(tp).existsSync()) ratio = await _decodeFile(tp);
+        } else {
+          final data = await FileThumbs.videoFrame(widget.path);
+          if (data != null) ratio = await _decodeBytes(data);
+        }
+      }
+    } catch (_) {}
+    if (!mounted) return;
+    setState(() => _ratio = ratio);
+  }
+
+  Future<Size?> _decodeFile(String path) async {
+    try {
+      final bytes = await File(path).readAsBytes();
+      return await _decodeBytes(bytes);
+    } catch (_) {
+      return null;
+    }
+  }
+
+  /// 小尺寸解码只为拿宽高比（targetWidth=96 省内存，等比不变形；
+  /// instantiateImageCodec 没有 cacheWidth 参数，CI 3.38.3 实证）。
+  Future<Size?> _decodeBytes(Uint8List bytes) async {
+    try {
+      final codec = await ui.instantiateImageCodec(
+          bytes,
+          targetWidth: 96,
+          allowUpscaling: false);
+      final frame = await codec.getNextFrame();
+      final img = frame.image;
+      final s = Size(img.width.toDouble(), img.height.toDouble());
+      img.dispose();
+      codec.dispose();
+      if (s.width <= 0 || s.height <= 0) return null;
+      return s;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  @override
   Widget build(BuildContext context) {
-    final isImg = FileThumbs.isImage(name);
-    final isVid = FileThumbs.isVideo(name);
+    final isImg = FileThumbs.isImage(widget.name);
+    final isVid = FileThumbs.isVideo(widget.name);
     if (!isImg && !isVid) return const SizedBox.shrink();
+    if (_ratio == null) {
+      // 宽高比未解析（加载中/失败）：固定占位盒
+      return _fallbackBox(_maxW, widget.fallbackHeight);
+    }
+    final r = _ratio!.width / _ratio!.height;
+    double w = _maxW, h = w / r;
+    if (h > _maxH) {
+      h = _maxH;
+      w = h * r;
+    }
+    if (w < _minW) w = _minW;
+    if (h < _minH) h = _minH;
     Widget content;
     if (isImg) {
       content = Image.file(
-        File(path),
-        fit: BoxFit.cover,
+        File(widget.path),
+        fit: BoxFit.contain,
         cacheWidth: 560,
         gaplessPlayback: true,
-        errorBuilder: (_, __, ___) => _fallback(),
+        errorBuilder: (_, __, ___) => _fallbackBox(w, h),
       );
     } else if (Platform.isWindows) {
       content = FutureBuilder<String?>(
-        future: WindowsThumbnailProvider.getThumbnailFile(path),
+        future: WindowsThumbnailProvider.getThumbnailFile(widget.path),
         builder: (ctx, snap) {
           final bp = snap.data;
           if (bp != null && File(bp).existsSync()) {
             return Image.file(
               File(bp),
-              fit: BoxFit.cover,
+              fit: BoxFit.contain,
               gaplessPlayback: true,
-              errorBuilder: (_, __, ___) => _fallback(),
+              errorBuilder: (_, __, ___) => _fallbackBox(w, h),
             );
           }
-          return _fallback();
+          return _fallbackBox(w, h);
         },
       );
     } else {
       content = FutureBuilder<Uint8List?>(
-        future: FileThumbs.videoFrame(path),
+        future: FileThumbs.videoFrame(widget.path),
         builder: (ctx, snap) {
           final data = snap.data;
           if (data != null) {
             return Image.memory(
               data,
-              fit: BoxFit.cover,
+              fit: BoxFit.contain,
               gaplessPlayback: true,
-              errorBuilder: (_, __, ___) => _fallback(),
+              errorBuilder: (_, __, ___) => _fallbackBox(w, h),
             );
           }
-          return _fallback();
+          return _fallbackBox(w, h);
         },
       );
     }
     return ClipRRect(
       borderRadius: const BorderRadius.vertical(top: Radius.circular(11)),
       child: SizedBox(
-        width: double.infinity,
-        height: height,
+        width: w,
+        height: h,
         child: Stack(
-          fit: StackFit.expand,
           children: [
-            content,
+            Positioned.fill(child: content),
             if (isVid)
               const Center(
                 child: Icon(Icons.play_circle_outline,
@@ -950,9 +1038,11 @@ class _ChatThumb extends StatelessWidget {
     );
   }
 
-  Widget _fallback() {
-    final info = FileThumbs.infoFor(name);
+  Widget _fallbackBox(double w, double h) {
+    final info = FileThumbs.infoFor(widget.name);
     return Container(
+      width: w,
+      height: h,
       color: info.color.withAlpha(20),
       child: Center(child: Icon(info.icon, size: 40, color: info.color)),
     );

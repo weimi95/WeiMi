@@ -11,6 +11,7 @@ import 'localsend_service.dart';
 import 'trusted_devices_service.dart';
 import 'transfer_history_service.dart';
 import 'receive_notify_service.dart';
+import 'daemon_service.dart';
 
 /// 微密飞传服务（方案 B：自研轻量协议，对标 Landrop）
 ///
@@ -74,6 +75,8 @@ class LanTransferService {
   Timer? _announceTimer;
   Timer? _pruneTimer;
   Timer? _manualKeepAliveTimer;
+  // 精简版（Windows）：轮询 daemon 拿微密设备列表 + 合并历史，替代 UI 自绑端口
+  Timer? _daemonPollTimer;
   RawDatagramSocket? _udpSocket;
   HttpServer? _httpServer;
 
@@ -248,30 +251,19 @@ class LanTransferService {
 
     if (_udpSocket == null) {
       if (Platform.isWindows) {
-        // Windows：不复用地址，绑定归属确定（daemon 让出端口需要零点几秒，
-        // 失败重试等待）。reuseAddress:true 会与 daemon 静默"劫持"同端口，
-        // 发现应答可能被 daemon 收走 → UI 永远看不到对端。
-        RawDatagramSocket? socket;
-        Object? lastErr;
-        for (var i = 0; i < 20 && socket == null; i++) {
-          try {
-            socket = await RawDatagramSocket.bind(
-              InternetAddress.anyIPv4,
-              discoveryPort,
-              reuseAddress: false,
-            );
-          } on SocketException catch (e) {
-            lastErr = e;
-            await Future<void>.delayed(const Duration(milliseconds: 250));
-          }
-        }
-        if (socket == null) {
-          throw lastErr ??
-              SocketException('UDP 发现端口 $discoveryPort 绑定失败');
-        }
+        // 精简版：Windows 由 daemon 永久持有 52346/52345，UI 不再占用这两个端口
+        // （彻底消灭双进程抢端口）。UDP 改绑临时端口，仅用于「手动 IP/网段」的
+        // 定向探测；常规网络发现改由 _pollDaemon 轮询 daemon listPeers。
+        final socket = await RawDatagramSocket.bind(
+          InternetAddress.anyIPv4,
+          0, // 临时端口
+          reuseAddress: true,
+        );
         socket.broadcastEnabled = true;
         socket.listen(_onUdpDatagram);
         _udpSocket = socket;
+        // 通告 daemon 实际占用的端口（52345），供对端回传文件到本机
+        _httpPort = defaultHttpPort;
       } else {
         final socket = await RawDatagramSocket.bind(
           InternetAddress.anyIPv4,
@@ -284,7 +276,8 @@ class LanTransferService {
       }
     }
 
-    if (_httpServer == null) {
+    // Windows：接收/发现端口由 daemon 持有，UI 不绑 HTTP（52345）
+    if (_httpServer == null && !Platform.isWindows) {
       await _bindHttpServer();
     }
 
@@ -302,6 +295,14 @@ class LanTransferService {
           if (e != null) await probeManualEntry(e);
         }
       });
+    }
+    // 精简版（Windows）：daemon 永久持有发现/接收端口，UI 轮询设备列表 +
+    // 合并 daemon 期间收到的文件，常规网络发现不再由 UI 自绑端口完成。
+    if (Platform.isWindows) {
+      _daemonPollTimer?.cancel();
+      _daemonPollTimer =
+          Timer.periodic(const Duration(seconds: 2), (_) => _pollDaemon());
+      _pollDaemon(); // 立即拉一次
     }
     _events.add(LanEvent(LanEventType.receivingStarted));
     _startAndroidForeground();
@@ -371,6 +372,8 @@ class LanTransferService {
     _announceTimer = null;
     _manualKeepAliveTimer?.cancel();
     _manualKeepAliveTimer = null;
+    _daemonPollTimer?.cancel();
+    _daemonPollTimer = null;
     await LocalSendService.instance.stop();
     await LandropService.instance.stop();
     _events.add(LanEvent(LanEventType.receivingStopped));
@@ -434,9 +437,14 @@ class LanTransferService {
     // 的出口由系统选，经常到不了对方网段；定向广播按目标 IP 明确走对应
     // 网卡（v1.2.13 与 LANDrop 兼容层统一收编到 [directedBroadcastIps]）；
     // 手动网段（跨路由器）同样靠定向广播单播通路发现（方案 A）。
-    final targets = <String>['255.255.255.255'];
-    for (final b in directedBroadcastIps(await localIPv4s())) {
-      if (!targets.contains(b)) targets.add(b);
+    // 精简版（Windows）：常规网络广播由 daemon 完成，UI 只发手动网段定向广播，
+    // 避免从临时端口重复广播；Android 仍由 UI 全量广播。
+    final targets = <String>[];
+    if (!Platform.isWindows) {
+      targets.add('255.255.255.255');
+      for (final b in directedBroadcastIps(await localIPv4s())) {
+        if (!targets.contains(b)) targets.add(b);
+      }
     }
     for (final b in _manualSubnetBroadcasts()) {
       if (!targets.contains(b)) targets.add(b);
@@ -446,6 +454,31 @@ class LanTransferService {
         socket.send(body, InternetAddress(t), discoveryPort);
       } catch (_) {}
     }
+  }
+
+  /// 精简版（Windows）：从 daemon 拉取微密设备列表（daemon 永久持有发现端口，
+  /// 收到 announce/reply 即入表），并入本机 _peers；同时合并 daemon 期间收到的
+  /// 文件，让聊天/历史实时可见。UI 自身不再绑 52346/52345。
+  Future<void> _pollDaemon() async {
+    if (!Platform.isWindows) return;
+    try {
+      final peers = await DaemonService.listPeers();
+      for (final p in peers) {
+        final id = (p['id'] as String?) ?? '';
+        if (id.isEmpty || id == _identityId) continue;
+        addOrUpdatePeer(LanPeer(
+          id: id,
+          name: (p['name'] as String?) ?? '未知设备',
+          ip: (p['ip'] as String?) ?? '',
+          httpPort: (p['httpPort'] as int?) ?? defaultHttpPort,
+          trusted: TrustedDevices.instance.isTrustedSync(id),
+          lastSeen: DateTime.now(),
+        ));
+      }
+    } catch (_) {}
+    try {
+      await DaemonService.mergeDaemonHistory();
+    } catch (_) {}
   }
 
   /// 本机各私网 IPv4（192.168/10/172.16-31）推算的 /24 定向广播地址。
