@@ -47,28 +47,75 @@ class DaemonService {
     }
   }
 
-  /// 确保守护进程在跑；不在则从主程序同目录拉起。返回是否就绪。
+  /// 确保守护进程在跑且**版本够新**；不在跑或版本过旧则拉起/重启。
+  /// 返回是否就绪（在跑 + 版本 >= 期望）。
+  ///
+  /// 背景：daemon 是常驻进程，覆盖安装时旧进程不会消失（exe 可能因文件锁
+  /// 替换失败），旧版 ping 52349 照样通。v1.2.15 起靠版本握手发现旧 daemon
+  /// 并自动 quit + 重启，杜绝"新 UI + 旧 daemon"的端口/指令错配。
   static Future<bool> ensureRunning() async {
-    if (await ping()) return true;
+    if (await _ensureRunningVersioned()) return true;
+    // 版本过旧或拉起失败：让旧 daemon 退出后重试一轮
     try {
-      final exe = Platform.resolvedExecutable;
-      final dir = File(exe).parent.path;
-      final daemon = File('$dir\\weimi_daemon.exe');
-      if (!daemon.existsSync()) return false;
-      await Process.start(
-        daemon.path,
-        const [],
-        mode: ProcessStartMode.detached,
-      );
-      // 等它起来（窗口+托盘初始化）
-      for (var i = 0; i < 10; i++) {
-        await Future<void>.delayed(const Duration(milliseconds: 300));
-        if (await ping()) return true;
+      await pushConfig(uiActive: false, quit: true);
+    } catch (_) {}
+    await Future<void>.delayed(const Duration(milliseconds: 800));
+    if (await ping()) return false; // 退不掉（被占用/权限），交由现状
+    return _ensureRunningVersioned();
+  }
+
+  static Future<bool> _ensureRunningVersioned() async {
+    if (!await ping()) {
+      try {
+        final exe = Platform.resolvedExecutable;
+        final dir = File(exe).parent.path;
+        final daemon = File('$dir\\weimi_daemon.exe');
+        if (!daemon.existsSync()) return false;
+        await Process.start(
+          daemon.path,
+          const [],
+          mode: ProcessStartMode.detached,
+        );
+        // 等它起来（窗口+托盘初始化）
+        var up = false;
+        for (var i = 0; i < 10; i++) {
+          await Future<void>.delayed(const Duration(milliseconds: 300));
+          if (await ping()) {
+            up = true;
+            break;
+          }
+        }
+        if (!up) return false;
+      } catch (_) {
+        return false;
       }
-      return false;
-    } catch (_) {
-      return false;
     }
+    // 在跑 → 校验版本（旧版不认识 version 指令，返回 null 视为最旧）
+    final v = await daemonVersion();
+    return !_versionLess(v, _kExpectedVersion);
+  }
+
+  /// 期望的 daemon 版本（与 daemon/Cargo.toml 的 version 保持一致；发版同步改）。
+  static const String _kExpectedVersion = '1.2.15';
+
+  /// 查 daemon 版本；旧版不认识 version 指令 → _sendRecv 超时返回 null。
+  static Future<String?> daemonVersion() async {
+    final res = await _sendRecv('{"cmd":"version"}');
+    if (res == null) return null;
+    return res['version'] as String?;
+  }
+
+  /// a.b.c 逐段数值比较：null/空 视为最旧。返回 true = a 比 b 旧。
+  static bool _versionLess(String? a, String b) {
+    if (a == null || a.isEmpty) return true;
+    final pa = a.split('.');
+    final pb = b.split('.');
+    for (var i = 0; i < 3; i++) {
+      final va = i < pa.length ? int.tryParse(pa[i]) ?? 0 : 0;
+      final vb = i < pb.length ? int.tryParse(pb[i]) ?? 0 : 0;
+      if (va != vb) return va < vb;
+    }
+    return false;
   }
 
   /// 推配置给守护进程。uiActive=true 表示 UI 在跑（守护进程让出端口）；

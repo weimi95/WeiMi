@@ -2087,6 +2087,16 @@ fn config_server() {
                         let _ = s.flush();
                         break 'outer;
                     }
+                    "version" => {
+                        // 版本握手：UI 据此发现常驻的旧版 daemon 并自动重启
+                        let resp = serde_json::json!({
+                            "ok": true,
+                            "version": env!("CARGO_PKG_VERSION"),
+                        });
+                        let _ = s.write_all(format!("{}\n", resp).as_bytes());
+                        let _ = s.flush();
+                        break 'outer;
+                    }
                     "confirm" => {
                         let map = pending_map().lock().unwrap();
                         let mut found = false;

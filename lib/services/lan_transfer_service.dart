@@ -244,24 +244,39 @@ class LanTransferService {
   Future<void> startReceiving() async {
     if (_receiving) return;
     await _ensureIdentity();
-    // LocalSend v2 兼容层随接收开关启停（组播 announce + 53317 server）
-    await LocalSendService.instance.start();
+    // LocalSend v2 兼容层随接收开关启停（组播 announce + 53317 server）。
+    // 各协议启动相互隔离：任一失败只记日志，不拖垮后续步骤与设备列表
+    // （v1.2.15 实机教训：串行无容错时一个 bind 抛异常 → 整页设备空白）。
+    try {
+      await LocalSendService.instance.start();
+    } catch (e) {
+      debugPrint('微密飞传：LocalSend 兼容层启动失败（不影响其他协议）: $e');
+    }
     // LANDrop v2 兼容层随接收开关启停（UDP 52637 发现 + TCP 服务）
-    await LandropService.instance.start();
+    try {
+      await LandropService.instance.start();
+    } catch (e) {
+      debugPrint('微密飞传：LANDrop 兼容层启动失败（不影响其他协议）: $e');
+    }
 
     if (_udpSocket == null) {
       if (Platform.isWindows) {
         // 精简版：Windows 由 daemon 永久持有 52346/52345，UI 不再占用这两个端口
         // （彻底消灭双进程抢端口）。UDP 改绑临时端口，仅用于「手动 IP/网段」的
         // 定向探测；常规网络发现改由 _pollDaemon 轮询 daemon listPeers。
-        final socket = await RawDatagramSocket.bind(
-          InternetAddress.anyIPv4,
-          0, // 临时端口
-          reuseAddress: true,
-        );
-        socket.broadcastEnabled = true;
-        socket.listen(_onUdpDatagram);
-        _udpSocket = socket;
+        try {
+          final socket = await RawDatagramSocket.bind(
+            InternetAddress.anyIPv4,
+            0, // 临时端口
+            reuseAddress: true,
+          );
+          socket.broadcastEnabled = true;
+          socket.listen(_onUdpDatagram);
+          _udpSocket = socket;
+        } catch (e) {
+          // 临时端口绑不上极罕见：手动 IP 探测不可用，但不影响 daemon 轮询发现
+          debugPrint('微密飞传：临时 UDP 端口绑定失败（手动 IP 探测不可用）: $e');
+        }
         // 通告 daemon 实际占用的端口（52345），供对端回传文件到本机
         _httpPort = defaultHttpPort;
       } else {
