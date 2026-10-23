@@ -740,7 +740,12 @@ pub fn run(paths: &[String], query: &str, limit: usize, flags: Flags) -> String 
             .unwrap_or(0);
         let name = &p[name_start..];
         let name_lower = name.to_lowercase();
-        let (stem_lower, ext_lower) = match name.rfind('.') {
+        // 注意：不能拿原串 name.rfind('.') 的偏移去切 name_lower——
+        // to_lowercase() 可能改变字节长度（如 'İ'→2 字节、'ⱥ' 等），
+        // 偏移错位会切进多字节字符中间 → panic（char boundary）。
+        // 一条坏文件名就能让整个搜索 panic 降级为空结果（2026-10-23 实机故障）。
+        // 改在 lower 串自身上找点号：ASCII '.' 必是字符边界，切片恒安全。
+        let (stem_lower, ext_lower) = match name_lower.rfind('.') {
             Some(d) if d > 0 => (&name_lower[..d], &name_lower[d + 1..]),
             _ => (&name_lower[..], ""),
         };
@@ -1027,5 +1032,29 @@ mod tests {
             let _ = run(&paths(), q, 10, f());
             let _ = parse_query(q, f());
         }
+    }
+
+    #[test]
+    fn test_lowercase_offset_shift_never_panic() {
+        // 2026-10-23 实机故障回归：文件名含 to_lowercase() 后字节布局
+        // 改变的字符（'ⱥ' 3 字节、'İ'→i̇ 2 字节等），旧代码拿原串 rfind('.')
+        // 的偏移切 lower 串 → 切进多字节字符中间 panic → 全盘搜索 0 结果
+        //（一条坏文件名毒死整个索引）。修复后必须正常命中其余文件。
+        let bad = vec![
+            r"D:\We\Desktop\CS ⱥ2859.psd".to_string(),   // 点号偏移落在 ⱥ 中间
+            r"D:\We\Desktop\İiğneli.docx".to_string(),   // 'İ' 小写展开为 2 字节
+            r"C:\正常\报告 final v2.pdf".to_string(),
+        ];
+        for q in ["psd", "2859", "docx", "pdf", "ext:psd", "*.psd", "2859.psd"] {
+            let out = run(&bad, q, 10, f()); // 修复前在此 panic
+            assert!(!out.is_empty(), "query {q:?} should hit, got empty");
+        }
+        // 好坏混排：坏文件名不命中，好文件必须照常出来
+        let mixed = vec![
+            r"D:\We\Desktop\CS ⱥ2859.psd".to_string(),
+            r"C:\work\report.docx".to_string(),
+        ];
+        let out = run(&mixed, "report", 10, f());
+        assert_eq!(out, r"C:\work\report.docx");
     }
 }
