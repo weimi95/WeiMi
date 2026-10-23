@@ -979,9 +979,9 @@ class _LanTransferScreenState extends State<LanTransferScreen> {
     final peerConvs = convs.where((c) => c.key != 'web').toList();
     final convByKey = <String, Conversation>{for (final c in peerConvs) c.key: c};
     final items = <_ConvItem>[];
-    LanPeer? webPeer; // 任一在线网页客户端（daemon 模式 'ws_' 前缀）
+    LanPeer? webPeer; // 任一在线网页客户端（'ws_'=本机 daemon / 'rweb_'=远端主机）
     for (final p in _peers) {
-      if (p.id.startsWith('ws_')) {
+      if (p.id.startsWith('ws_') || p.id.startsWith('rweb_')) {
         webPeer ??= p;
         continue;
       }
@@ -1007,9 +1007,9 @@ class _LanTransferScreenState extends State<LanTransferScreen> {
       if (covered.contains(t.key)) continue;
       items.add(_ConvItem(t.key, t.value, '已信任', null, false, null, 0));
     }
-    // 网页传输统一一张会话卡（仅 Windows daemon 模式展示；手机端网页访客
-    // 走通知，不出卡）。在线=任一网页客户端连着；点击进 'web' 会话聊天窗。
-    if (Platform.isWindows && (webPeer != null || webConv != null)) {
+    // 网页传输统一一张会话卡（v1.2.18 起全平台：手机也能直连远端网页客户端；
+    // 在线=任一网页客户端连着；点击进 'web' 会话聊天窗）。
+    if (webPeer != null || webConv != null) {
       items.add(_ConvItem(
         'web',
         _aliases['web'] ?? webPeer?.name ?? webConv?.name ?? '网页客户端',
@@ -1049,11 +1049,18 @@ class _LanTransferScreenState extends State<LanTransferScreen> {
             if (_pendingText != null || _pendingFiles.isNotEmpty) _buildPendingCard(),
             const SizedBox(height: 12),
             _sectionHeader('设备会话（在线 · 历史记录 · 已信任）',
-                trailing: IconButton(
-                  icon: const Icon(Icons.person_add_alt_1, size: 20),
-                  tooltip: '手动添加对端 IP / 网段（跨网段）',
-                  onPressed: _showManualPeerDialog,
-                )),
+                trailing: Row(mainAxisSize: MainAxisSize.min, children: [
+                  IconButton(
+                    icon: const Icon(Icons.refresh, size: 20),
+                    tooltip: '刷新设备列表',
+                    onPressed: _poll,
+                  ),
+                  IconButton(
+                    icon: const Icon(Icons.person_add_alt_1, size: 20),
+                    tooltip: '手动添加对端 IP / 网段（跨网段）',
+                    onPressed: _showManualPeerDialog,
+                  ),
+                ])),
             if (items.isEmpty) _emptyHint() else ...items.map(_buildConvTile),
             if (_webPeers.isNotEmpty) ...[
               _sectionHeader('网页客户端（${_webPeers.length}）'),

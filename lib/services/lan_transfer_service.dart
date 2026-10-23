@@ -413,6 +413,37 @@ class LanTransferService {
         lastSeen: DateTime.now(),
       );
       addOrUpdatePeer(peer);
+      // v1.2.18：学习对端的网页客户端清单 → rweb_ 虚拟会话
+      //（发送时 POST 到对端 httpPort 带 X-Weimi-To，由对端转进其 WS 房间）
+      final wpList = msg['webPeers'];
+      if (wpList is List) {
+        final seen = <String>{};
+        for (final w in wpList.whereType<Map>()) {
+          final wid = (w['id'] as String?) ?? '';
+          if (wid.isEmpty) continue;
+          seen.add(wid);
+          final wname = ((w['name'] as String?) ?? '').trim();
+          addOrUpdatePeer(LanPeer(
+            id: 'rweb_$wid',
+            name: '网页客户端(${wname.isEmpty ? '匿名' : wname})',
+            ip: dg.address.address,
+            httpPort: (msg['httpPort'] as int?) ?? defaultHttpPort,
+            trusted: false,
+            lastSeen: DateTime.now(),
+          ));
+        }
+        // 该主机最新清单里没有的 = 浏览器已关闭，移除
+        final gone = _peers.keys
+            .where((k) =>
+                k.startsWith('rweb_') &&
+                _peers[k]!.ip == dg.address.address &&
+                !seen.contains(k.substring(5)))
+            .toList();
+        for (final k in gone) {
+          _peers.remove(k);
+        }
+        if (gone.isNotEmpty) _events.add(LanEvent(LanEventType.peersChanged));
+      }
       // 收到 announce：向对方来源端口单播应答，让它也知道我
       if (msg['action'] == 'announce') {
         _sendReply(dg.address.address, dg.port);
@@ -423,30 +454,35 @@ class LanTransferService {
   void _sendReply(String ip, int port) {
     final socket = _udpSocket;
     if (socket == null || port == 0) return;
-    final body = utf8.encode(json.encode({
-      'app': _magic,
-      'action': 'reply',
-      'id': _identityId,
-      'name': _selfName,
-      'httpPort': _httpPort,
-      'v': 1,
-    }));
+    final body = utf8.encode(json.encode(_announcePacket('reply')));
     try {
       socket.send(body, InternetAddress(ip), port);
     } catch (_) {}
   }
 
-  Future<void> _broadcastAnnounce() async {
-    final socket = _udpSocket;
-    if (socket == null || !_receiving) return;
-    final body = utf8.encode(json.encode({
+  /// announce/reply 包体（v1.2.18：带本机网页客户端清单，远端据此生成
+  /// rweb_ 虚拟会话；对端旧版本忽略未知字段，向后兼容）。
+  Map<String, dynamic> _announcePacket(String action) {
+    final packet = <String, dynamic>{
       'app': _magic,
-      'action': 'announce',
+      'action': action,
       'id': _identityId,
       'name': _selfName,
       'httpPort': _httpPort,
       'v': 1,
-    }));
+    };
+    if (_webPeers.isNotEmpty) {
+      packet['webPeers'] = _webPeers.values
+          .map((w) => {'id': w.id, 'name': w.name})
+          .toList();
+    }
+    return packet;
+  }
+
+  Future<void> _broadcastAnnounce() async {
+    final socket = _udpSocket;
+    if (socket == null || !_receiving) return;
+    final body = utf8.encode(json.encode(_announcePacket('announce')));
     // 255.255.255.255 + 本机各私网网段的定向广播 + 手动添加的对方网段
     // 定向广播：多网卡/虚拟网卡环境（有线+WiFi+VPN/VM）下 255.255.255.255
     // 的出口由系统选，经常到不了对方网段；定向广播按目标 IP 明确走对应
@@ -492,7 +528,9 @@ class LanTransferService {
       }
     } catch (_) {}
     // 网页客户端（连进 daemon 网页版的浏览器）也作为会话对象并入：
-    // id 加 ws_ 前缀与设备 peer 区分，发文件/文本走 daemon 52349 转推
+    // id 加 ws_ 前缀与设备 peer 区分，发文件/文本走 daemon 52349 转推。
+    // v1.2.18：远端主机的网页客户端（rweb_ 前缀，daemon 学习自 announce）
+    // 直接 POST 到对端 httpPort 带 X-Weimi-To 中继，不再经本机 daemon。
     try {
       final wp = await DaemonService.webPeersInfo();
       if (wp != null) {
@@ -500,14 +538,25 @@ class LanTransferService {
         final list = wp['webPeers'];
         if (list is List) {
           for (final p in list.whereType<Map>()) {
-            final id = (p['id'] as String?) ?? '';
+            var id = (p['id'] as String?) ?? '';
             if (id.isEmpty) continue;
             final name = ((p['name'] as String?) ?? '').trim();
+            final remote = p['remote'] == true;
+            String peerId;
+            var httpPort = port;
+            if (remote) {
+              peerId = id; // daemon 已带 rweb_ 前缀
+              httpPort = (p['port'] as int?) ?? defaultHttpPort;
+            } else {
+              peerId = 'ws_$id';
+            }
             addOrUpdatePeer(LanPeer(
-              id: 'ws_$id',
-              name: '网页客户端(${name.isEmpty ? '匿名' : name})',
+              id: peerId,
+              name: remote
+                  ? name
+                  : '网页客户端(${name.isEmpty ? '匿名' : name})',
               ip: (p['ip'] as String?) ?? '',
-              httpPort: port,
+              httpPort: httpPort,
               trusted: false,
               lastSeen: DateTime.now(),
             ));
@@ -780,6 +829,8 @@ class LanTransferService {
     // ② 兜底归一化：同 IP 微密+LS 并存（任何时序竞态残留）一律合并
     _normalizeByIp();
     _events.add(LanEvent(LanEventType.peersChanged));
+    // v1.2.18：设备进出场同步给已打开的网页端（房间成员含局域网设备）
+    _broadcastWebPeers();
     _pruneTimer ??=
         Timer.periodic(const Duration(seconds: 5), (_) => _prunePeers());
   }
@@ -847,7 +898,9 @@ class LanTransferService {
   void _normalizeByIp() {
     if (_peers.length < 2) return;
     var changed = false;
-    for (final w in _peers.values.where((p) => p.protocol == 'weimi').toList()) {
+    for (final w in _peers.values
+        .where((p) => p.protocol == 'weimi' && !p.id.startsWith('rweb_'))
+        .toList()) {
       final ls = _findPeer((p) => p.protocol == 'localsend' && p.ip == w.ip);
       if (ls == null) continue;
       _peers.remove(ls.id);
@@ -865,9 +918,15 @@ class LanTransferService {
   void _prunePeers() {
     final now = DateTime.now();
     final before = _peers.length;
-    _peers.removeWhere((_, p) => now.difference(p.lastSeen).inSeconds > 12);
+    // rweb_ 虚拟会话跟随对端 announce 刷新，单独放宽到 40s（对端停止
+    // announce 或清单里移除时由 _onUdpDatagram 同步删除，这里只兜底）
+    _peers.removeWhere((k, p) =>
+        !k.startsWith('rweb_') && now.difference(p.lastSeen).inSeconds > 12);
+    _peers.removeWhere((k, p) =>
+        k.startsWith('rweb_') && now.difference(p.lastSeen).inSeconds > 40);
     if (_peers.length != before) {
       _events.add(LanEvent(LanEventType.peersChanged));
+      _broadcastWebPeers();
     }
   }
 
@@ -1104,6 +1163,42 @@ class LanTransferService {
       return;
     }
 
+    // v1.2.18：X-Weimi-To → 中继给本机网页客户端（设备→网页文件流：
+    // file-start + 二进制帧 + file-done，网页端 JS 已有通用接收通路）
+    final toWeb = req.headers.value('x-weimi-to') ?? '';
+    if (toWeb.isNotEmpty) {
+      final target = _webPeers[toWeb];
+      if (target == null) {
+        req.response.statusCode = HttpStatus.notFound;
+        req.response.write(json.encode({'ok': false, 'error': 'web peer offline'}));
+        await req.response.close();
+        return;
+      }
+      final fid = 'r${DateTime.now().millisecondsSinceEpoch}';
+      _safeAdd(target.socket, json.encode({
+        't': 'file-start',
+        'from': request.senderId,
+        'fromName': request.senderName,
+        'name': request.fileName,
+        'size': request.fileSize,
+        'fid': fid,
+      }));
+      try {
+        await for (final chunk in req) {
+          _safeAdd(target.socket, chunk);
+        }
+        _safeAdd(target.socket, json.encode({'t': 'file-done', 'fid': fid}));
+        req.response.statusCode = HttpStatus.ok;
+        req.response.write(json.encode({'ok': true}));
+      } catch (e) {
+        _safeAdd(target.socket, json.encode({'t': 'file-abort', 'fid': fid}));
+        req.response.statusCode = HttpStatus.internalServerError;
+        req.response.write(json.encode({'ok': false, 'error': '$e'}));
+      }
+      await req.response.close();
+      return;
+    }
+
     final savePath = await resolveSavePath(request.fileName);
     _activeIncomingByName[request.senderName] =
         (_activeIncomingByName[request.senderName] ?? 0) + 1;
@@ -1207,6 +1302,31 @@ class LanTransferService {
         ok: false,
         note: '未信任，已拒收',
       ));
+      return;
+    }
+
+    // v1.2.18：X-Weimi-To → 中继给本机网页客户端（设备→网页，
+    // 与 daemon 的 /weimi/text 中继行为一致）
+    final toWeb = req.headers.value('x-weimi-to') ?? '';
+    if (toWeb.isNotEmpty) {
+      final target = _webPeers[toWeb];
+      if (target == null) {
+        req.response.statusCode = HttpStatus.notFound;
+        req.response.write(json.encode({'ok': false, 'error': 'web peer offline'}));
+        await req.response.close();
+        return;
+      }
+      final bytes = <int>[];
+      await for (final chunk in req) {
+        bytes.addAll(chunk);
+      }
+      final text = utf8.decode(bytes, allowMalformed: true);
+      _safeAdd(target.socket, json.encode({
+        't': 'text', 'from': senderId, 'name': senderName, 'text': text,
+      }));
+      req.response.statusCode = HttpStatus.ok;
+      req.response.write(json.encode({'ok': true}));
+      await req.response.close();
       return;
     }
 
@@ -1431,6 +1551,17 @@ class LanTransferService {
         if (text.isEmpty) break;
         if (to == kAppPeerId) {
           _onAppIncomingText('网页访客(${peer!.name})', text);
+        } else if (to != null && to.startsWith('d:')) {
+          // v1.2.18：网页→局域网设备（本机中继 POST，对齐 daemon 行为）
+          final dev = _peers[to.substring(2)];
+          if (dev != null) {
+            unawaited(_deviceSendTextRaw(
+              dev,
+              '网页客户端(${peer!.name})',
+              'web-${peer.ip}',
+              text,
+            ));
+          }
         } else {
           final target = _webPeers[to];
           if (target != null) {
@@ -1461,6 +1592,15 @@ class LanTransferService {
               _safeAdd(socket, json.encode({'t': 'file-abort', 'fid': fid}));
             }
           });
+        } else if (to != null && to.startsWith('d:')) {
+          // v1.2.18：网页→局域网设备文件（本机中继，边收边 POST）
+          final dev = _peers[to.substring(2)];
+          if (dev == null) {
+            _safeAdd(socket, json.encode({'t': 'file-abort', 'fid': fid}));
+            break;
+          }
+          unawaited(_openDeviceRelay(inbound, dev, '网页客户端(${peer!.name})',
+              'web-${peer.ip}', socket));
         } else {
           final target = _webPeers[to];
           if (target == null) {
@@ -1498,6 +1638,15 @@ class LanTransferService {
           inbound.done = true;
         }
       }
+    } else if (inbound.to.startsWith('d:')) {
+      // v1.2.18：网页→设备中继，边收边 POST 给设备
+      final req = inbound.upReq;
+      if (req == null || inbound.done) return;
+      req.add(chunk);
+      if (inbound.size > 0 && inbound.received >= inbound.size) {
+        inbound.done = true;
+        unawaited(_finishDeviceRelay(inbound, sender));
+      }
     } else {
       final target = _webPeers[inbound.to];
       if (target == null) {
@@ -1511,6 +1660,96 @@ class LanTransferService {
             json.encode({'t': 'file-done', 'fid': inbound.fid}));
         _cleanupInbound(inbound);
       }
+    }
+  }
+
+  /// 网页→设备文件中继：打开对设备的 POST 上行（file-start 时调用）。
+  /// 失败即向网页端回 file-abort。
+  Future<void> _openDeviceRelay(
+    _WebInbound inbound,
+    LanPeer dev,
+    String fromName,
+    String senderId,
+    WebSocket senderSocket,
+  ) async {
+    HttpClient? client;
+    try {
+      client = HttpClient();
+      client.connectionTimeout = const Duration(seconds: 10);
+      final req = await client
+          .postUrl(Uri.parse('http://${dev.ip}:${dev.httpPort}/weimi/send'));
+      req.headers.set('X-Weimi-App', _magic);
+      req.headers.set('X-Sender-Id', senderId);
+      req.headers.set('X-Sender-Name', Uri.encodeComponent(fromName));
+      req.headers.set('X-File-Name', Uri.encodeComponent(inbound.name));
+      req.headers.set('X-File-Size', '${inbound.size}');
+      req.headers.contentLength = inbound.size;
+      inbound.upClient = client;
+      inbound.upReq = req;
+      // size==0 的空文件：没有后续 binary 帧，直接收尾
+      if (inbound.size == 0) {
+        inbound.done = true;
+        await _finishDeviceRelay(inbound, null);
+      }
+    } catch (e) {
+      client?.close(force: true);
+      _safeAdd(senderSocket,
+          json.encode({'t': 'file-abort', 'fid': inbound.fid}));
+      _cleanupInbound(inbound);
+    }
+  }
+
+  /// 网页→设备文件中继收尾：关上行、读应答、回 file-done/abort。
+  Future<void> _finishDeviceRelay(
+      _WebInbound inbound, WebPeer? sender) async {
+    final req = inbound.upReq;
+    final client = inbound.upClient;
+    inbound.upReq = null;
+    var ok = false;
+    if (req != null) {
+      try {
+        await req.flush();
+        final resp = await req.close().timeout(const Duration(seconds: 60));
+        final body =
+            await resp.transform(utf8.decoder).timeout(const Duration(seconds: 30)).join();
+        ok = resp.statusCode == HttpStatus.ok && body.contains('"ok":true');
+      } catch (_) {
+        ok = false;
+      }
+    }
+    client?.close(force: true);
+    if (sender != null) {
+      _safeAdd(sender.socket, json.encode({
+        't': ok ? 'file-done' : 'file-abort',
+        'fid': inbound.fid,
+      }));
+    }
+    _cleanupInbound(inbound);
+  }
+
+  /// 网页→设备文本中继：POST /weimi/text（对齐 daemon 的 device_send_text）
+  Future<bool> _deviceSendTextRaw(
+      LanPeer dev, String fromName, String senderId, String text) async {
+    final client = HttpClient();
+    client.connectionTimeout = const Duration(seconds: 10);
+    try {
+      final bytes = utf8.encode(text);
+      final req = await client
+          .postUrl(Uri.parse('http://${dev.ip}:${dev.httpPort}/weimi/text'));
+      req.headers.set('X-Weimi-App', _magic);
+      req.headers.set('X-Sender-Id', senderId);
+      req.headers.set('X-Sender-Name', Uri.encodeComponent(fromName));
+      req.headers.set('X-Text-Length', '${bytes.length}');
+      req.headers.contentLength = bytes.length;
+      req.add(bytes);
+      await req.flush();
+      final resp = await req.close().timeout(const Duration(seconds: 30));
+      final body = await resp.transform(utf8.decoder).join();
+      return resp.statusCode == HttpStatus.ok && body.contains('"ok":true');
+    } catch (_) {
+      return false;
+    } finally {
+      client.close(force: true);
     }
   }
 
@@ -1608,13 +1847,19 @@ class LanTransferService {
     _broadcastWebPeers();
   }
 
-  /// 房间成员列表（含 App 虚拟设备），exclude 排除某个浏览器
+  /// 房间成员列表（含 App 虚拟设备 + 局域网微密设备），exclude 排除某个浏览器。
+  /// v1.2.18：设备带 d: 前缀 + dev 标记（对齐 daemon 网页版），网页端可
+  /// 直接发文本/文件给任意局域网设备（由本机中继 POST）。
   List<Map<String, String>> _roomPeers({String? exclude}) {
     final out = <Map<String, String>>[
       {'id': kAppPeerId, 'name': _selfName},
     ];
     for (final w in _webPeers.values) {
       if (w.id != exclude) out.add({'id': w.id, 'name': w.name});
+    }
+    for (final p in _peers.values) {
+      if (p.id.startsWith('rweb_')) continue; // 远端网页客户端不进本机房间
+      out.add({'id': 'd:${p.id}', 'name': p.name, 'dev': '1'});
     }
     return out;
   }
@@ -2147,6 +2392,9 @@ function done(el, text, ok) {
     if (Platform.isWindows && peer.id.startsWith('ws_')) {
       return _sendWebPeerFile(peer: peer, filePath: filePath, recordHistory: recordHistory);
     }
+    // v1.2.18：远端主机的网页客户端（rweb_ 前缀）→ POST 到对端 httpPort
+    // 带 X-Weimi-To: <房间id>，由对端转进其 WS 房间（手机/电脑通用直连）
+    final isRemoteWeb = peer.id.startsWith('rweb_');
     try {
       final sendName = relativeName ?? p.basename(filePath);
       final f = File(filePath);
@@ -2167,6 +2415,7 @@ function done(el, text, ok) {
         req.headers.set('X-Sender-Name', Uri.encodeComponent(_selfName));
         req.headers.set('X-File-Name', Uri.encodeComponent(sendName));
         req.headers.set('X-File-Size', '$total');
+        if (isRemoteWeb) req.headers.set('X-Weimi-To', peer.id.substring(5));
         req.headers.contentLength = total;
 
         int sent = 0;
@@ -2191,7 +2440,8 @@ function done(el, text, ok) {
               path: filePath,
               size: total,
               peerName: peer.name,
-              peerKey: peer.id,
+              // 网页会话统一 key 'web'（浏览器刷新会变房间 id，别拿它落记录）
+              peerKey: isRemoteWeb ? 'web' : peer.id,
               time: DateTime.now(),
               ok: true,
             ));
@@ -2209,7 +2459,7 @@ function done(el, text, ok) {
             path: filePath,
             size: total,
             peerName: peer.name,
-            peerKey: peer.id,
+            peerKey: isRemoteWeb ? 'web' : peer.id,
             time: DateTime.now(),
             ok: false,
           ));
@@ -2234,6 +2484,8 @@ function done(el, text, ok) {
     if (Platform.isWindows && peer.id.startsWith('ws_')) {
       return _sendWebPeerText(peer: peer, text: text);
     }
+    // v1.2.18：远端主机的网页客户端 → X-Weimi-To 中继（对端转进其 WS 房间）
+    final isRemoteWeb = peer.id.startsWith('rweb_');
     try {
       final bytes = utf8.encode(text);
       final client = HttpClient();
@@ -2245,6 +2497,7 @@ function done(el, text, ok) {
         req.headers.set('X-Sender-Id', _identityId);
         req.headers.set('X-Sender-Name', Uri.encodeComponent(_selfName));
         req.headers.set('X-Text-Length', '${bytes.length}');
+        if (isRemoteWeb) req.headers.set('X-Weimi-To', peer.id.substring(5));
         req.headers.contentLength = bytes.length;
         req.add(bytes);
         await req.flush();
@@ -2262,7 +2515,7 @@ function done(el, text, ok) {
             text: text,
             size: text.length,
             peerName: peer.name,
-            peerKey: peer.id,
+            peerKey: isRemoteWeb ? 'web' : peer.id,
             time: DateTime.now(),
             ok: true,
           ));
@@ -2277,7 +2530,7 @@ function done(el, text, ok) {
           text: text,
           size: text.length,
           peerName: peer.name,
-          peerKey: peer.id,
+          peerKey: isRemoteWeb ? 'web' : peer.id,
           time: DateTime.now(),
           ok: false,
         ));
@@ -2484,6 +2737,9 @@ class _WebInbound {
   bool done = false;
   bool aborted = false;
   IOSink? sink;
+  // v1.2.18：to=d:<id> 网页→设备中继的 HTTP 上行
+  HttpClient? upClient;
+  HttpClientRequest? upReq;
 
   _WebInbound({
     required this.fid,

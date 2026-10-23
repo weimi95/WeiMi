@@ -95,6 +95,45 @@ fn upsert_peer(id: &str, name: &str, ip: &str, port: u16) {
     }
 }
 
+/// 远端主机的网页客户端（v1.2.18：从 announce/reply 的 webPeers 字段学习）。
+/// 发送方向：HTTP POST 到 host 的 httpPort 带 X-Weimi-To: <房间id>，由 host
+/// 转进其 WS 房间；显示方向：并入 webPeers 52349 应答，UI 生成虚拟会话。
+#[derive(Clone)]
+struct RemoteWeb {
+    id: String,
+    name: String,
+    host_id: String,
+    host_ip: String,
+    host_port: u16,
+    last_seen: u64,
+}
+static REMOTE_WEB: Mutex<Vec<RemoteWeb>> = Mutex::new(Vec::new());
+
+/// 按 host 同步其网页客户端清单：host 最新包里没列的即删除（浏览器关了），
+/// 45s 没刷新的整 host 过期（主机下线）。
+fn sync_remote_web(host_id: &str, host_ip: &str, host_port: u16, items: &[(String, String)]) {
+    let now = now_ms();
+    let mut w = REMOTE_WEB.lock().unwrap();
+    w.retain(|r| r.host_id != host_id && now.saturating_sub(r.last_seen) < 45_000);
+    for (id, name) in items {
+        if let Some(r) = w.iter_mut().find(|r| r.host_id == host_id && r.id == *id) {
+            r.name = name.clone();
+            r.host_ip = host_ip.to_string();
+            r.host_port = host_port;
+            r.last_seen = now;
+        } else {
+            w.push(RemoteWeb {
+                id: id.clone(),
+                name: name.clone(),
+                host_id: host_id.to_string(),
+                host_ip: host_ip.to_string(),
+                host_port,
+                last_seen: now,
+            });
+        }
+    }
+}
+
 fn log(msg: &str) {
     use std::fmt::Write as _;
     let mut line = String::new();
@@ -1227,14 +1266,18 @@ fn read_body_all(
 }
 
 /// stream body (content-length or chunked) into file, returns bytes written.
-fn stream_body_to_file(
+/// HTTP 请求体分块泵（v1.2.18 自 stream_body_to_file 泛化）：逐块回调，
+/// 非chunked 按定长、chunked 增量解码。返回写入字节数。
+fn stream_body_chunks<F>(
     stream: &mut TcpStream,
     leftover: Vec<u8>,
     content_length: Option<u64>,
     chunked: bool,
-    out: &Path,
-) -> std::io::Result<u64> {
-    let mut file = std::fs::File::create(out)?;
+    mut on_chunk: F,
+) -> std::io::Result<u64>
+where
+    F: FnMut(&[u8]) -> std::io::Result<()>,
+{
     let mut written: u64 = 0;
     if !chunked {
         let Some(len) = content_length else {
@@ -1244,7 +1287,7 @@ fn stream_body_to_file(
         let mut pending = leftover;
         if !pending.is_empty() {
             let take = pending.len().min(need as usize);
-            file.write_all(&pending[..take])?;
+            on_chunk(&pending[..take])?;
             written += take as u64;
             need -= take as u64;
             pending.clear();
@@ -1259,7 +1302,7 @@ fn stream_body_to_file(
                 ));
             }
             let take = (n as u64).min(need);
-            file.write_all(&tmp[..take as usize])?;
+            on_chunk(&tmp[..take as usize])?;
             written += take;
             need -= take;
         }
@@ -1293,7 +1336,7 @@ fn stream_body_to_file(
                     }
                     cur.extend_from_slice(&tmp[..n]);
                 }
-                file.write_all(&cur[pos..pos + size])?;
+                on_chunk(&cur[pos..pos + size])?;
                 written += size as u64;
                 pos += size + 2;
                 // compact occasionally
@@ -1321,6 +1364,69 @@ fn stream_body_to_file(
                 }
                 cur.extend_from_slice(&tmp[..n]);
             }
+        }
+    }
+}
+
+fn stream_body_to_file(
+    stream: &mut TcpStream,
+    leftover: Vec<u8>,
+    content_length: Option<u64>,
+    chunked: bool,
+    out: &Path,
+) -> std::io::Result<u64> {
+    let mut file = std::fs::File::create(out)?;
+    stream_body_chunks(stream, leftover, content_length, chunked, |c| {
+        file.write_all(c)
+    })
+}
+
+/// 把 HTTP 请求体按 WS 二进制帧泵给房间内某个网页客户端
+/// （v1.2.18：设备→网页中继，发送方向与 web→设备相反）。
+#[allow(clippy::too_many_arguments)]
+fn stream_body_to_ws(
+    stream: &mut TcpStream,
+    leftover: Vec<u8>,
+    content_length: Option<u64>,
+    chunked: bool,
+    tx: &std::sync::mpsc::Sender<Vec<u8>>,
+    fid: &str,
+    name: &str,
+    size: u64,
+    from_id: &str,
+    from_name: &str,
+) -> std::io::Result<u64> {
+    let _ = tx.send(ws_frame(
+        1,
+        serde_json::json!({
+            "t": "file-start",
+            "from": from_id,
+            "fromName": from_name,
+            "name": name,
+            "size": size,
+            "fid": fid,
+        })
+        .to_string()
+        .as_bytes(),
+    ));
+    let r = stream_body_chunks(stream, leftover, content_length, chunked, |c| {
+        let _ = tx.send(ws_frame(2, c));
+        Ok(())
+    });
+    match r {
+        Ok(n) => {
+            let _ = tx.send(ws_frame(
+                1,
+                serde_json::json!({"t": "file-done", "fid": fid}).to_string().as_bytes(),
+            ));
+            Ok(n)
+        }
+        Err(e) => {
+            let _ = tx.send(ws_frame(
+                1,
+                serde_json::json!({"t": "file-abort", "fid": fid}).to_string().as_bytes(),
+            ));
+            Err(e)
         }
     }
 }
@@ -1592,6 +1698,118 @@ fn handle_client(mut stream: TcpStream) {
                     }
                     return;
                 }
+            }
+            // v1.2.18：X-Weimi-To 指向本机网页客户端 → 中继进 WS 房间（设备→网页）。
+            // 仅信任设备可中继（网页端是本机浏览器，不给未信任设备投递内容）。
+            let to_web = header_get(&head.headers, "x-weimi-to");
+            if !to_web.is_empty() {
+                if !trusted {
+                    write_json(
+                        &mut stream,
+                        403,
+                        &serde_json::json!({"ok": false, "error": "untrusted relay"}),
+                    );
+                    return;
+                }
+                let target = {
+                    let room = ROOM.lock().unwrap();
+                    room.iter()
+                        .find(|p| p.id == to_web)
+                        .map(|p| (p.tx.clone(), p.name.clone()))
+                };
+                let Some((wtx, webname)) = target else {
+                    write_json(
+                        &mut stream,
+                        404,
+                        &serde_json::json!({"ok": false, "error": "web peer offline"}),
+                    );
+                    return;
+                };
+                let relay_from = format!("{} → 网页客户端({})", sender_name, webname);
+                if is_text {
+                    let body = read_body_all(&mut stream, leftover, content_length, chunked);
+                    let text = String::from_utf8_lossy(&body).to_string();
+                    let _ = wtx.send(ws_frame(
+                        1,
+                        serde_json::json!({
+                            "t": "text",
+                            "from": sender_id,
+                            "name": sender_name,
+                            "text": text,
+                        })
+                        .to_string()
+                        .as_bytes(),
+                    ));
+                    write_json(&mut stream, 200, &serde_json::json!({"ok": true}));
+                    record_history_out(
+                        "text",
+                        &short_text(&text),
+                        text.chars().count() as u64,
+                        &relay_from,
+                        true,
+                        Some(&text),
+                        None,
+                        Some("web"),
+                    );
+                } else {
+                    let fname = {
+                        let n = url_decode_pct(&header_get(&head.headers, "x-file-name"));
+                        if n.is_empty() {
+                            "unnamed".to_string()
+                        } else {
+                            n
+                        }
+                    };
+                    let name = safe_file_name(&fname);
+                    let fsize = header_get(&head.headers, "x-file-size")
+                        .parse::<u64>()
+                        .unwrap_or(0);
+                    let fid = format!("r{}", now_ms());
+                    match stream_body_to_ws(
+                        &mut stream,
+                        leftover,
+                        content_length,
+                        chunked,
+                        &wtx,
+                        &fid,
+                        &name,
+                        fsize,
+                        &sender_id,
+                        &sender_name,
+                    ) {
+                        Ok(n) => {
+                            write_json(&mut stream, 200, &serde_json::json!({"ok": true}));
+                            record_history_out(
+                                "file",
+                                &name,
+                                n,
+                                &relay_from,
+                                true,
+                                None,
+                                None,
+                                Some("web"),
+                            );
+                        }
+                        Err(e) => {
+                            write_json(
+                                &mut stream,
+                                500,
+                                &serde_json::json!({"ok": false, "error": e.to_string()}),
+                            );
+                            record_history_out(
+                                "file",
+                                &name,
+                                0,
+                                &relay_from,
+                                false,
+                                None,
+                                None,
+                                Some("web"),
+                            );
+                        }
+                    }
+                }
+                return;
             }
             if is_text {
                 let body = read_body_all(&mut stream, leftover, content_length, chunked);
@@ -2273,7 +2491,8 @@ fn ws_inbound_finish(inb: &mut WsInbound) {
     *inb = WsInbound::default();
 }
 
-/// out 方向的传输记录（网页客户端经本机转发给其他设备）
+/// out 方向的传输记录（网页客户端经本机转发给其他设备；v1.2.18 加 peer_id
+/// 防止 "A → B" 形式的 peerName 在 Dart 侧裂成独立会话）
 fn record_history_out(
     kind: &str,
     name: &str,
@@ -2282,6 +2501,7 @@ fn record_history_out(
     ok: bool,
     text: Option<&str>,
     path: Option<&str>,
+    peer_id: Option<&str>,
 ) {
     let docs = {
         let cfg = CONFIG.lock().unwrap();
@@ -2301,6 +2521,7 @@ fn record_history_out(
         "path": path,
         "size": size,
         "peerName": peer,
+        "peerId": peer_id,
         "time": now_ms(),
         "ok": ok,
         "via": "daemon-web",
@@ -2445,6 +2666,7 @@ fn ws_route_binary(
                 ok,
                 None,
                 None,
+                Some("web"),
             );
             if ok {
                 let _ = tx.send(ws_frame(
@@ -2704,6 +2926,7 @@ fn handle_ws(stream: TcpStream, head: &RequestHead, leftover: Vec<u8>) {
                         ok,
                         Some(&text),
                         None,
+                        Some("web"),
                     );
                 } else {
                     let target_tx = {
@@ -3154,8 +3377,29 @@ fn udp_recv_loop(sock: Arc<UdpSocket>) {
                 if !id.is_empty() && port != 0 {
                     upsert_peer(&id, &name, &src.ip().to_string(), port);
                 }
+                // v1.2.18：学习对端的网页客户端清单（announce/reply 都带）
+                if !id.is_empty() {
+                    if let Some(list) = m.get("webPeers").and_then(|v| v.as_array()) {
+                        let items: Vec<(String, String)> = list
+                            .iter()
+                            .filter_map(|v| {
+                                let wid = v.get("id").and_then(|x| x.as_str())?.to_string();
+                                let wname =
+                                    v.get("name").and_then(|x| x.as_str()).unwrap_or("");
+                                Some((wid, wname.to_string()))
+                            })
+                            .collect();
+                        sync_remote_web(&id, &src.ip().to_string(), port, &items);
+                    }
+                }
                 if m.get("action").and_then(|v| v.as_str()) == Some("announce") {
-                    let reply = serde_json::json!({
+                    let web_peers: Vec<serde_json::Value> = ROOM
+                        .lock()
+                        .unwrap()
+                        .iter()
+                        .map(|p| serde_json::json!({"id": p.id, "name": p.name}))
+                        .collect();
+                    let mut reply = serde_json::json!({
                         "app": MAGIC,
                         "action": "reply",
                         "id": self_id,
@@ -3163,6 +3407,9 @@ fn udp_recv_loop(sock: Arc<UdpSocket>) {
                         "httpPort": http_port,
                         "v": 1,
                     });
+                    if !web_peers.is_empty() {
+                        reply["webPeers"] = serde_json::Value::Array(web_peers);
+                    }
                     let _ = sock.send_to(
                         reply.to_string().as_bytes(),
                         format!("{}:{}", src.ip(), src.port()),
@@ -3184,15 +3431,25 @@ fn broadcast_announce(sock: &UdpSocket) {
             None => return,
         }
     };
-    let body = serde_json::json!({
+    let mut body = serde_json::json!({
         "app": MAGIC,
         "action": "announce",
         "id": id,
         "name": name,
         "httpPort": HTTP_PORT.load(Ordering::Relaxed),
         "v": 1,
-    })
-    .to_string();
+    });
+    // v1.2.18：带上本机网页客户端清单，远端 App/daemon 据此生成虚拟会话
+    let web_peers: Vec<serde_json::Value> = ROOM
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|p| serde_json::json!({"id": p.id, "name": p.name}))
+        .collect();
+    if !web_peers.is_empty() {
+        body["webPeers"] = serde_json::Value::Array(web_peers);
+    }
+    let body = body.to_string();
     let mut targets: Vec<String> = vec!["255.255.255.255".into()];
     for ip in local_ipv4s() {
         let parts: Vec<&str> = ip.split('.').collect();
@@ -3342,8 +3599,9 @@ fn config_server() {
                         break 'outer;
                     }
                     "webPeers" => {
-                        let room = ROOM.lock().unwrap();
-                        let items: Vec<serde_json::Value> = room
+                        let mut items: Vec<serde_json::Value> = ROOM
+                            .lock()
+                            .unwrap()
                             .iter()
                             .map(|p| {
                                 serde_json::json!({
@@ -3353,7 +3611,17 @@ fn config_server() {
                                 })
                             })
                             .collect();
-                        drop(room);
+                        // v1.2.18：远端主机的网页客户端（学习自 announce），UI 侧
+                        // 生成 rweb_ 虚拟会话，发送走 HTTP POST + X-Weimi-To 中继
+                        for r in REMOTE_WEB.lock().unwrap().iter() {
+                            items.push(serde_json::json!({
+                                "id": format!("rweb_{}", r.id),
+                                "name": format!("网页客户端({})", r.name),
+                                "ip": r.host_ip,
+                                "port": r.host_port,
+                                "remote": true,
+                            }));
+                        }
                         let resp = serde_json::json!({
                             "ok": true,
                             "webPeers": items,

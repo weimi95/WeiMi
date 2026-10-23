@@ -117,10 +117,10 @@ class _LanChatScreenState extends State<LanChatScreen> {
     final merged = LandropService.mergeInto(
         LanTransferService.instance.peers);
     // 网页会话统一 key 'web'：解析到任一在线网页客户端
-    // （daemon 模式 LanPeer.id 为 'ws_<WS会话id>' 前缀）
+    // （'ws_'=本机 daemon 房间 / 'rweb_'=远端主机网页客户端）
     if (key == 'web') {
       for (final p in merged) {
-        if (p.id.startsWith('ws_')) return p;
+        if (p.id.startsWith('ws_') || p.id.startsWith('rweb_')) return p;
       }
       return null;
     }

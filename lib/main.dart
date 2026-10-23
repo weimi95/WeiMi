@@ -1196,11 +1196,15 @@ class _HomePageState extends State<HomePage>
       },
       child: Scaffold(
       appBar: AppBar(
-        title: Text(t('appTitle'),
-            style: const TextStyle(fontWeight: FontWeight.bold)),
+        // v1.2.18：标题行与 TabBar 合并成一排——当前页签加粗放大做强调，
+        // 右上角按钮（加解密历史/菜单）保留在本排右侧
         backgroundColor: Theme.of(context).colorScheme.inversePrimary,
-        bottom: TabBar(
+        titleSpacing: 0,
+        title: TabBar(
           controller: _tabController,
+          labelStyle:
+              const TextStyle(fontSize: 17, fontWeight: FontWeight.bold),
+          unselectedLabelStyle: const TextStyle(fontSize: 14),
           tabs: [
             GestureDetector(
               onDoubleTap: () {}, // 文件页暂不响应双击回顶
