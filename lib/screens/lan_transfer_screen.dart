@@ -5,6 +5,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:file_picker/file_picker.dart';
 import 'package:path/path.dart' as p;
+import 'package:qr_flutter/qr_flutter.dart';
 import '../services/firewall_service.dart';
 import '../services/device_alias_service.dart';
 import '../services/landrop_service.dart';
@@ -13,6 +14,7 @@ import '../services/localsend_service.dart';
 import '../services/pending_send_service.dart';
 import '../services/transfer_history_service.dart';
 import '../services/trusted_devices_service.dart';
+import '../services/daemon_service.dart';
 import '../widgets/progress_dialog.dart';
 import 'lan_chat_screen.dart';
 import 'settings_screen.dart';
@@ -169,6 +171,114 @@ class _LanTransferScreenState extends State<LanTransferScreen> {
   List<String> get _webUrls {
     if (_selfIps.isEmpty) return const [];
     return _selfIps.take(3).map((ip) => 'http://$ip:$_selfHttpPort').toList();
+  }
+
+  /// 网页版二维码（Windows daemon 模式下端口以 daemon 实报为准）。
+  Future<void> _showQrDialog() async {
+    var port = _selfHttpPort;
+    if (Platform.isWindows) {
+      try {
+        final info = await DaemonService.listPeersInfo();
+        final dp = (info?['port'] as int?) ?? 0;
+        if (dp >= 1024) port = dp;
+      } catch (_) {}
+    }
+    final ips = _selfIps.isNotEmpty ? _selfIps.take(3) : <String>[_selfIp];
+    final urls = ips.where((e) => e.isNotEmpty).map((ip) => 'http://$ip:$port').toList();
+    final url = urls.isEmpty ? 'http://$_selfIp:$port' : urls.first;
+    if (!mounted) return;
+    await showDialog(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('飞传网页版二维码'),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            GestureDetector(
+              onTap: () => _showQrFullscreen(url),
+              child: Container(
+                padding: const EdgeInsets.all(10),
+                decoration: BoxDecoration(
+                  color: Colors.white,
+                  borderRadius: BorderRadius.circular(12),
+                  border: Border.all(color: Colors.grey.shade300),
+                ),
+                child: QrImageView(
+                  data: url,
+                  size: 190,
+                  backgroundColor: Colors.white,
+                ),
+              ),
+            ),
+            const SizedBox(height: 12),
+            SelectableText(url,
+                style: const TextStyle(
+                    fontSize: 14, fontWeight: FontWeight.w600)),
+            const SizedBox(height: 4),
+            Text(
+              '手机扫码或浏览器打开，即可发文件/文本给本机\n点二维码可放大，方便手机扫描',
+              textAlign: TextAlign.center,
+              style: TextStyle(
+                  fontSize: 12, color: Colors.grey.shade600),
+            ),
+            if (urls.length > 1) ...[
+              const SizedBox(height: 8),
+              Text('其他网卡地址：\n${urls.skip(1).join('\n')}',
+                  textAlign: TextAlign.center,
+                  style: TextStyle(
+                      fontSize: 11, color: Colors.grey.shade500)),
+            ],
+          ],
+        ),
+        actions: [
+          TextButton(
+            onPressed: () {
+              Clipboard.setData(ClipboardData(text: url));
+              Navigator.pop(ctx);
+              if (mounted) {
+                ScaffoldMessenger.of(context).showSnackBar(
+                    const SnackBar(content: Text('网址已复制')));
+              }
+            },
+            child: const Text('复制网址'),
+          ),
+          TextButton(
+              onPressed: () => Navigator.pop(ctx), child: const Text('关闭')),
+        ],
+      ),
+    );
+  }
+
+  /// 全屏大二维码（手机扫电脑屏幕更稳）。
+  void _showQrFullscreen(String url) {
+    Navigator.of(context, rootNavigator: true).pop();
+    showDialog(
+      context: context,
+      builder: (ctx) => Dialog(
+        backgroundColor: Colors.white,
+        insetPadding: const EdgeInsets.all(36),
+        child: GestureDetector(
+          onTap: () => Navigator.pop(ctx),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              const SizedBox(height: 28),
+              QrImageView(data: url, size: 330, backgroundColor: Colors.white),
+              const SizedBox(height: 20),
+              Text(url,
+                  style: const TextStyle(
+                      fontSize: 16,
+                      fontWeight: FontWeight.w600,
+                      color: Colors.black87)),
+              const SizedBox(height: 6),
+              const Text('点击任意处返回',
+                  style: TextStyle(fontSize: 12, color: Colors.grey)),
+              const SizedBox(height: 28),
+            ],
+          ),
+        ),
+      ),
+    );
   }
 
   Widget _buildFirewallCard() {
@@ -948,6 +1058,11 @@ class _LanTransferScreenState extends State<LanTransferScreen> {
                   _selfName.isEmpty ? '本机' : _selfName,
                   style: const TextStyle(fontWeight: FontWeight.w600, fontSize: 15),
                 ),
+              ),
+              IconButton(
+                icon: const Icon(Icons.qr_code_2, size: 20),
+                tooltip: '网页版二维码',
+                onPressed: _showQrDialog,
               ),
               IconButton(
                 icon: const Icon(Icons.copy, size: 18),

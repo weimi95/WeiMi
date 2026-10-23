@@ -96,7 +96,7 @@ class DaemonService {
   }
 
   /// 期望的 daemon 版本（与 daemon/Cargo.toml 的 version 保持一致；发版同步改）。
-  static const String _kExpectedVersion = '1.2.15';
+  static const String _kExpectedVersion = '1.2.16';
 
   /// 查 daemon 版本；旧版不认识 version 指令 → _sendRecv 超时返回 null。
   static Future<String?> daemonVersion() async {
@@ -217,9 +217,14 @@ class DaemonService {
   }
 
   /// 取 daemon 发现的微密设备列表（精简版：Windows 上 daemon 永久持有发现端口，
-  /// UI 不再自绑 52346，改由本方法轮询）。返回 [{id,name,ip,httpPort}]。
+  /// UI 不再自绑 52346，改由本方法轮询）。
+  /// 返回 {peers:[{id,name,ip,httpPort}], port, ips}；port/ips 供二维码用。
+  static Future<Map<String, dynamic>?> listPeersInfo() async {
+    return _sendRecv('{"cmd":"listPeers"}');
+  }
+
   static Future<List<Map<String, dynamic>>> listPeers() async {
-    final res = await _sendRecv('{"cmd":"listPeers"}');
+    final res = await listPeersInfo();
     if (res == null) return const [];
     final list = res['peers'];
     if (list is! List) return const [];
@@ -227,6 +232,37 @@ class DaemonService {
         .whereType<Map>()
         .map((e) => e.map((k, v) => MapEntry(k as String, v)))
         .toList();
+  }
+
+  /// 当前连进 daemon 网页版的浏览器列表 [{id,name,ip}] + port。
+  static Future<Map<String, dynamic>?> webPeersInfo() async {
+    return _sendRecv('{"cmd":"webPeers"}');
+  }
+
+  /// UI 聊天窗发文件给"网页客户端"（daemon 读文件经 WS 推给浏览器，异步执行）。
+  /// 返回 true = 指令已受理（实际结果看 daemon 日志/浏览器端）。
+  static Future<bool> webSendFile({
+    required String to,
+    required String path,
+    required String name,
+  }) async {
+    final res = await _sendRecv(jsonEncode({
+      'cmd': 'webSend',
+      'to': to,
+      'name': name,
+      'path': path,
+    }));
+    return res != null && res['ok'] == true;
+  }
+
+  /// UI 聊天窗发文本给"网页客户端"。
+  static Future<bool> webSendText({required String to, required String text}) async {
+    final res = await _sendRecv(jsonEncode({
+      'cmd': 'webSendText',
+      'to': to,
+      'text': text,
+    }));
+    return res != null && res['ok'] == true;
   }
 
   /// 把守护进程期间收到的文件/文本记录（daemon_transfers.jsonl）合并进
@@ -264,7 +300,8 @@ class DaemonService {
             await TransferHistoryService.instance.add(TransferRecord(
               id: 'dm-$ms-${j['name'] ?? ''}',
               kind: (j['kind'] as String?) ?? 'file',
-              direction: 'in',
+              // daemon-web 转发记录是 out 方向（网页访客 → 其他设备）
+              direction: (j['direction'] as String?) ?? 'in',
               name: (j['name'] as String?) ?? '',
               path: j['path'] as String?,
               text: j['text'] as String?,

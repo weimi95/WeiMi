@@ -1385,6 +1385,16 @@ fn handle_client(mut stream: TcpStream) {
         .map(|a| a.ip().to_string())
         .unwrap_or_default();
 
+    // WebSocket 房间（网页版）：与「可被发现」解耦，只受网页快传开关约束
+    if head.path == "/ws" {
+        if !web_on {
+            write_full(&mut stream, 403, "text/plain", b"web share off");
+            return;
+        }
+        handle_ws(stream, &head, leftover);
+        return;
+    }
+
     match (head.method.as_str(), head.path.as_str()) {
         ("GET", "/") | ("GET", "/index.html") => {
             if web_on {
@@ -1654,94 +1664,1237 @@ fn web_page() -> String {
 <html lang="zh">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1">
 <title>微密飞传 · 网页版</title>
 <style>
-body{margin:0;font-family:system-ui,sans-serif;background:#101418;color:#e8eaed;
- display:flex;align-items:center;justify-content:center;min-height:100vh}
-.card{background:#1b2129;border-radius:16px;padding:28px;width:min(420px,92vw);
- box-shadow:0 8px 30px rgba(0,0,0,.4)}
-h1{font-size:20px;margin:0 0 6px}
-p.tip{font-size:13px;color:#9aa4b0;margin:0 0 18px}
-#drop{border:2px dashed #3b4654;border-radius:12px;padding:34px 12px;text-align:center;
- color:#9aa4b0;cursor:pointer;transition:.2s}
-#drop.hover{border-color:#5b8def;color:#bcd3ff;background:#1d2430}
-#file{display:none}
-#txt{width:100%;box-sizing:border-box;margin-top:14px;background:#11161c;border:1px solid #3b4654;
- border-radius:8px;color:#e8eaed;padding:10px;font-size:14px;resize:vertical;min-height:64px}
-button{margin-top:12px;width:100%;background:#2f6fed;border:none;border-radius:8px;color:#fff;
- padding:10px;font-size:14px;cursor:pointer}
-button:disabled{opacity:.5}
-#msg{margin-top:12px;font-size:13px;color:#9aa4b0;min-height:18px;white-space:pre-wrap}
-#log{list-style:none;margin:12px 0 0;padding:0;font-size:13px}
-#log li{padding:6px 8px;border-radius:6px;margin-bottom:6px;background:#141a21;
- color:#9fd39f;word-break:break-all}
-#log li.err{color:#e08c8c}
-#log li .t{color:#69737f;font-size:11px;margin-left:6px}
-.logo{font-size:34px;text-align:center;margin-bottom:4px}
+  * { margin:0; padding:0; box-sizing:border-box; -webkit-tap-highlight-color:transparent; }
+  body { font-family:-apple-system,"PingFang SC","Microsoft YaHei",sans-serif;
+         background:#f2f5f9; min-height:100vh; display:flex; flex-direction:column; }
+  header { background:linear-gradient(135deg,#1e6fd9,#2fa3e8); color:#fff;
+           padding:20px 16px 16px; text-align:center; }
+  header h1 { font-size:19px; font-weight:600; }
+  header p { font-size:12px; opacity:.85; margin-top:3px; }
+  main { flex:1; max-width:640px; width:100%; margin:0 auto; padding:20px 16px; }
+  .ring { display:flex; flex-wrap:wrap; gap:22px; justify-content:center;
+          align-items:center; padding:26px 0; }
+  .dev { width:104px; text-align:center; cursor:pointer; user-select:none; }
+  .dev .bubble { width:86px; height:86px; margin:0 auto; border-radius:50%;
+                 display:flex; align-items:center; justify-content:center;
+                 font-size:30px; font-weight:600; color:#fff;
+                 background:#2fa3e8; transition:.15s;
+                 box-shadow:0 3px 10px rgba(30,111,217,.25); }
+  .dev:hover .bubble { transform:scale(1.06); }
+  .dev.drag .bubble { transform:scale(1.12); background:#1d9e75; }
+  .dev.devapp .bubble { background:#1d9e75; }
+  .dev .nm { margin-top:8px; font-size:13px; color:#24405e; word-break:break-all; }
+  .dev.self .bubble { background:#5f6b7a; font-size:24px; }
+  .dev.self { cursor:default; }
+  .empty { text-align:center; color:#7d90a5; font-size:14px; padding:30px 0; }
+  .panel { background:#fff; border-radius:14px; padding:14px; margin-top:10px; }
+  .panel h3 { font-size:14px; color:#24405e; margin-bottom:8px; }
+  textarea { width:100%; height:80px; border:1px solid #d5dfeb; border-radius:10px;
+             padding:10px; font-size:14px; resize:vertical; outline:none; }
+  .btn { display:inline-block; border:none; border-radius:10px; padding:9px 20px;
+         font-size:14px; color:#fff; background:#1e6fd9; cursor:pointer; }
+  .btn.gray { background:#eef4fb; color:#1e6fd9; }
+  .row { display:flex; gap:10px; justify-content:flex-end; margin-top:10px; }
+  ul { list-style:none; margin-top:6px; }
+  li { font-size:13px; color:#24405e; padding:9px 11px; border-radius:9px;
+       background:#f2f7fd; margin-bottom:6px; word-break:break-all; }
+  li .bar { height:4px; background:#d8e6f5; border-radius:2px; margin-top:6px; overflow:hidden; }
+  li .bar i { display:block; height:100%; width:0; background:#2fa3e8; transition:width .15s; }
+  li.ok { background:#eef9ef; color:#1d7a34; }
+  li.err { background:#fdeeee; color:#b23434; }
+  .dialog { position:absolute; inset:0; background:rgba(15,35,60,.45);
+            display:flex; align-items:center; justify-content:center; z-index:9; }
+  .dialog .box { background:#fff; border-radius:14px; padding:18px; width:min(90vw,360px); }
+  footer { text-align:center; font-size:11px; color:#93a4b8; padding:10px; }
 </style>
 </head>
 <body>
-<div class="card">
-  <div class="logo">&#128274;</div>
+<header>
   <h1>微密飞传 · 网页版</h1>
-  <p class="tip">通过浏览器把文件或文本发送到这台电脑，将存入接收目录</p>
-  <div id="drop">点击选择文件，或拖拽到此处</div>
-  <input id="file" type="file" multiple>
-  <textarea id="txt" placeholder="或粘贴一段文本…"></textarea>
-  <button id="send">发送文本</button>
-  <ul id="log"></ul>
-</div>
+  <p>同一 WiFi 下设备互相发现，点设备或拖文件到设备即可发送</p>
+</header>
+<main>
+  <div class="ring" id="ring"></div>
+  <div class="empty" id="empty">等待其他设备打开此页面…</div>
+  <ul id="list"></ul>
+  <div class="panel" id="sendPanel" hidden>
+    <h3 id="sendTitle">发送</h3>
+    <textarea id="txt" placeholder="输入要发送的文本内容（发文本点下面的按钮）"></textarea>
+    <div class="row">
+      <button class="btn gray" onclick="closeDialog()">取消</button>
+      <button class="btn gray" onclick="pickFiles()">发送文件</button>
+      <button class="btn" onclick="doSendText()">发送文本</button>
+    </div>
+  </div>
+  <input type="file" id="file" multiple hidden>
+</main>
+<footer>微密文件 · 局域网直传，数据不经外部服务器</footer>
 <script>
-const drop=document.getElementById('drop'),file=document.getElementById('file'),
- log=document.getElementById('log'),btn=document.getElementById('send'),txt=document.getElementById('txt');
-function li(text,cls){
-  var el=document.createElement('li');
-  el.textContent=text;
-  if(cls)el.className=cls;
-  var d=new Date();
-  var t=document.createElement('span');
-  t.className='t';
-  t.textContent=('0'+d.getHours()).slice(-2)+':'+('0'+d.getMinutes()).slice(-2)+':'+('0'+d.getSeconds()).slice(-2);
-  el._time=t;el.appendChild(t);
-  log.appendChild(el);
+var COLORS = ['白','灰','黑','赤','金','银','蓝','绿'];
+var ANIMALS = ['鲸','狼','狐','鹿','鹰','虎','猫','熊','马','龟'];
+var ws = null, myId = '', peers = [], myName;
+var recvList = {};   // fid -> 接收状态（浏览器作为接收端）
+var sendList = {};   // fid -> 发送状态（发给局域网设备，等 daemon 回执）
+var targetPeer = null;
+var ring = document.getElementById('ring');
+var empty = document.getElementById('empty');
+var list = document.getElementById('list');
+
+myName = localStorage.getItem('weimi_web_name');
+if (!myName) {
+  myName = COLORS[Math.floor(Math.random()*COLORS.length)] +
+           ANIMALS[Math.floor(Math.random()*ANIMALS.length)];
+  localStorage.setItem('weimi_web_name', myName);
+}
+
+function connect() {
+  var proto = location.protocol === 'https:' ? 'wss' : 'ws';
+  ws = new WebSocket(proto + '://' + location.host + '/ws');
+  ws.binaryType = 'arraybuffer';
+  ws.onopen = function() { ws.send(JSON.stringify({t:'hello', name:myName})); };
+  ws.onmessage = onMsg;
+  ws.onclose = function() { setTimeout(connect, 3000); };
+}
+connect();
+
+function onMsg(e) {
+  if (e.data instanceof ArrayBuffer) { onBinary(e.data); return; }
+  var m = JSON.parse(e.data);
+  if (m.t === 'welcome') { myId = m.id; render(m.peers); }
+  else if (m.t === 'peers') render(m.peers);
+  else if (m.t === 'text') showText(m);
+  else if (m.t === 'file-start') startRecv(m);
+  else if (m.t === 'file-done') {
+    if (sendList[m.fid]) {
+      var s = sendList[m.fid];
+      done(s.el, '已送达 ' + s.name + ' →「' + s.to + '」', true);
+      s.res(); delete sendList[m.fid];
+    } else finishRecv(m.fid, true);
+  }
+  else if (m.t === 'file-abort' || m.t === 'busy') {
+    if (sendList[m.fid]) {
+      var s = sendList[m.fid];
+      done(s.el, '发送失败 ' + s.name + '（对方离线或拒收）', false);
+      s.res(); delete sendList[m.fid];
+    } else finishRecv(m.fid, false);
+  }
+}
+
+function render(listPeers) {
+  peers = listPeers;
+  ring.innerHTML = '';
+  // 本浏览器（自己）
+  var self = document.createElement('div');
+  self.className = 'dev self';
+  self.innerHTML = '<div class="bubble">' + esc(myName.charAt(0)) + '</div>' +
+                   '<div class="nm">' + esc(myName) + '<br><span style="font-size:11px;color:#93a4b8">点我改名</span></div>';
+  self.onclick = renameSelf;
+  ring.appendChild(self);
+  // 本机 App + 其他浏览器 + 局域网设备
+  peers.forEach(function(p) {
+    var d = document.createElement('div');
+    d.className = 'dev' + (p.dev ? ' devapp' : '');
+    var sub = p.self ? '<br><span style="font-size:11px;color:#93a4b8">接收存到本机</span>' : '';
+    d.innerHTML = '<div class="bubble">' + esc(p.name.charAt(0)) + '</div>' +
+                  '<div class="nm">' + esc(p.name) + sub + '</div>';
+    d.onclick = function() { openSend(p.id, p.name); };
+    d.ondragover = function(e) { e.preventDefault(); d.classList.add('drag'); };
+    d.ondragleave = function() { d.classList.remove('drag'); };
+    d.ondrop = function(e) {
+      e.preventDefault(); d.classList.remove('drag');
+      if (e.dataTransfer.files.length) sendFiles(p.id, e.dataTransfer.files, p.name);
+    };
+    ring.appendChild(d);
+  });
+  empty.hidden = peers.length > 0;
+}
+
+function esc(s) {
+  return String(s).replace(/[&<>"]/g, function(c) {
+    return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c];
+  });
+}
+
+function renameSelf() {
+  var n = prompt('给自己起个名字', myName);
+  if (n && n.trim()) {
+    myName = n.trim().slice(0, 20);
+    localStorage.setItem('weimi_web_name', myName);
+    ws.send(JSON.stringify({t:'rename', name:myName}));
+    render(peers);
+  }
+}
+
+function openSend(pid, pname) {
+  targetPeer = {id: pid, name: pname};
+  var panel = document.getElementById('sendPanel');
+  document.getElementById('sendTitle').textContent = '发送给「' + pname + '」';
+  document.getElementById('txt').value = '';
+  panel.hidden = false;
+  panel.scrollIntoView({behavior:'smooth'});
+}
+
+function closeDialog() { document.getElementById('sendPanel').hidden = true; }
+
+function doSendText() {
+  var ta = document.getElementById('txt');
+  if (!ta.value.trim() || !targetPeer) return;
+  if (!ws || ws.readyState !== 1) {
+    li('连接已断开，请刷新页面重试', 'err');
+    closeDialog();
+    return;
+  }
+  ws.send(JSON.stringify({t:'text', to:targetPeer.id, text:ta.value}));
+  li('文本已发送给「' + targetPeer.name + '」', 'ok');
+  closeDialog();
+}
+
+document.getElementById('file').addEventListener('change', function() {
+  if (this.files.length && targetPeer) sendFiles(targetPeer.id, this.files, targetPeer.name);
+  this.value = '';
+});
+
+function pickFiles() { document.getElementById('file').click(); }
+
+function sendFiles(pid, files, pname) {
+  var arr = Array.prototype.slice.call(files);
+  (function next() {
+    if (!arr.length) return;
+    sendOne(pid, arr.shift(), pname).then(next);
+  })();
+}
+
+function sendOne(pid, f, pname) {
+  return new Promise(function(resolve) {
+    var el = li('正在发送 ' + f.name + ' → 「' + pname + '」（0%）');
+    var bar = document.createElement('div'); bar.className = 'bar';
+    var inner = document.createElement('i'); bar.appendChild(inner); el.appendChild(bar);
+    var fid = 'f' + Date.now() + Math.floor(Math.random()*1000);
+    sendList[fid] = {el:el, res:resolve, name:f.name, to:pname};
+    ws.send(JSON.stringify({t:'file-start', to:pid, name:f.name, size:f.size, fid:fid}));
+    (function next() {
+      var end = Math.min(pos + slice, f.size);
+      f.slice(pos, end).arrayBuffer().then(function(buf) {
+        ws.send(buf);
+        pos = end;
+        var pct = Math.round(pos / f.size * 100);
+        inner.style.width = pct + '%';
+        el.firstChild.textContent = '正在发送 ' + f.name + ' → 「' + pname + '」（' + pct + '%）';
+        if (pos < f.size) next();
+        else if (pid.indexOf('d:') === 0) {
+          el.firstChild.textContent = '已发完 ' + f.name + '，等待对方确认…';
+          resolve();
+        }
+        else { done(el, '已发送 ' + f.name + ' → 「' + pname + '」', true); resolve(); }
+      });
+    })();
+  });
+}
+
+function startRecv(m) {
+  var el = li('正在接收 ' + m.name + '（来自 ' + (m.fromName || '设备') + '）');
+  var bar = document.createElement('div'); bar.className = 'bar';
+  var inner = document.createElement('i'); bar.appendChild(inner); el.appendChild(bar);
+  recvList[m.fid] = {name:m.name, size:m.size, chunks:[], received:0, el:el, bar:inner};
+}
+
+function onBinary(buf) {
+  for (var fid in recvList) break;
+  var r = recvList[fid];
+  if (!r) return;
+  r.chunks.push(buf);
+  r.received += buf.byteLength;
+  if (r.size > 0) r.bar.style.width = Math.round(r.received / r.size * 100) + '%';
+  r.el.firstChild.textContent = '正在接收 ' + r.name + '（' +
+    Math.round(r.received / r.size * 100) + '%）';
+}
+
+function finishRecv(fid, ok) {
+  var r = recvList[fid];
+  if (!r) return;
+  delete recvList[fid];
+  if (ok) {
+    var blob = new Blob(r.chunks);
+    var a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = r.name;
+    document.body.appendChild(a); a.click(); a.remove();
+    done(r.el, '已接收 ' + r.name + '（已开始下载）', true);
+  } else {
+    done(r.el, '接收失败 ' + r.name, false);
+  }
+}
+
+function showText(m) {
+  var el = li('收到来自「' + (m.name || '设备') + '」的文本，点此查看');
+  el.style.cursor = 'pointer';
+  el.onclick = function() {
+    var v = prompt('来自「' + (m.name || '设备') + '」的文本（可全选复制）', m.text);
+  };
+  el.className = 'ok';
+}
+
+function li(text, cls) {
+  var el = document.createElement('li');
+  el.textContent = text;
+  if (cls) el.className = cls;
+  var t = document.createElement('span');
+  var d = new Date();
+  var hh = ('0'+d.getHours()).slice(-2), mm = ('0'+d.getMinutes()).slice(-2);
+  var ss = ('0'+d.getSeconds()).slice(-2);
+  t.textContent = ' ' + hh + ':' + mm + ':' + ss;
+  t.style.cssText = 'color:#999;font-size:11px;margin-left:6px';
+  el._time = t;
+  el.appendChild(t);
+  list.appendChild(el);
   return el;
 }
-function done(el,text,ok){
-  el.textContent=text;
-  el.className=ok?'':'err';
-  if(el._time)el.appendChild(el._time);
+function done(el, text, ok) {
+  el.textContent = text;
+  el.className = ok ? 'ok' : 'err';
+  if (el._time) el.appendChild(el._time);
+  var bar = el.querySelector('.bar');
+  if (bar) bar.remove();
 }
-drop.onclick=()=>file.click();
-drop.ondragover=e=>{e.preventDefault();drop.classList.add('hover')};
-drop.ondragleave=()=>drop.classList.remove('hover');
-drop.ondrop=e=>{e.preventDefault();drop.classList.remove('hover');sendFiles(e.dataTransfer.files)};
-file.onchange=()=>sendFiles(file.files);
-async function sendFiles(files){
-  for(const f of files){
-    const el=li('正在发送 '+f.name+' …');
-    try{
-      const r=await fetch('/web/upload?name='+encodeURIComponent(f.name),{method:'POST',body:f});
-      const j=await r.json();
-      done(el, j.ok?('已发送 '+f.name):('失败：'+(j.error||r.status)), !!j.ok);
-    }catch(e){done(el,'失败：'+e,false)}
-  }
-  file.value='';
-}
-btn.onclick=async()=>{
-  const t=txt.value.trim();if(!t)return;
-  const el=li('正在发送文本 …');
-  try{
-    const r=await fetch('/web/text',{method:'POST',body:t});
-    const j=await r.json();
-    if(j.ok)txt.value='';
-    done(el, j.ok?'文本已发送':('失败：'+(j.error||r.status)), !!j.ok);
-  }catch(e){done(el,'失败：'+e,false)}
-};
 </script>
 </body>
 </html>"#
         .to_string()
+}
+
+// ==================== websocket room ====================
+
+const WS_GUID: &str = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
+
+fn sha1(data: &[u8]) -> [u8; 20] {
+    let mut h: [u32; 5] = [0x6745_2301, 0xEFCD_AB89, 0x98BA_DCFE, 0x1032_5476, 0xC3D2_E1F0];
+    let ml = (data.len() as u64) * 8;
+    let mut msg = data.to_vec();
+    msg.push(0x80);
+    while msg.len() % 64 != 56 {
+        msg.push(0);
+    }
+    msg.extend_from_slice(&ml.to_be_bytes());
+    for chunk in msg.chunks(64) {
+        let mut w = [0u32; 80];
+        for i in 0..16 {
+            w[i] = u32::from_be_bytes([
+                chunk[i * 4],
+                chunk[i * 4 + 1],
+                chunk[i * 4 + 2],
+                chunk[i * 4 + 3],
+            ]);
+        }
+        for i in 16..80 {
+            w[i] = (w[i - 3] ^ w[i - 8] ^ w[i - 14] ^ w[i - 16]).rotate_left(1);
+        }
+        let (mut a, mut b, mut c, mut d, mut e) = (h[0], h[1], h[2], h[3], h[4]);
+        for (i, wi) in w.iter().enumerate() {
+            let (f, k) = match i {
+                0..=19 => ((b & c) | ((!b) & d), 0x5A82_7999u32),
+                20..=39 => (b ^ c ^ d, 0x6ED9_EBA1),
+                40..=59 => ((b & c) | (b & d) | (c & d), 0x8F1B_BCDC),
+                _ => (b ^ c ^ d, 0xCA62_C1D6),
+            };
+            let temp = a
+                .rotate_left(5)
+                .wrapping_add(f)
+                .wrapping_add(e)
+                .wrapping_add(k)
+                .wrapping_add(*wi);
+            e = d;
+            d = c;
+            c = b.rotate_left(30);
+            b = a;
+            a = temp;
+        }
+        h[0] = h[0].wrapping_add(a);
+        h[1] = h[1].wrapping_add(b);
+        h[2] = h[2].wrapping_add(c);
+        h[3] = h[3].wrapping_add(d);
+        h[4] = h[4].wrapping_add(e);
+    }
+    let mut out = [0u8; 20];
+    for i in 0..5 {
+        out[i * 4..i * 4 + 4].copy_from_slice(&h[i].to_be_bytes());
+    }
+    out
+}
+
+fn b64(data: &[u8]) -> String {
+    const T: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::new();
+    for chunk in data.chunks(3) {
+        let b0 = chunk[0] as u32;
+        let b1 = *chunk.get(1).unwrap_or(&0) as u32;
+        let b2 = *chunk.get(2).unwrap_or(&0) as u32;
+        let n = (b0 << 16) | (b1 << 8) | b2;
+        out.push(T[(n >> 18) as usize & 63] as char);
+        out.push(T[(n >> 12) as usize & 63] as char);
+        out.push(if chunk.len() > 1 {
+            T[(n >> 6) as usize & 63] as char
+        } else {
+            '='
+        });
+        out.push(if chunk.len() > 2 {
+            T[n as usize & 63] as char
+        } else {
+            '='
+        });
+    }
+    out
+}
+
+/// percent-encode（HTTP 头只允许 ASCII；与 Dart Uri.encodeComponent 同规则）
+fn pct_encode(s: &str) -> String {
+    let mut out = String::new();
+    for &b in s.as_bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'!' | b'~' | b'*'
+            | b'\'' | b'(' | b')' => out.push(b as char),
+            _ => out.push_str(&format!("%{:02X}", b)),
+        }
+    }
+    out
+}
+
+fn ws_frame(opcode: u8, payload: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(payload.len() + 10);
+    out.push(0x80 | opcode);
+    let len = payload.len();
+    if len < 126 {
+        out.push(len as u8);
+    } else if len <= u16::MAX as usize {
+        out.push(126);
+        out.extend_from_slice(&(len as u16).to_be_bytes());
+    } else {
+        out.push(127);
+        out.extend_from_slice(&(len as u64).to_be_bytes());
+    }
+    out.extend_from_slice(payload);
+    out
+}
+
+enum WsErr {
+    Closed,
+    Timeout,
+}
+
+struct WsConn {
+    stream: TcpStream,
+    buf: Vec<u8>,
+}
+
+impl WsConn {
+    fn new(stream: TcpStream, leftover: Vec<u8>) -> Self {
+        WsConn { stream, buf: leftover }
+    }
+    fn fill(&mut self) -> std::io::Result<usize> {
+        let mut tmp = [0u8; 16 * 1024];
+        let n = self.stream.read(&mut tmp)?;
+        if n > 0 {
+            self.buf.extend_from_slice(&tmp[..n]);
+        }
+        Ok(n)
+    }
+    /// 读一个完整帧（原始首字节 + 未 mask 的 payload）
+    fn read_frame(&mut self) -> Result<(u8, Vec<u8>), WsErr> {
+        loop {
+            if let Some(f) = self.try_parse() {
+                return Ok(f);
+            }
+            match self.fill() {
+                Ok(0) => return Err(WsErr::Closed),
+                Ok(_) => {}
+                Err(e) => {
+                    return Err(match e.kind() {
+                        std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut => {
+                            WsErr::Timeout
+                        }
+                        _ => WsErr::Closed,
+                    });
+                }
+            }
+        }
+    }
+    fn try_parse(&mut self) -> Option<(u8, Vec<u8>)> {
+        if self.buf.len() < 2 {
+            return None;
+        }
+        let b0 = self.buf[0];
+        let b1 = self.buf[1];
+        let masked = b1 & 0x80 != 0;
+        let len7 = (b1 & 0x7f) as usize;
+        let mut off = 2usize;
+        let len = match len7 {
+            126 => {
+                if self.buf.len() < 4 {
+                    return None;
+                }
+                let v = u16::from_be_bytes([self.buf[2], self.buf[3]]) as usize;
+                off = 4;
+                v
+            }
+            127 => {
+                if self.buf.len() < 10 {
+                    return None;
+                }
+                let mut a = [0u8; 8];
+                a.copy_from_slice(&self.buf[2..10]);
+                off = 10;
+                u64::from_be_bytes(a) as usize
+            }
+            _ => len7,
+        };
+        if len > 64 * 1024 * 1024 {
+            return None; // 协议保护：单帧上限 64MB
+        }
+        let total = off + len + if masked { 4 } else { 0 };
+        if self.buf.len() < total {
+            return None;
+        }
+        let mut payload = self.buf[off..off + len].to_vec();
+        if masked {
+            let mk = [
+                self.buf[off + len],
+                self.buf[off + len + 1],
+                self.buf[off + len + 2],
+                self.buf[off + len + 3],
+            ];
+            for (i, b) in payload.iter_mut().enumerate() {
+                *b ^= mk[i % 4];
+            }
+        }
+        self.buf.drain(..total);
+        Some((b0, payload))
+    }
+}
+
+struct RoomPeer {
+    id: String,
+    name: String,
+    ip: String,
+    tx: std::sync::mpsc::Sender<Vec<u8>>,
+}
+static ROOM: Mutex<Vec<RoomPeer>> = Mutex::new(Vec::new());
+static WEB_SEQ: AtomicU32 = AtomicU32::new(0);
+
+/// 房间成员列表（网页环）：本机 App + Web 访客 + 局域网微密设备
+fn room_peers_json(exclude: Option<&str>) -> serde_json::Value {
+    let mut arr = Vec::new();
+    let self_name = CONFIG
+        .lock()
+        .unwrap()
+        .as_ref()
+        .map(|c| c.device_name.clone())
+        .unwrap_or_default();
+    let self_name = if self_name.is_empty() {
+        "本机".to_string()
+    } else {
+        self_name
+    };
+    arr.push(serde_json::json!({"id": "app", "name": self_name, "self": true}));
+    for p in ROOM.lock().unwrap().iter() {
+        if Some(p.id.as_str()) == exclude {
+            continue;
+        }
+        arr.push(serde_json::json!({"id": p.id, "name": p.name}));
+    }
+    for p in PEERS.lock().unwrap().iter() {
+        arr.push(serde_json::json!({"id": format!("d:{}", p.id), "name": p.name, "dev": true}));
+    }
+    serde_json::Value::Array(arr)
+}
+
+fn broadcast_room_peers() {
+    let peers = room_peers_json(None);
+    let frame = ws_frame(
+        1,
+        serde_json::json!({"t": "peers", "peers": peers}).to_string().as_bytes(),
+    );
+    for p in ROOM.lock().unwrap().iter() {
+        let _ = p.tx.send(frame.clone());
+    }
+}
+
+#[derive(Default)]
+struct WsInbound {
+    to: String, // "app" | "d:<id>" | 网页 peer id
+    fid: String,
+    name: String,
+    size: u64,
+    received: u64,
+    file: Option<std::fs::File>,
+    path: Option<PathBuf>,
+    up: Option<TcpStream>,
+    done: bool,
+    aborted: bool,
+}
+
+fn ws_inbound_abort(inb: &mut WsInbound) {
+    inb.file = None;
+    if let Some(p) = inb.path.take() {
+        let _ = std::fs::remove_file(p);
+    }
+    inb.up = None;
+    *inb = WsInbound::default();
+}
+
+fn ws_inbound_finish(inb: &mut WsInbound) {
+    inb.file = None;
+    inb.path = None;
+    inb.up = None;
+    *inb = WsInbound::default();
+}
+
+/// out 方向的传输记录（网页访客经本机转发给其他设备）
+fn record_history_out(
+    kind: &str,
+    name: &str,
+    size: u64,
+    peer: &str,
+    ok: bool,
+    text: Option<&str>,
+    path: Option<&str>,
+) {
+    let docs = {
+        let cfg = CONFIG.lock().unwrap();
+        cfg.as_ref()
+            .map(|c| c.docs_dir.clone())
+            .unwrap_or_default()
+    };
+    if docs.is_empty() {
+        return;
+    }
+    let p = Path::new(&docs).join("daemon_transfers.jsonl");
+    let obj = serde_json::json!({
+        "kind": kind,
+        "direction": "out",
+        "name": name,
+        "text": text,
+        "path": path,
+        "size": size,
+        "peerName": peer,
+        "time": now_ms(),
+        "ok": ok,
+        "via": "daemon-web",
+    });
+    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(p) {
+        let _ = writeln!(f, "{}", obj);
+    }
+}
+
+/// daemon 代发文本到局域网设备（WeiMi 协议，出站连接不占端口）
+fn device_send_text(devid: &str, text: &str, from_display: &str, sender_id: &str) -> bool {
+    let target = PEERS
+        .lock()
+        .unwrap()
+        .iter()
+        .find(|p| p.id == devid)
+        .map(|p| (p.ip.clone(), p.port));
+    let Some((ip, port)) = target else {
+        return false;
+    };
+    let Ok(addr) = format!("{}:{}", ip, port).parse::<std::net::SocketAddr>() else {
+        return false;
+    };
+    let Ok(mut up) = TcpStream::connect_timeout(&addr, Duration::from_secs(5)) else {
+        return false;
+    };
+    let bytes = text.as_bytes();
+    let req = format!(
+        "POST /weimi/text HTTP/1.1\r\nHost: {}\r\nX-Weimi-App: weimi\r\nX-Sender-Id: {}\r\nX-Sender-Name: {}\r\nX-Text-Length: {}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+        addr,
+        sender_id,
+        pct_encode(from_display),
+        bytes.len(),
+        bytes.len()
+    );
+    if up.write_all(req.as_bytes()).is_err() {
+        return false;
+    }
+    if up.write_all(bytes).is_err() {
+        return false;
+    }
+    let _ = up.set_read_timeout(Some(Duration::from_secs(30)));
+    read_upstream_ok(&mut up)
+}
+
+/// 读 upstream 应答，判断是否 {"ok":true}
+fn read_upstream_ok(up: &mut TcpStream) -> bool {
+    let mut resp = Vec::new();
+    let mut tmp = [0u8; 4096];
+    loop {
+        match up.read(&mut tmp) {
+            Ok(0) => break,
+            Ok(n) => {
+                resp.extend_from_slice(&tmp[..n]);
+                if resp.len() > 16 * 1024 {
+                    break;
+                }
+            }
+            Err(_) => break,
+        }
+    }
+    find_subsequence(&resp, b"\"ok\":true").is_some()
+}
+
+/// WS 二进制帧路由：落盘（to=app）/ 转发设备（d:）/ 网页间中转
+fn ws_route_binary(
+    inb: &mut WsInbound,
+    chunk: &[u8],
+    tx: &std::sync::mpsc::Sender<Vec<u8>>,
+    visitor: &str,
+) {
+    if inb.to.is_empty() || inb.done || inb.aborted {
+        return;
+    }
+    inb.received += chunk.len() as u64;
+    let complete = inb.size > 0 && inb.received >= inb.size;
+
+    if inb.to == "app" {
+        if let Some(f) = inb.file.as_mut() {
+            let _ = f.write_all(chunk);
+        }
+        if complete {
+            let (name, path, size, fid) = (
+                inb.name.clone(),
+                inb.path.clone(),
+                inb.received,
+                inb.fid.clone(),
+            );
+            inb.file = None;
+            inb.path = None;
+            let path_str = path
+                .as_ref()
+                .map(|p| p.to_string_lossy().to_string());
+            if let Some(p) = path {
+                balloon(
+                    "微密飞传",
+                    &format!("收到网页文件：{}\n来自 {}", name, visitor),
+                );
+                maybe_open_recv_dir(&p);
+                record_history("file", &name, size, visitor, true, None, path_str.as_deref());
+            }
+            let _ = tx.send(ws_frame(
+                1,
+                serde_json::json!({"t": "file-done", "fid": fid}).to_string().as_bytes(),
+            ));
+            ws_inbound_finish(inb);
+        }
+        return;
+    }
+
+    if inb.to.starts_with("d:") {
+        if let Some(up) = inb.up.as_mut() {
+            if up.write_all(chunk).is_err() {
+                inb.aborted = true;
+            }
+        }
+        if complete || inb.aborted {
+            let ok = if inb.aborted {
+                false
+            } else {
+                let mut up = inb.up.take().unwrap();
+                let _ = up.flush();
+                let _ = up.set_read_timeout(Some(Duration::from_secs(60)));
+                read_upstream_ok(&mut up)
+            };
+            let (name, fid, got) = (inb.name.clone(), inb.fid.clone(), inb.received);
+            let devname = {
+                let id = inb.to[2..].to_string();
+                PEERS
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .find(|p| p.id == id)
+                    .map(|p| p.name.clone())
+                    .unwrap_or_default()
+            };
+            record_history_out(
+                "file",
+                &name,
+                got,
+                &format!("{} → {}", visitor, devname),
+                ok,
+                None,
+                None,
+            );
+            if ok {
+                let _ = tx.send(ws_frame(
+                    1,
+                    serde_json::json!({"t": "file-done", "fid": fid}).to_string().as_bytes(),
+                ));
+            } else {
+                let _ = tx.send(ws_frame(
+                    1,
+                    serde_json::json!({"t": "file-abort", "fid": fid}).to_string().as_bytes(),
+                ));
+            }
+            ws_inbound_finish(inb);
+        }
+        return;
+    }
+
+    // 网页间中转
+    let target_tx = {
+        let room = ROOM.lock().unwrap();
+        room.iter().find(|p| p.id == inb.to).map(|p| p.tx.clone())
+    };
+    match target_tx {
+        Some(ttx) => {
+            let _ = ttx.send(ws_frame(2, chunk));
+            if complete {
+                let _ = ttx.send(ws_frame(
+                    1,
+                    serde_json::json!({"t": "file-done", "fid": inb.fid}).to_string().as_bytes(),
+                ));
+                ws_inbound_finish(inb);
+            }
+        }
+        None => {
+            let _ = tx.send(ws_frame(
+                1,
+                serde_json::json!({"t": "file-abort", "fid": inb.fid}).to_string().as_bytes(),
+            ));
+            ws_inbound_finish(inb);
+        }
+    }
+}
+
+/// WebSocket 会话：握手 → 读写线程 → 消息路由（对齐 UI 版 /ws 协议）
+fn handle_ws(stream: TcpStream, head: &RequestHead, leftover: Vec<u8>) {
+    let key = header_get(&head.headers, "sec-websocket-key");
+    let upgrade = header_get(&head.headers, "upgrade").to_ascii_lowercase();
+    if key.is_empty() || !upgrade.contains("websocket") {
+        let mut s = stream;
+        write_full(&mut s, 400, "text/plain", b"expected websocket");
+        return;
+    }
+    let accept = b64(&sha1(format!("{}{}", key, WS_GUID).as_bytes()));
+    let mut stream = stream;
+    let resp = format!(
+        "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: {}\r\n\r\n",
+        accept
+    );
+    if stream.write_all(resp.as_bytes()).is_err() {
+        return;
+    }
+    let _ = stream.set_read_timeout(Some(Duration::from_secs(60)));
+    let Ok(mut wr) = stream.try_clone() else { return };
+    let (tx, rx) = std::sync::mpsc::channel::<Vec<u8>>();
+    // 写线程：mpsc 队列 + 30s 空闲心跳 ping
+    std::thread::spawn(move || {
+        loop {
+            match rx.recv_timeout(Duration::from_secs(30)) {
+                Ok(frame) => {
+                    if wr.write_all(&frame).is_err() || wr.flush().is_err() {
+                        break;
+                    }
+                }
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                    if wr.write_all(&ws_frame(9, b"hb")).is_err() {
+                        break;
+                    }
+                    let _ = wr.flush();
+                }
+                Err(_) => break,
+            }
+        }
+    });
+    let remote_ip = stream
+        .peer_addr()
+        .map(|a| a.ip().to_string())
+        .unwrap_or_default();
+    let mut conn = WsConn::new(stream, leftover);
+
+    let mut peer_id = String::new();
+    let mut peer_name = String::new();
+    let mut inb = WsInbound::default();
+    let mut frag_op = 0u8;
+    let mut frag: Vec<u8> = Vec::new();
+    let mut expect_pong = false;
+
+    loop {
+        let (b0, payload) = match conn.read_frame() {
+            Ok(f) => f,
+            Err(WsErr::Timeout) => {
+                if expect_pong {
+                    break;
+                }
+                if tx.send(ws_frame(9, b"hb")).is_err() {
+                    break;
+                }
+                expect_pong = true;
+                continue;
+            }
+            Err(WsErr::Closed) => break,
+        };
+        let fin = b0 & 0x80 != 0;
+        let op = b0 & 0x0f;
+        if op == 8 {
+            break; // close
+        }
+        if op == 9 {
+            // ping -> pong
+            let _ = tx.send(ws_frame(10, &payload));
+            continue;
+        }
+        if op == 10 {
+            expect_pong = false;
+            continue;
+        }
+        // 分片重组
+        let (eff_op, data) = if op != 0 {
+            if fin {
+                (op, payload)
+            } else {
+                frag_op = op;
+                frag = payload;
+                continue;
+            }
+        } else {
+            if frag_op == 0 {
+                continue;
+            }
+            frag.extend_from_slice(&payload);
+            if !fin {
+                continue;
+            }
+            let d = std::mem::take(&mut frag);
+            let o = frag_op;
+            frag_op = 0;
+            (o, d)
+        };
+
+        if eff_op == 2 {
+            let visitor = format!("网页访客({})", peer_name);
+            ws_route_binary(&mut inb, &data, &tx, &visitor);
+            continue;
+        }
+        if eff_op != 1 {
+            continue;
+        }
+        let Ok(txt) = std::str::from_utf8(&data) else { continue };
+        let Ok(serde_json::Value::Object(m)) =
+            serde_json::from_str::<serde_json::Value>(txt)
+        else {
+            continue;
+        };
+        let t = m.get("t").and_then(|v| v.as_str()).unwrap_or("");
+        match t {
+            "hello" => {
+                if !peer_id.is_empty() {
+                    continue;
+                }
+                let raw = m.get("name").and_then(|v| v.as_str()).unwrap_or("").trim();
+                let mut name = safe_file_name(raw);
+                if name.is_empty() || name == "unnamed" {
+                    name = "匿名设备".to_string();
+                }
+                let name: String = name.chars().take(20).collect();
+                let id = format!(
+                    "w{}{}",
+                    WEB_SEQ.fetch_add(1, Ordering::Relaxed),
+                    now_ms() % 10000
+                );
+                peer_id = id.clone();
+                peer_name = name.clone();
+                ROOM.lock().unwrap().push(RoomPeer {
+                    id: id.clone(),
+                    name: name.clone(),
+                    ip: remote_ip.clone(),
+                    tx: tx.clone(),
+                });
+                let _ = tx.send(ws_frame(
+                    1,
+                    serde_json::json!({
+                        "t": "welcome",
+                        "id": id,
+                        "self": {"id": id, "name": name},
+                        "peers": room_peers_json(Some(&id)),
+                    })
+                    .to_string()
+                    .as_bytes(),
+                ));
+                broadcast_room_peers();
+                log(&format!("ws peer join: {} ({})", name, remote_ip));
+            }
+            "rename" => {
+                let raw = m.get("name").and_then(|v| v.as_str()).unwrap_or("").trim();
+                if raw.is_empty() {
+                    continue;
+                }
+                let name: String = safe_file_name(raw).chars().take(20).collect();
+                peer_name = name.clone();
+                if let Some(p) = ROOM.lock().unwrap().iter_mut().find(|p| p.id == peer_id) {
+                    p.name = name;
+                }
+                broadcast_room_peers();
+            }
+            "text" => {
+                let to = m.get("to").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                let text = m
+                    .get("text")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                if text.is_empty() {
+                    continue;
+                }
+                let from = format!("网页访客({})", peer_name);
+                if to == "app" {
+                    balloon(
+                        "微密飞传",
+                        &format!("收到网页文本：{}\n来自 {}", short_text(&text), from),
+                    );
+                    record_history(
+                        "text",
+                        &short_text(&text),
+                        text.chars().count() as u64,
+                        &from,
+                        true,
+                        Some(&text),
+                        None,
+                    );
+                } else if let Some(devid) = to.strip_prefix("d:").map(|s| s.to_string()) {
+                    let devname = {
+                        PEERS
+                            .lock()
+                            .unwrap()
+                            .iter()
+                            .find(|p| p.id == devid)
+                            .map(|p| p.name.clone())
+                            .unwrap_or_default()
+                    };
+                    let sender_id = format!("web-{}", remote_ip);
+                    let ok = device_send_text(&devid, &text, &from, &sender_id);
+                    record_history_out(
+                        "text",
+                        &short_text(&text),
+                        text.chars().count() as u64,
+                        &format!("{} → {}", from, devname),
+                        ok,
+                        Some(&text),
+                        None,
+                    );
+                } else {
+                    let target_tx = {
+                        let room = ROOM.lock().unwrap();
+                        room.iter().find(|p| p.id == to).map(|p| p.tx.clone())
+                    };
+                    if let Some(ttx) = target_tx {
+                        let _ = ttx.send(ws_frame(
+                            1,
+                            serde_json::json!({
+                                "t": "text",
+                                "from": peer_id.clone(),
+                                "name": peer_name.clone(),
+                                "text": text,
+                            })
+                            .to_string()
+                            .as_bytes(),
+                        ));
+                    }
+                }
+            }
+            "file-start" => {
+                if !inb.to.is_empty() {
+                    let fid = m.get("fid").and_then(|v| v.as_str()).unwrap_or("");
+                    let _ = tx.send(ws_frame(
+                        1,
+                        serde_json::json!({"t": "busy", "fid": fid}).to_string().as_bytes(),
+                    ));
+                    continue;
+                }
+                let to = m.get("to").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                let name = safe_file_name(m.get("name").and_then(|v| v.as_str()).unwrap_or("unnamed"));
+                let size = m.get("size").and_then(|v| v.as_u64()).unwrap_or(0);
+                let fid = m.get("fid").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                if to == "app" {
+                    if !TRANSFER_ON.load(Ordering::Relaxed) {
+                        let _ = tx.send(ws_frame(
+                            1,
+                            serde_json::json!({"t": "file-abort", "fid": fid}).to_string().as_bytes(),
+                        ));
+                        continue;
+                    }
+                    let dir = CONFIG
+                        .lock()
+                        .unwrap()
+                        .as_ref()
+                        .map(|c| c.receive_dir.clone())
+                        .unwrap_or_default();
+                    match resolve_save_path(&dir, &name)
+                        .and_then(|p| std::fs::File::create(&p).ok().map(|f| (p, f)))
+                    {
+                        Some((p, f)) => {
+                            inb = WsInbound {
+                                to,
+                                fid,
+                                name,
+                                size,
+                                received: 0,
+                                file: Some(f),
+                                path: Some(p),
+                                up: None,
+                                done: false,
+                                aborted: false,
+                            };
+                        }
+                        None => {
+                            let _ = tx.send(ws_frame(
+                                1,
+                                serde_json::json!({"t": "file-abort", "fid": fid}).to_string().as_bytes(),
+                            ));
+                        }
+                    }
+                } else if let Some(devid) = to.strip_prefix("d:").map(|s| s.to_string()) {
+                    let target = PEERS
+                        .lock()
+                        .unwrap()
+                        .iter()
+                        .find(|p| p.id == devid)
+                        .map(|p| (p.ip.clone(), p.port));
+                    let Some((ip, port)) = target else {
+                        let _ = tx.send(ws_frame(
+                            1,
+                            serde_json::json!({"t": "file-abort", "fid": fid}).to_string().as_bytes(),
+                        ));
+                        continue;
+                    };
+                    let addr = format!("{}:{}", ip, port);
+                    let up = addr
+                        .parse::<std::net::SocketAddr>()
+                        .ok()
+                        .and_then(|a| TcpStream::connect_timeout(&a, Duration::from_secs(5)).ok());
+                    match up {
+                        Some(mut up) => {
+                            let sender_id = format!("web-{}", remote_ip);
+                            let from = format!("网页访客({})", peer_name);
+                            let req = format!(
+                                "POST /weimi/send HTTP/1.1\r\nHost: {}\r\nX-Weimi-App: weimi\r\nX-Sender-Id: {}\r\nX-Sender-Name: {}\r\nX-File-Name: {}\r\nX-File-Size: {}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                                addr,
+                                sender_id,
+                                pct_encode(&from),
+                                pct_encode(&name),
+                                size,
+                                size
+                            );
+                            if up.write_all(req.as_bytes()).is_err() {
+                                let _ = tx.send(ws_frame(
+                                    1,
+                                    serde_json::json!({"t": "file-abort", "fid": fid}).to_string().as_bytes(),
+                                ));
+                                continue;
+                            }
+                            let _ = up.set_write_timeout(Some(Duration::from_secs(60)));
+                            inb = WsInbound {
+                                to,
+                                fid,
+                                name,
+                                size,
+                                received: 0,
+                                file: None,
+                                path: None,
+                                up: Some(up),
+                                done: false,
+                                aborted: false,
+                            };
+                        }
+                        None => {
+                            let _ = tx.send(ws_frame(
+                                1,
+                                serde_json::json!({"t": "file-abort", "fid": fid}).to_string().as_bytes(),
+                            ));
+                        }
+                    }
+                } else {
+                    let target_tx = {
+                        let room = ROOM.lock().unwrap();
+                        room.iter().find(|p| p.id == to).map(|p| p.tx.clone())
+                    };
+                    match target_tx {
+                        Some(ttx) => {
+                            let _ = ttx.send(ws_frame(
+                                1,
+                                serde_json::json!({
+                                    "t": "file-start",
+                                    "from": peer_id.clone(),
+                                    "fromName": peer_name.clone(),
+                                    "name": name,
+                                    "size": size,
+                                    "fid": fid,
+                                })
+                                .to_string()
+                                .as_bytes(),
+                            ));
+                            inb = WsInbound {
+                                to,
+                                fid,
+                                name,
+                                size,
+                                received: 0,
+                                file: None,
+                                path: None,
+                                up: None,
+                                done: false,
+                                aborted: false,
+                            };
+                        }
+                        None => {
+                            let _ = tx.send(ws_frame(
+                                1,
+                                serde_json::json!({"t": "file-abort", "fid": fid}).to_string().as_bytes(),
+                            ));
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    // 断开清理
+    if !peer_id.is_empty() {
+        ROOM.lock().unwrap().retain(|p| p.id != peer_id);
+        broadcast_room_peers();
+        log(&format!("ws peer left: {} ({})", peer_name, remote_ip));
+    }
+    if !inb.to.is_empty() && !inb.done {
+        ws_inbound_abort(&mut inb);
+    }
+}
+
+#[cfg(test)]
+mod ws_tests {
+    use super::*;
+
+    #[test]
+    fn sha1_known() {
+        // base64(sha1("abc")) 标准测试向量
+        assert_eq!(b64(&sha1(b"abc")), "qZk+NkcGgWq6PiVxeFDCbJzQ2J0=");
+    }
+
+    #[test]
+    fn ws_accept_known() {
+        // RFC 6455 示例：key "dGhlIHNhbXBsZSBub25jZQ==" -> "s3pPLMBiTxaQ9kYGzzhZRbK+xOo="
+        let accept = b64(&sha1(format!("{}{}", "dGhlIHNhbXBsZSBub25jZQ==", WS_GUID).as_bytes()));
+        assert_eq!(accept, "s3pPLMBiTxaQ9kYGzzhZRbK+xOo=");
+    }
+
+    #[test]
+    fn ws_frame_small() {
+        assert_eq!(ws_frame(1, b"hi"), vec![0x81, 2, b'h', b'i']);
+    }
+
+    #[test]
+    fn pct_encode_known() {
+        assert_eq!(pct_encode("a b"), "a%20b");
+        assert_eq!(pct_encode("灰"), "%E7%81%B0");
+    }
 }
 
 // ==================== transfer controller ====================
@@ -1818,6 +2971,10 @@ fn transfer_loop() {
                     }
                     if tick % 2 == 0 {
                         broadcast_announce(&sock);
+                    }
+                    // 网页房间里的设备列表跟随 PEERS 表刷新（5s 一次）
+                    if tick % 5 == 0 {
+                        broadcast_room_peers();
                     }
                     std::thread::sleep(Duration::from_millis(1000));
                     tick += 1;
@@ -2003,6 +3160,18 @@ struct PushMsg {
     token: String,
     #[serde(default)]
     accept: bool,
+    // webSend / webSendText 用
+    #[serde(default)]
+    to: String,
+    #[serde(default)]
+    name: String,
+    #[serde(default)]
+    #[allow(dead_code)] // UI 会带 size，daemon 以文件实际大小为准
+    size: u64,
+    #[serde(default)]
+    path: String,
+    #[serde(default)]
+    text: String,
 }
 
 fn default_true() -> bool {
@@ -2082,7 +3251,154 @@ fn config_server() {
                             })
                             .collect();
                         drop(peers);
-                        let resp = serde_json::json!({"ok": true, "peers": items});
+                        // port+ips 供 UI 二维码（网页版地址）使用
+                        let resp = serde_json::json!({
+                            "ok": true,
+                            "peers": items,
+                            "port": HTTP_PORT.load(Ordering::Relaxed),
+                            "ips": local_ipv4s(),
+                        });
+                        let _ = s.write_all(format!("{}\n", resp).as_bytes());
+                        let _ = s.flush();
+                        break 'outer;
+                    }
+                    "webPeers" => {
+                        let room = ROOM.lock().unwrap();
+                        let items: Vec<serde_json::Value> = room
+                            .iter()
+                            .map(|p| {
+                                serde_json::json!({
+                                    "id": p.id,
+                                    "name": p.name,
+                                    "ip": p.ip,
+                                })
+                            })
+                            .collect();
+                        drop(room);
+                        let resp = serde_json::json!({
+                            "ok": true,
+                            "webPeers": items,
+                            "port": HTTP_PORT.load(Ordering::Relaxed),
+                        });
+                        let _ = s.write_all(format!("{}\n", resp).as_bytes());
+                        let _ = s.flush();
+                        break 'outer;
+                    }
+                    "webSend" => {
+                        // UI 聊天窗发给"网页客户端"：daemon 读文件经 WS 推给浏览器。
+                        // 异步执行防止大文件阻塞配置通道；UI 侧乐观落记录。
+                        let to = msg.to.clone();
+                        let name = safe_file_name(&msg.name);
+                        let path = PathBuf::from(&msg.path);
+                        std::thread::spawn(move || {
+                            let target = ROOM
+                                .lock()
+                                .unwrap()
+                                .iter()
+                                .find(|p| p.id == to)
+                                .map(|p| p.tx.clone());
+                            let Some(tx) = target else {
+                                log(&format!("webSend: peer {} offline", to));
+                                return;
+                            };
+                            let Ok(mut f) = std::fs::File::open(&path) else {
+                                log(&format!(
+                                    "webSend: open failed: {}",
+                                    path.to_string_lossy()
+                                ));
+                                return;
+                            };
+                            let total = f.metadata().map(|m| m.len()).unwrap_or(0);
+                            let from_name = CONFIG
+                                .lock()
+                                .unwrap()
+                                .as_ref()
+                                .map(|c| c.device_name.clone())
+                                .unwrap_or_else(|| "本机".into());
+                            let fid = format!("a{}", now_ms());
+                            let _ = tx.send(ws_frame(
+                                1,
+                                serde_json::json!({
+                                    "t": "file-start",
+                                    "from": "app",
+                                    "fromName": from_name,
+                                    "name": name,
+                                    "size": total,
+                                    "fid": fid,
+                                })
+                                .to_string()
+                                .as_bytes(),
+                            ));
+                            let mut buf = vec![0u8; 512 * 1024];
+                            let mut sent: u64 = 0;
+                            loop {
+                                match f.read(&mut buf) {
+                                    Ok(0) => break,
+                                    Ok(n) => {
+                                        if tx.send(ws_frame(2, &buf[..n])).is_err() {
+                                            log("webSend: peer gone mid-send");
+                                            return;
+                                        }
+                                        sent += n as u64;
+                                    }
+                                    Err(_) => break,
+                                }
+                            }
+                            if total > 0 && sent >= total {
+                                let _ = tx.send(ws_frame(
+                                    1,
+                                    serde_json::json!({"t": "file-done", "fid": fid})
+                                        .to_string()
+                                        .as_bytes(),
+                                ));
+                                log(&format!("webSend ok: {} ({} bytes)", name, sent));
+                            } else {
+                                let _ = tx.send(ws_frame(
+                                    1,
+                                    serde_json::json!({"t": "file-abort", "fid": fid})
+                                        .to_string()
+                                        .as_bytes(),
+                                ));
+                                log(&format!("webSend short: {} sent {}/{}", name, sent, total));
+                            }
+                        });
+                        let resp = serde_json::json!({"ok": true, "async": true});
+                        let _ = s.write_all(format!("{}\n", resp).as_bytes());
+                        let _ = s.flush();
+                        break 'outer;
+                    }
+                    "webSendText" => {
+                        let to = msg.to.clone();
+                        let text = msg.text.clone();
+                        let from_name = CONFIG
+                            .lock()
+                            .unwrap()
+                            .as_ref()
+                            .map(|c| c.device_name.clone())
+                            .unwrap_or_else(|| "本机".into());
+                        let target = ROOM
+                            .lock()
+                            .unwrap()
+                            .iter()
+                            .find(|p| p.id == to)
+                            .map(|p| p.tx.clone());
+                        let ok = match target {
+                            Some(tx) => tx
+                                .send(ws_frame(
+                                    1,
+                                    serde_json::json!({
+                                        "t": "text",
+                                        "from": "app",
+                                        "name": from_name,
+                                        "text": text,
+                                    })
+                                    .to_string()
+                                    .as_bytes(),
+                                ))
+                                .is_ok(),
+                            None => false,
+                        };
+                        let resp = serde_json::json!({"ok": ok});
                         let _ = s.write_all(format!("{}\n", resp).as_bytes());
                         let _ = s.flush();
                         break 'outer;

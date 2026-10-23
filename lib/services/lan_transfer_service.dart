@@ -491,6 +491,30 @@ class LanTransferService {
         ));
       }
     } catch (_) {}
+    // 网页客户端（连进 daemon 网页版的浏览器）也作为会话对象并入：
+    // id 加 ws_ 前缀与设备 peer 区分，发文件/文本走 daemon 52349 转推
+    try {
+      final wp = await DaemonService.webPeersInfo();
+      if (wp != null) {
+        final port = (wp['port'] as int?) ?? defaultHttpPort;
+        final list = wp['webPeers'];
+        if (list is List) {
+          for (final p in list.whereType<Map>()) {
+            final id = (p['id'] as String?) ?? '';
+            if (id.isEmpty) continue;
+            final name = ((p['name'] as String?) ?? '').trim();
+            addOrUpdatePeer(LanPeer(
+              id: 'ws_$id',
+              name: '网页客户端(${name.isEmpty ? '匿名' : name})',
+              ip: (p['ip'] as String?) ?? '',
+              httpPort: port,
+              trusted: false,
+              lastSeen: DateTime.now(),
+            ));
+          }
+        }
+      }
+    } catch (_) {}
     try {
       await DaemonService.mergeDaemonHistory();
     } catch (_) {}
@@ -2028,6 +2052,83 @@ function done(el, text, ok) {
 
   // ============ 发送端 ============
 
+  /// 发文件给网页客户端（Windows daemon 模式）：daemon 进程侧读文件经 WS
+  /// 推给浏览器，异步执行（无逐字节进度，落记录为已受理）。
+  Future<bool> _sendWebPeerFile({
+    required LanPeer peer,
+    required String filePath,
+    bool recordHistory = true,
+  }) async {
+    lastSendError = '';
+    try {
+      final f = File(filePath);
+      if (!await f.exists()) {
+        lastSendError = '本地文件不存在: $filePath';
+        return false;
+      }
+      final sendName = p.basename(filePath);
+      final total = await f.length();
+      final ok = await DaemonService.webSendFile(
+        to: peer.id.substring(3),
+        path: filePath,
+        name: sendName,
+      );
+      if (ok && recordHistory) {
+        await TransferHistoryService.instance.add(TransferRecord(
+          id: '${DateTime.now().microsecondsSinceEpoch}_wso',
+          kind: 'file',
+          direction: 'out',
+          name: sendName,
+          path: filePath,
+          size: total,
+          peerName: peer.name,
+          peerKey: peer.id,
+          time: DateTime.now(),
+          ok: true,
+        ));
+      }
+      if (!ok) lastSendError = '网页客户端不在线或 daemon 未响应';
+      return ok;
+    } catch (e) {
+      lastSendError = '$e';
+      return false;
+    }
+  }
+
+  /// 发文本给网页客户端（Windows daemon 模式）。
+  Future<bool> _sendWebPeerText({
+    required LanPeer peer,
+    required String text,
+  }) async {
+    lastSendError = '';
+    try {
+      final ok = await DaemonService.webSendText(
+        to: peer.id.substring(3),
+        text: text,
+      );
+      if (ok) {
+        await TransferHistoryService.instance.add(TransferRecord(
+          id: '${DateTime.now().microsecondsSinceEpoch}_wsot',
+          kind: 'text',
+          direction: 'out',
+          name: text,
+          text: text,
+          size: text.length,
+          peerName: peer.name,
+          peerKey: peer.id,
+          time: DateTime.now(),
+          ok: true,
+        ));
+      } else {
+        lastSendError = '网页客户端不在线或 daemon 未响应';
+      }
+      return ok;
+    } catch (e) {
+      lastSendError = '$e';
+      return false;
+    }
+  }
+
   /// 发送一个文件（明文原样直传，与 Landrop 行为一致）。
   /// [relativeName]：文件夹传输时传相对路径（'文件夹/子目录/文件'），
   /// 接收端按此路径落盘；单文件传 basename。
@@ -2040,6 +2141,10 @@ function done(el, text, ok) {
     void Function(int sent, int total)? onProgress,
   }) async {
     lastSendError = '';
+    // Windows daemon 模式：网页客户端（ws_ 前缀）不经直连，走 daemon 52349 转推
+    if (Platform.isWindows && peer.id.startsWith('ws_')) {
+      return _sendWebPeerFile(peer: peer, filePath: filePath, recordHistory: recordHistory);
+    }
     try {
       final sendName = relativeName ?? p.basename(filePath);
       final f = File(filePath);
@@ -2123,6 +2228,10 @@ function done(el, text, ok) {
     required String text,
   }) async {
     lastSendError = '';
+    // Windows daemon 模式：网页客户端（ws_ 前缀）走 daemon 52349 转推
+    if (Platform.isWindows && peer.id.startsWith('ws_')) {
+      return _sendWebPeerText(peer: peer, text: text);
+    }
     try {
       final bytes = utf8.encode(text);
       final client = HttpClient();

@@ -57,7 +57,10 @@ dependencies:
   
   # Path utilities
   path: ^1.9.0
-  
+
+  # QR code（纯 Dart，四平台通用）：飞传网页版地址二维码
+  qr_flutter: ^4.1.0
+
   # FFI for Rust integration
   ffi: ^2.1.0
   
