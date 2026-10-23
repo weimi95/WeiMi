@@ -423,7 +423,7 @@ class LandropService {
   final Map<String, RawDatagramSocket> _querySockets = {};
 
   /// 按当前网卡清单同步逐网卡 socket（每轮 announce 前调，网卡变化即重建）。
-  void _syncQuerySockets() {
+  Future<void> _syncQuerySockets() async {
     final want = _selfIpsCache.toSet();
     for (final ip in List.of(_querySockets.keys)) {
       if (!want.contains(ip)) {
@@ -435,8 +435,8 @@ class LandropService {
     for (final ip in want) {
       if (_querySockets.containsKey(ip)) continue;
       try {
-        final s =
-            RawDatagramSocket.bind(InternetAddress(ip), 0, reuseAddress: false);
+        final s = await RawDatagramSocket.bind(InternetAddress(ip), 0,
+            reuseAddress: false);
         s.broadcastEnabled = true;
         s.listen((e) => _onDiscoveryDatagram(e, s));
         _querySockets[ip] = s;
@@ -464,7 +464,7 @@ class LandropService {
     if (sock == null || !_running) return;
     unawaited(_joinMulticast(sock));
     await refreshSelfIps();
-    _syncQuerySockets();
+    await _syncQuerySockets();
     final announce =
         utf8.encode(json.encode(_discoveryPacket(request: false)));
     final query = utf8.encode(json.encode(_discoveryPacket(request: true)));
