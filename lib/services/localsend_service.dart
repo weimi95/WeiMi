@@ -331,6 +331,11 @@ class LocalSendService {
     _events.add('scanDone');
   }
 
+  /// 手动添加对端 IP（跨网段方案 A，v1.2.13）用：向指定 IP 直连 register。
+  /// 组播不过路由器，跨网段唯一通路是单播 HTTP(S)。
+  Future<void> registerManual(String ip, {int? port}) =>
+      _registerTo(ip, port ?? lsPort);
+
   /// POST /api/localsend/v2/register 到指定地址，200 则登记为 LocalSend 设备。
   /// [preferHttps]：组播发现时对方 announce 已带 protocol 字段，直接按它连；
   /// 盲扫（legacy HTTP 扫描）时不知道，先 http 再 https 各试一次

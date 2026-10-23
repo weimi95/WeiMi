@@ -740,38 +740,6 @@ class _LanChatScreenState extends State<LanChatScreen> {
       ],
     );
   }
-      appBar: AppBar(
-        title: Text(widget.displayName),
-        actions: [
-          if (!_selecting && !_searching) ...[
-            IconButton(
-              icon: const Icon(Icons.search),
-              tooltip: '搜索',
-              onPressed: () => setState(() => _searching = true),
-            ),
-            IconButton(
-              icon: const Icon(Icons.checklist),
-              tooltip: '多选',
-              onPressed: () => setState(() => _selecting = true),
-            ),
-          ],
-          Container(
-            margin: const EdgeInsets.only(right: 12),
-            padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
-            decoration: BoxDecoration(
-              color: _online ? Colors.green : Colors.grey,
-              borderRadius: BorderRadius.circular(10),
-            ),
-            child: Text(
-              _online ? '在线' : '离线',
-              style: const TextStyle(color: Colors.white, fontSize: 12),
-            ),
-          ),
-        ],
-      ),
-      body: body,
-    );
-  }
 }
 
 class _Bubble extends StatelessWidget {
@@ -1019,6 +987,15 @@ class _ComposerState extends State<_Composer> {
   final FocusNode _focus = FocusNode(debugLabel: 'chat-composer');
 
   @override
+  void initState() {
+    super.initState();
+    // TextField 没有 onKeyEvent 参数（CI Flutter 3.38.3 实证编译不过），
+    // 挂到它使用的 FocusNode 上：节点级回调先于默认换行插入行为，
+    // 返回 handled 即吞掉 Enter 兑现「回车发送」。
+    _focus.onKeyEvent = _onKey;
+  }
+
+  @override
   void dispose() {
     _focus.dispose();
     super.dispose();
@@ -1027,7 +1004,9 @@ class _ComposerState extends State<_Composer> {
   /// 桌面端键盘策略（对齐微信 PC 版）：Enter 发送、Shift+Enter 换行。
   /// Flutter 多行 TextField 的 Enter 默认插换行，必须在此拦截才兑现
   /// 「回车发送」；发送中吞掉 Enter 防重复发送。
+  /// 仅桌面生效：手机软键盘动作键走 onSubmitted，不拦。
   KeyEventResult _onKey(FocusNode node, KeyEvent event) {
+    if (!widget.isDesktop) return KeyEventResult.ignored;
     if (event is! KeyDownEvent) return KeyEventResult.ignored;
     final isEnter = event.logicalKey == LogicalKeyboardKey.enter ||
         event.logicalKey == LogicalKeyboardKey.numpadEnter;
@@ -1097,7 +1076,6 @@ class _ComposerState extends State<_Composer> {
                 child: TextField(
                   controller: widget.controller,
                   focusNode: _focus,
-                  onKeyEvent: _onKey,
                   minLines: 1,
                   // 桌面：最多 4 行（Shift+Enter 换行）；手机：单行 + 动作键发送
                   maxLines: widget.isDesktop ? 4 : 1,

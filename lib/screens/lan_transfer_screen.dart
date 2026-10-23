@@ -881,23 +881,6 @@ class _LanTransferScreenState extends State<LanTransferScreen> {
     await _sendWebTextTo(w, text);
   }
 
-  // ============ 信任设备 ============
-
-  Future<void> _toggleTrust(LanPeer d) async {
-    if (d.trusted) {
-      await TrustedDevices.instance.remove(d.id);
-    } else {
-      await TrustedDevices.instance.add(d.id, d.name);
-    }
-    if (mounted) {
-      ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-        content: Text(d.trusted
-            ? '已取消信任「${d.name}」，之后接收其文件/文本需再次确认'
-            : '已信任「${d.name}」，之后其发来的文件/文本免确认直接接收'),
-      ));
-    }
-  }
-
   // ============ 其他 UI 动作 ============
 
   String _fmtSize(int bytes) {
@@ -992,7 +975,12 @@ class _LanTransferScreenState extends State<LanTransferScreen> {
             const SizedBox(height: 12),
             if (_pendingText != null || _pendingFiles.isNotEmpty) _buildPendingCard(),
             const SizedBox(height: 12),
-            _sectionHeader('设备会话（在线 · 历史记录 · 已信任）'),
+            _sectionHeader('设备会话（在线 · 历史记录 · 已信任）',
+                trailing: IconButton(
+                  icon: const Icon(Icons.person_add_alt_1, size: 20),
+                  tooltip: '手动添加对端 IP / 网段（跨网段）',
+                  onPressed: _showManualPeerDialog,
+                )),
             if (items.isEmpty) _emptyHint() else ...items.map(_buildConvTile),
             if (_webPeers.isNotEmpty) ...[
               _sectionHeader('网页客户端（${_webPeers.length}）'),
@@ -1118,13 +1106,22 @@ class _LanTransferScreenState extends State<LanTransferScreen> {
     );
   }
 
-  Widget _sectionHeader(String text) {
+  Widget _sectionHeader(String text, {Widget? trailing}) {
     return Padding(
       padding: const EdgeInsets.fromLTRB(4, 8, 4, 8),
-      child: Text(
-        text,
-        style: TextStyle(
-            fontSize: 13, fontWeight: FontWeight.bold, color: Colors.grey.shade600),
+      child: Row(
+        children: [
+          Expanded(
+            child: Text(
+              text,
+              style: TextStyle(
+                  fontSize: 13,
+                  fontWeight: FontWeight.bold,
+                  color: Colors.grey.shade600),
+            ),
+          ),
+          if (trailing != null) trailing,
+        ],
       ),
     );
   }
@@ -1268,6 +1265,155 @@ class _LanTransferScreenState extends State<LanTransferScreen> {
     );
   }
 
+  /// 手动添加对端 IP / 网段（跨网段方案 A，v1.2.13）。
+  /// 交互对齐飞鸽传书「设置 → 系统设置 → 添加网段」：支持整个网段
+  /// （IP 前三位）或单个 IP；强调双方都加、网络互通前提。
+  Future<void> _showManualPeerDialog() async {
+    final controller = TextEditingController();
+    await showDialog<void>(
+      context: context,
+      builder: (ctx) => StatefulBuilder(
+        builder: (ctx, setLocal) {
+          Future<void> add() async {
+            final text = controller.text.trim();
+            if (text.isEmpty) return;
+            final msg = await _svc.addManualIp(text);
+            controller.clear();
+            setLocal(() {});
+            if (ctx.mounted) {
+              ScaffoldMessenger.of(ctx).showSnackBar(SnackBar(content: Text(msg)));
+            }
+          }
+
+          return AlertDialog(
+            title: const Text('手动添加对端 IP / 网段'),
+            content: SizedBox(
+              width: 420,
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    '跨网段（不同路由器 / 网段）时广播发现不可用，添加对方 IP 或网段后改为单播发现：',
+                    style: TextStyle(fontSize: 13, color: Colors.grey.shade700),
+                  ),
+                  const SizedBox(height: 6),
+                  Text(
+                    '· 对方网段（推荐）：192.168.2 或 192.168.2.0/24\n'
+                    '· 单个 IP：192.168.2.50，可加端口 192.168.2.50:52346',
+                    style: const TextStyle(fontSize: 13),
+                  ),
+                  const SizedBox(height: 6),
+                  Text(
+                    '注意：建议双方都添加对方网段，只加一边可能看不到；前提是两个网段网络互通（能 ping 通）。',
+                    style: TextStyle(
+                        fontSize: 12, color: Colors.orange.shade800),
+                  ),
+                  const SizedBox(height: 12),
+                  Row(
+                    children: [
+                      Expanded(
+                        child: TextField(
+                          controller: controller,
+                          autofocus: true,
+                          decoration: const InputDecoration(
+                            labelText: 'IP 或网段',
+                            hintText: '192.168.2 或 192.168.2.50',
+                            border: OutlineInputBorder(),
+                            isDense: true,
+                          ),
+                          onSubmitted: (_) => add(),
+                        ),
+                      ),
+                      const SizedBox(width: 8),
+                      FilledButton(onPressed: add, child: const Text('添加')),
+                    ],
+                  ),
+                  const SizedBox(height: 12),
+                  if (_svc.manualIps.isEmpty)
+                    Text('还没有手动添加的条目',
+                        style: TextStyle(
+                            fontSize: 12, color: Colors.grey.shade500))
+                  else ...[
+                    Text('已添加（${_svc.manualIps.length}）',
+                        style: TextStyle(
+                            fontSize: 12,
+                            fontWeight: FontWeight.bold,
+                            color: Colors.grey.shade600)),
+                    const SizedBox(height: 4),
+                    Flexible(
+                      child: SizedBox(
+                        height: 132,
+                        child: ListView(
+                          shrinkWrap: true,
+                          children: [
+                            for (final raw in _svc.manualIps)
+                              ListTile(
+                                dense: true,
+                                contentPadding: EdgeInsets.zero,
+                                leading: Icon(
+                                  LanTransferService.parseManualEntry(raw)
+                                              ?.isSubnet ==
+                                          true
+                                      ? Icons.lan_outlined
+                                      : Icons.dns_outlined,
+                                  size: 20,
+                                ),
+                                title: Text(raw, style: const TextStyle(fontSize: 13)),
+                                subtitle: Text(
+                                  LanTransferService.parseManualEntry(raw)
+                                              ?.isSubnet ==
+                                          true
+                                      ? '网段 · 定向广播发现'
+                                      : '单 IP · 单播连接',
+                                  style: const TextStyle(fontSize: 11),
+                                ),
+                                trailing: IconButton(
+                                  icon: const Icon(Icons.close, size: 18),
+                                  tooltip: '移除',
+                                  onPressed: () async {
+                                    await _svc.removeManualIp(raw);
+                                    setLocal(() {});
+                                  },
+                                ),
+                              ),
+                          ],
+                        ),
+                      ),
+                    ),
+                  ],
+                ],
+              ),
+            ),
+            actions: [
+              TextButton(
+                onPressed: () async {
+                  final ctrl = ScaffoldMessenger.of(ctx);
+                  final found = <String>[];
+                  for (final raw in _svc.manualIps) {
+                    final e = LanTransferService.parseManualEntry(raw);
+                    if (e == null) continue;
+                    found.addAll(await _svc.probeManualEntry(e));
+                  }
+                  ctrl.showSnackBar(SnackBar(
+                    content: Text(found.isEmpty
+                        ? '未发现新设备'
+                        : '发现：${found.join('、')}'),
+                  ));
+                },
+                child: const Text('立即刷新'),
+              ),
+              TextButton(
+                  onPressed: () => Navigator.pop(ctx),
+                  child: const Text('完成')),
+            ],
+          );
+        },
+      ),
+    );
+    controller.dispose();
+  }
+
   void _openChat(_ConvItem item) {
     Navigator.push(
       context,
@@ -1356,7 +1502,7 @@ class _LanTransferScreenState extends State<LanTransferScreen> {
             ),
             ListTile(
               leading: const Icon(Icons.delete_outline, color: Colors.red),
-              title: const Text('删除设备',
+              title: Text('删除设备',
                   style: TextStyle(color: Colors.red.shade700)),
               subtitle: const Text('取消信任、清除别名并删除会话记录'),
               onTap: () {

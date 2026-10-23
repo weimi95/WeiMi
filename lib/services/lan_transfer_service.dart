@@ -73,8 +73,17 @@ class LanTransferService {
   int _httpPort = defaultHttpPort;
   Timer? _announceTimer;
   Timer? _pruneTimer;
+  Timer? _manualKeepAliveTimer;
   RawDatagramSocket? _udpSocket;
   HttpServer? _httpServer;
+
+  // ============ 手动添加对端 IP（跨网段方案 A，v1.2.13） ============
+  /// 用户手动添加的 IP（可带 ":端口" 覆盖三种协议默认端口）。
+  /// 广播/组播不跨路由器，跨网段唯一通路是单播——手动 IP 让
+  /// 「微密 announce / LANDrop query / LocalSend register」都改成
+  /// 向该 IP 单播，从而发现并保活对端。
+  List<String> _manualIps = [];
+  bool _manualProbing = false;
 
   /// 接收文件兜底目录（main.dart 启动时用 path_provider 注入）
   String? fallbackDir;
@@ -283,6 +292,17 @@ class LanTransferService {
     _announceTimer?.cancel();
     _announceTimer =
         Timer.periodic(const Duration(seconds: 2), (_) => _broadcastAnnounce());
+    // 手动添加的对端 IP/网段（跨网段方案 A）：载入 + 保活 + 首轮延迟探测
+    await loadManualIps();
+    _startManualKeepAlive();
+    if (_manualIps.isNotEmpty) {
+      Future<void>.delayed(const Duration(seconds: 3), () async {
+        for (final raw in List.of(_manualIps)) {
+          final e = parseManualEntry(raw);
+          if (e != null) await probeManualEntry(e);
+        }
+      });
+    }
     _events.add(LanEvent(LanEventType.receivingStarted));
     _startAndroidForeground();
   }
@@ -349,6 +369,8 @@ class LanTransferService {
     _receiving = false;
     _announceTimer?.cancel();
     _announceTimer = null;
+    _manualKeepAliveTimer?.cancel();
+    _manualKeepAliveTimer = null;
     await LocalSendService.instance.stop();
     await LandropService.instance.stop();
     _events.add(LanEvent(LanEventType.receivingStopped));
@@ -407,12 +429,16 @@ class LanTransferService {
       'httpPort': _httpPort,
       'v': 1,
     }));
-    // 255.255.255.255 + 本机各私网网段的定向广播：多网卡/虚拟网卡环境
-    // （有线+WiFi+VPN/VM）下 255.255.255.255 的出口由系统选，经常到不了
-    // 对方网段；定向广播按目标 IP 明确走对应网卡（v1.2.13 与 LANDrop
-    // 兼容层统一收编到 [directedBroadcastIps]）
+    // 255.255.255.255 + 本机各私网网段的定向广播 + 手动添加的对方网段
+    // 定向广播：多网卡/虚拟网卡环境（有线+WiFi+VPN/VM）下 255.255.255.255
+    // 的出口由系统选，经常到不了对方网段；定向广播按目标 IP 明确走对应
+    // 网卡（v1.2.13 与 LANDrop 兼容层统一收编到 [directedBroadcastIps]）；
+    // 手动网段（跨路由器）同样靠定向广播单播通路发现（方案 A）。
     final targets = <String>['255.255.255.255'];
     for (final b in directedBroadcastIps(await localIPv4s())) {
+      if (!targets.contains(b)) targets.add(b);
+    }
+    for (final b in _manualSubnetBroadcasts()) {
       if (!targets.contains(b)) targets.add(b);
     }
     for (final t in targets) {
@@ -442,6 +468,226 @@ class LanTransferService {
       if (!out.contains(sub)) out.add(sub);
     }
     return out;
+  }
+
+  // ============ 手动添加对端 IP / 网段（跨网段方案 A，v1.2.13） ============
+  /// 参考飞鸽传书「设置 → 系统设置 → 添加网段」：跨网段（不同路由器）时
+  /// 广播/组播都不过路由器，唯一通路是单播。两种录入格式：
+  /// - 单 IP：`192.168.2.50` 或 `192.168.2.50:52346`（冒号端口对三种
+  ///   协议的默认端口一并生效，留空则各用各的默认端口）
+  /// - 网段：`192.168.2` 或 `192.168.2.0/24`（向 192.168.2.255 定向
+  ///   广播发现整个网段，DHCP 换 IP 不掉）
+  /// 飞鸽经验「双方都要添加对方网段，只加一边看不到」：微密协议收到
+  /// announce 会单播应答，单方添加理论上即可被发现；但对方若要反向
+  /// 发现我们，同样得添加我方网段——故建议双方都加。
+  List<String> get manualIps => List.unmodifiable(_manualIps);
+
+  /// 从 SharedPreferences 载入手动条目（启动/开接收时调用）。
+  Future<void> loadManualIps() async {
+    final prefs = await SharedPreferences.getInstance();
+    _manualIps = prefs.getStringList('manual_peer_ips') ?? [];
+  }
+
+  /// 手动连接条目（class 而非 record typedef——Dart record 无命名构造函数）。
+  static ManualEntry? parseManualEntry(String entry) {
+    final s = entry.trim();
+    if (s.isEmpty) return null;
+    // 网段：x.x.x.0/24 或 x.x.x
+    if (s.contains('/')) {
+      final parts = s.split('/');
+      if (parts.length != 2) return null;
+      final mask = int.tryParse(parts[1]);
+      if (mask != 24) return null;
+      final seg = parts[0].split('.');
+      if (seg.length != 4) return null;
+      if (seg[3] != '0') return null; // 只接受 .0/24 形式
+      final head = seg.take(3).toList();
+      for (final x in head) {
+        final n = int.tryParse(x);
+        if (n == null || n < 0 || n > 255) return null;
+      }
+      final sub = head.join('.');
+      return ManualEntry(
+        isSubnet: true,
+        raw: sub,
+        subnet: sub,
+        broadcast: '$sub.255',
+      );
+    }
+    if (!s.contains(':')) {
+      final seg = s.split('.');
+      if (seg.length == 3) {
+        for (final x in seg) {
+          final n = int.tryParse(x);
+          if (n == null || n < 0 || n > 255) return null;
+        }
+        return ManualEntry(
+          isSubnet: true,
+          raw: s,
+          subnet: s,
+          broadcast: '$s.255',
+        );
+      }
+    }
+    // 单 IP（可带 :端口）
+    final idx = s.lastIndexOf(':');
+    if (idx > 0) {
+      final ip = s.substring(0, idx);
+      final port = int.tryParse(s.substring(idx + 1));
+      if (port == null || port < 1 || port > 65535) return null;
+      if (!_isIPv4(ip)) return null;
+      return ManualEntry(isSubnet: false, raw: '$ip:$port', ip: ip, port: port);
+    }
+    if (!_isIPv4(s)) return null;
+    return ManualEntry(isSubnet: false, raw: s, ip: s);
+  }
+
+  static bool _isIPv4(String ip) {
+    final parts = ip.split('.');
+    if (parts.length != 4) return false;
+    for (final seg in parts) {
+      final n = int.tryParse(seg);
+      if (n == null || n < 0 || n > 255) return false;
+      if (seg.length > 1 && seg.startsWith('0')) return false; // 禁前导零
+    }
+    return true;
+  }
+
+  /// 添加手动条目：持久化 + 立即探测一次。返回结果文案（UI 提示）。
+  Future<String> addManualIp(String entry) async {
+    final parsed = parseManualEntry(entry);
+    if (parsed == null) {
+      return '格式不正确。单 IP：192.168.2.50（可加 :端口）；网段：192.168.2 或 192.168.2.0/24';
+    }
+    if (_manualIps.contains(parsed.raw)) return '该条目已在列表中';
+    _manualIps.add(parsed.raw);
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setStringList('manual_peer_ips', _manualIps);
+    _startManualKeepAlive();
+    final found = await probeManualEntry(parsed);
+    if (found.isNotEmpty) return '已发现：${found.join('、')}';
+    return parsed.isSubnet
+        ? '已添加网段 ${parsed.subnet}，暂未发现设备（确认对端在线、两个网段网络互通）'
+        : '已添加，但暂未收到响应（确认对端已开启接收且网络可达）';
+  }
+
+  /// 移除手动条目（传列表里的原文）。
+  Future<void> removeManualIp(String raw) async {
+    _manualIps.remove(raw);
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setStringList('manual_peer_ips', _manualIps);
+    if (_manualIps.isEmpty) {
+      _manualKeepAliveTimer?.cancel();
+      _manualKeepAliveTimer = null;
+    }
+  }
+
+  /// 微密 announce UDP 包（单播/定向广播共用）。
+  List<int> _announceBody() => utf8.encode(json.encode({
+        'app': _magic,
+        'action': 'announce',
+        'id': _identityId,
+        'name': _selfName,
+        'httpPort': _httpPort,
+        'v': 1,
+      }));
+
+  /// 探测一个手动条目，返回新发现的设备描述列表。
+  /// - host：向 IP 单播 announce + LANDrop query + LocalSend register
+  /// - subnet：向 x.x.x.255 定向广播 announce + LANDrop query
+  ///   （LocalSend 无广播发现，跨网段请用单 IP 形式）
+  /// 等待约 2s 收集应答后差集统计。
+  Future<List<String>> probeManualEntry(ManualEntry e) async {
+    if (_manualProbing) return const [];
+    _manualProbing = true;
+    try {
+      final bool match(String ip) =>
+          e.isSubnet ? ip.startsWith('${e.subnet}.') : ip == e.ip;
+      final before = <String>{
+        for (final p in _peers.values)
+          if (match(p.ip)) p.id,
+        for (final d in LandropService.instance.devices)
+          if (match(d.address)) 'ld:${d.publicKey}',
+      };
+      final sock = _udpSocket;
+      if (sock != null) {
+        final target = e.isSubnet ? e.broadcast! : e.ip!;
+        final port = e.isSubnet
+            ? discoveryPort
+            : (e.port ?? discoveryPort);
+        try {
+          sock.send(_announceBody(), InternetAddress(target), port);
+        } catch (_) {}
+      }
+      try {
+        LandropService.instance.queryManual(e.isSubnet ? e.broadcast! : e.ip!);
+      } catch (_) {}
+      if (!e.isSubnet) {
+        try {
+          await LocalSendService.instance.registerManual(e.ip!, port: e.port);
+        } catch (_) {}
+      }
+      await Future<void>.delayed(const Duration(milliseconds: 2000));
+      final found = <String>[];
+      for (final p in _peers.values) {
+        if (match(p.ip) && !before.contains(p.id)) {
+          found.add(p.isLocalSend ? 'LocalSend 设备「${p.name}」' : '微密设备「${p.name}」');
+        }
+      }
+      for (final d in LandropService.instance.devices) {
+        if (match(d.address) && !before.contains('ld:${d.publicKey}')) {
+          found.add('LANDrop 设备「${d.name}」');
+        }
+      }
+      return found;
+    } finally {
+      _manualProbing = false;
+    }
+  }
+
+  /// 网段条目的定向广播地址清单（供 _broadcastAnnounce 合并目标）。
+  List<String> _manualSubnetBroadcasts() {
+    final out = <String>[];
+    for (final raw in _manualIps) {
+      final e = parseManualEntry(raw);
+      if (e != null && e.isSubnet && !out.contains(e.broadcast)) {
+        out.add(e.broadcast!);
+      }
+    }
+    return out;
+  }
+
+  /// 手动条目保活：跨网段没有广播/组播，必须周期单播续命，否则设备
+  /// 12s（微密 prune）/20s（LANDrop 过期）后就掉线。
+  void _startManualKeepAlive() {
+    if (_manualKeepAliveTimer != null) return;
+    if (_manualIps.isEmpty) return;
+    _manualKeepAliveTimer ??= Timer.periodic(
+        const Duration(seconds: 15), (_) => _manualKeepAlive());
+  }
+
+  Future<void> _manualKeepAlive() async {
+    if (_manualIps.isEmpty) return;
+    final sock = _udpSocket;
+    for (final raw in List.of(_manualIps)) {
+      final e = parseManualEntry(raw);
+      if (e == null) continue;
+      if (sock != null) {
+        final target = e.isSubnet ? e.broadcast! : e.ip!;
+        final port = e.isSubnet ? discoveryPort : (e.port ?? discoveryPort);
+        try {
+          sock.send(_announceBody(), InternetAddress(target), port);
+        } catch (_) {}
+      }
+      try {
+        LandropService.instance.queryManual(e.isSubnet ? e.broadcast! : e.ip!);
+      } catch (_) {}
+      if (!e.isSubnet) {
+        try {
+          await LocalSendService.instance.registerManual(e.ip!, port: e.port);
+        } catch (_) {}
+      }
+    }
   }
 
   /// 登记/刷新设备。同一物理设备可能同时跑着微密+LocalSend 两个 App，
@@ -1917,6 +2163,32 @@ function done(el, text, ok) {
 }
 
 // ============ 数据类型 ============
+
+/// 手动连接条目（跨网段方案 A，v1.2.13）。class 而非 record typedef——
+/// Dart record 无命名构造函数，跨文件传递必炸编译。
+class ManualEntry {
+  /// true=网段模式（向 broadcast 定向广播发现）；false=单 IP 模式。
+  final bool isSubnet;
+  /// 持久化原文（列表唯一 key）：host='IP' 或 'IP:端口'；subnet='x.x.x'。
+  final String raw;
+  /// host 模式：目标 IP。
+  final String? ip;
+  /// host 模式：端口覆盖（null=各协议用各自默认端口）。
+  final int? port;
+  /// subnet 模式：网段前三段，如 '192.168.2'。
+  final String? subnet;
+  /// subnet 模式：定向广播地址，如 '192.168.2.255'。
+  final String? broadcast;
+
+  ManualEntry({
+    required this.isSubnet,
+    required this.raw,
+    this.ip,
+    this.port,
+    this.subnet,
+    this.broadcast,
+  });
+}
 
 class LanPeer {
   final String id;

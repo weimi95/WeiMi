@@ -384,15 +384,21 @@ class LandropService {
     } catch (_) {}
   }
 
+  /// 向指定地址（单播 IP 或定向广播 x.x.x.255）单发一条 query 包。
+  /// 手动添加对端 IP/网段（跨网段方案 A，v1.2.13）用：广播/组播不跨
+  /// 路由器，但 query→对方单播应答这条路在单播互通的前提下可用。
+  void queryManual(String to) => _sendDiscoveryPacket(to: to, port: port, request: true);
+
   /// 本机各私网 IPv4 推算的 /24 定向广播地址（与微密 announce 共用
   /// [LanTransferService.directedBroadcastIps]：LANDrop 桌面端只往逐网卡
   /// 定向广播 + 组播发发现包，从不发 255.255.255.255——多网卡机器上
   /// 255.255.255.255 的出口由系统选，经常到不了对方网段。
   /// v1.2.13：「电脑端发现不了其他电脑上的 LANDrop、手机端却可以」的
   /// 根因（手机单网卡，255.255.255.255 必中）。
-  Future<List<InternetAddress>> _directedBroadcastTargets() async {
+  /// 同步版（CI 实证：spread 进同步列表的 async 函数直接编译错）。
+  List<InternetAddress> _directedBroadcastTargets() {
     final out = <InternetAddress>[];
-    for (final s in await LanTransferService.directedBroadcastIps(_selfIpsCache)) {
+    for (final s in LanTransferService.directedBroadcastIps(_selfIpsCache)) {
       try {
         final ia = InternetAddress(s);
         if (!out.contains(ia)) out.add(ia);
