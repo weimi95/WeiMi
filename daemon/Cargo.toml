@@ -1,6 +1,6 @@
 [package]
 name = "weimi_daemon"
-version = "1.2.19"
+version = "1.2.20"
 edition = "2021"
 
 [[bin]]
@@ -10,6 +10,14 @@ path = "src/main.rs"
 [dependencies]
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+# LANDrop 传输（v1.2.20 托盘收文件）：复用 rust_crypto/src/landrop.rs 的
+# 同一套原语（#[path] 引进，不整体依赖 rust_crypto——那会拖入
+# image/pinyin/regex/chrono/rayon，守护进程构建无谓暴涨）。
+x25519-dalek = { version = "2", default-features = false, features = ["static_secrets"] }
+chacha20poly1305 = "0.10"
+secp256k1 = "0.29"
+blake2 = "0.10"
+rand = "0.8"
 
 [profile.release]
 opt-level = "s"

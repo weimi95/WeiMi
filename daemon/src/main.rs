@@ -34,6 +34,11 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde::Deserialize;
 
+/// LANDrop v2 协议加密原语（与 rust_crypto 同一份源码，#[path] 引进避免双份
+/// 漂移；FFI 符号在 exe 里导出无害）。已对拍 libsodium，见 landrop.rs 内测试。
+#[path = "../../rust_crypto/src/landrop.rs"]
+mod landrop;
+
 // ==================== config ====================
 
 const DISCOVERY_PORT: u16 = 52346;
@@ -60,11 +65,17 @@ struct Config {
     /// LANDrop 身份公钥 base64（Dart landrop_service 持久化，UI 启动时同步。
     /// daemon 托盘保活用同一把 pk，保对端 TOFU 信任不裂）
     landrop_pk: String,
+    /// LANDrop 身份私钥 base64（v1.2.20：托盘收文件时 ServerHello 签名必需。
+    /// 与 Dart SharedPreferences 里的 sk 同一把，由 UI apply 同步）
+    landrop_sk: String,
 }
 
 static CONFIG: Mutex<Option<Config>> = Mutex::new(None);
 static TRANSFER_ON: AtomicBool = AtomicBool::new(false);
 static HTTP_PORT: AtomicU16 = AtomicU16::new(HTTP_PORT_BASE);
+/// LANDrop 传输端口（v1.2.20）：托盘传输线程 bind 成功后写入，发现包的 port
+/// 字段报它（LANDrop 语义=对端要连的 TCP 传输端口，不是 HTTP 端口）。
+static LANDROP_TCP_PORT: AtomicU16 = AtomicU16::new(LANDROP_PORT);
 static TASKBAR_MSG: AtomicU32 = AtomicU32::new(0);
 /// 接收完成计数（自动开目录的批内去抖：2 秒内连收多个文件只开一次目录）
 static RECV_TICK: AtomicU64 = AtomicU64::new(0);
@@ -175,6 +186,11 @@ fn maybe_open_recv_dir(save: &std::path::Path) {
     if !enabled {
         return;
     }
+    open_recv_dir_now(save);
+}
+
+/// 立即打开 save 所在目录（explorer），2 秒防抖：批量收文件只开最后一个。
+fn open_recv_dir_now(save: &std::path::Path) {
     let Some(dir) = save.parent() else {
         return;
     };
@@ -523,6 +539,7 @@ fn save_config() {
         "receive_dir": c.receive_dir,
         "landrop_on": c.landrop_on,
         "landrop_pk": c.landrop_pk,
+        "landrop_sk": c.landrop_sk,
     });
     if let Ok(txt) = serde_json::to_string_pretty(&json) {
         let _ = std::fs::write(path, txt);
@@ -550,6 +567,7 @@ fn load_config() {
     take_str!("device_name", device_name);
     take_str!("receive_dir", receive_dir);
     take_str!("landrop_pk", landrop_pk);
+    take_str!("landrop_sk", landrop_sk);
     if let Some(b) = v.get("discover_enabled").and_then(|x| x.as_bool()) {
         c.discover_enabled = b;
         n += 1;
@@ -581,12 +599,15 @@ fn load_config() {
     }
 }
 
-// ============ LANDrop 发现保活（v1.2.19，托盘模式） ============
+// ============ LANDrop 发现保活 + 传输（v1.2.19 发现 / v1.2.20 传输，托盘模式） ============
 // 背景：LANDrop 发现层（UDP 52637 组播 announce/query）原先只存在于 Dart UI
 // 进程（landrop_service.dart）。关主界面进托盘后 UI 退出，没人发 announce →
 // 手机 LANDrop APP（被动设计只收 announce）永远发现不了电脑端微密。
-// 本模块在 daemon 内补一份：ui_active=false 时接管 announce + query 应答，
-// 身份 pk 由 UI 经 apply 同步（保对端 TOFU 信任列表不裂）。
+// v1.2.19：daemon 接管发现（announce + query 应答）。
+// v1.2.20：daemon 再接管 TCP 52637 传输服务（握手 + 收文件/文本），托盘下
+// 完整可收；身份 pk/sk 由 UI 经 apply 同步（保对端 TOFU 信任列表不裂，
+// sk 是 ServerHello 签名必需材料）。
+// UI 一上线（ui_active=true）两个循环都让位 52637，交回 Dart landrop_service。
 const LANDROP_PORT: u16 = 52637;
 const LANDROP_GROUP: &str = "239.192.52.63";
 const LANDROP_ANNOUNCE_SECS: u64 = 10;
@@ -606,14 +627,16 @@ fn directed_broadcast_ips() -> Vec<String> {
         .collect()
 }
 
-/// 保活激活条件：UI 不在跑 + 用户没关 LANDrop 兼容 + 已同步到身份 pk
-fn landrop_active() -> Option<(String, String)> {
+/// 保活激活条件：UI 不在跑 + 用户没关 LANDrop 兼容 + 已同步到身份 pk/sk。
+/// v1.2.20 起 sk 也是必需项（托盘收文件时 ServerHello 要签名）；老 UI 只同步
+/// pk 不同步 sk → 整个托盘 LANDrop 特性不激活（宁可全关，不可半残）。
+fn landrop_active() -> Option<(String, String, String)> {
     let cfg = CONFIG.lock().unwrap();
     let c = cfg.as_ref()?;
-    if c.ui_active || !c.landrop_on || c.landrop_pk.is_empty() {
+    if c.ui_active || !c.landrop_on || c.landrop_pk.is_empty() || c.landrop_sk.is_empty() {
         return None;
     }
-    Some((c.landrop_pk.clone(), c.device_name.clone()))
+    Some((c.landrop_pk.clone(), c.landrop_sk.clone(), c.device_name.clone()))
 }
 
 /// LANDrop 发现包 JSON（与真实 LANDrop 及 Dart 侧字段完全一致）
@@ -646,7 +669,7 @@ fn landrop_discovery_loop() {
     let mut last_rebind = std::time::Instant::now();
     let mut last_drained = 0usize;
     loop {
-        let Some((pk, name)) = landrop_active() else {
+        let Some((pk, _sk, name)) = landrop_active() else {
             // UI 接管：释放 52637 给 Dart landrop_service
             if let Some(s) = main.take() {
                 log("landrop: ui active, releasing 52637");
@@ -732,7 +755,7 @@ fn landrop_discovery_loop() {
                                     let pkt = landrop_packet(
                                         &pk,
                                         &name,
-                                        HTTP_PORT.load(Ordering::Relaxed),
+                                        LANDROP_TCP_PORT.load(Ordering::Relaxed),
                                         false,
                                     );
                                     let _ = s.send_to(&pkt, src);
@@ -750,7 +773,10 @@ fn landrop_discovery_loop() {
         // 周期发包：announce + query → 组播 + 全网广播 + 逐网卡定向广播
         if last_send.elapsed() >= Duration::from_secs(LANDROP_ANNOUNCE_SECS) {
             last_send = std::time::Instant::now();
-            let port = HTTP_PORT.load(Ordering::Relaxed);
+            // port 字段 = LANDrop TCP 传输端口（协议语义：对端握手连这）。
+            // v1.2.19 曾误填 HTTP_PORT(52345)——对端连上去对着 HTTP 服务说
+            // LANDrop 协议，必然失败；v1.2.20 传输线程起来后报真实监听端口。
+            let port = LANDROP_TCP_PORT.load(Ordering::Relaxed);
             let announce = landrop_packet(&pk, &name, port, false);
             let query = landrop_packet(&pk, &name, port, true);
             let ips = local_ipv4s();
@@ -792,6 +818,827 @@ fn landrop_discovery_loop() {
 
 /// Load the app icon: try the configured exe (ExtractIconEx), else .ico beside
 /// daemon, else the default application icon.
+// ============ LANDrop 传输（v1.2.20，托盘收文件/文本） ============
+// 协议与 Dart landrop_service.dart 逐字段对齐（同一份 rust_crypto 原语）：
+// 裸 TCP → ServerHello 握手 → supported_message_types/device_info 互换 →
+// file_send_request（信任免确认/未信任确认框）→ 逐记录流式落盘 → 历史 + 气球。
+// 端口让位：ui_active=true 时本循环整体静默并释放 52637，交还 Dart。
+
+/// 单记录明文上限（与 landrop.rs LD_MAX_BLOCK_SIZE 一致）
+const LD_MAX_BLOCK: usize = 65518;
+
+/// supported_message_types 应答的能力清单（与 Dart 侧一致）
+const LD_MSG_TYPES: &[&str] = &[
+    "ack",
+    "supported_message_types",
+    "device_info",
+    "file_send_request",
+    "file_send_request_reply",
+    "text_send",
+];
+
+// ---------- landrop.rs FFI 的 Rust 友好封装 ----------
+
+fn ld_kx_keypair() -> ([u8; 32], [u8; 32]) {
+    let mut pk = [0u8; 32];
+    let mut sk = [0u8; 32];
+    landrop::landrop_kx_keypair(pk.as_mut_ptr(), sk.as_mut_ptr());
+    (pk, sk)
+}
+
+fn ld_kx_session_keys(
+    is_client: bool,
+    own_sk: &[u8; 32],
+    own_pk: &[u8; 32],
+    peer_pk: &[u8; 32],
+) -> Option<([u8; 32], [u8; 32])> {
+    let mut rx = [0u8; 32];
+    let mut tx = [0u8; 32];
+    let rc = landrop::landrop_kx_session_keys(
+        is_client,
+        own_sk.as_ptr(),
+        own_pk.as_ptr(),
+        peer_pk.as_ptr(),
+        rx.as_mut_ptr(),
+        tx.as_mut_ptr(),
+    );
+    if rc == 0 {
+        Some((rx, tx))
+    } else {
+        None
+    }
+}
+
+/// 6 位 verifCode（out 为 c_char 缓冲；Windows c_char=i8）
+fn ld_verif_code(k_sc: &[u8; 32], k_cs: &[u8; 32]) -> String {
+    let mut out = [0i8; 7];
+    let rc = landrop::landrop_verif_code(k_sc.as_ptr(), k_cs.as_ptr(), out.as_mut_ptr());
+    if rc != 0 {
+        return String::new();
+    }
+    let bytes: Vec<u8> = out
+        .iter()
+        .take_while(|&&c| c != 0)
+        .map(|&c| c as u8)
+        .collect();
+    String::from_utf8(bytes).unwrap_or_default()
+}
+
+fn ld_secp_keypair() -> Option<([u8; 33], [u8; 32])> {
+    let mut pk = [0u8; 33];
+    let mut sk = [0u8; 32];
+    if landrop::landrop_secp_keypair(pk.as_mut_ptr(), sk.as_mut_ptr()) == 0 {
+        Some((pk, sk))
+    } else {
+        None
+    }
+}
+
+fn ld_pk_from_sk(sk: &[u8; 32]) -> Option<[u8; 33]> {
+    let mut pk = [0u8; 33];
+    if landrop::landrop_secp_pk_from_sk(sk.as_ptr(), pk.as_mut_ptr()) == 0 {
+        Some(pk)
+    } else {
+        None
+    }
+}
+
+fn ld_secp_sign(msg: &[u8], sk: &[u8; 32]) -> Option<[u8; 64]> {
+    let mut sig = [0u8; 64];
+    let rc = landrop::landrop_secp_sign(msg.as_ptr(), msg.len(), sk.as_ptr(), sig.as_mut_ptr());
+    if rc == 0 {
+        Some(sig)
+    } else {
+        None
+    }
+}
+
+fn ld_secp_verify(sig: &[u8; 64], msg: &[u8], pk: &[u8; 33]) -> bool {
+    landrop::landrop_secp_verify(sig.as_ptr(), msg.as_ptr(), msg.len(), pk.as_ptr()) == 0
+}
+
+fn ld_seal(key: &[u8; 32], nonce: &[u8; 12], pt: &[u8]) -> Vec<u8> {
+    let mut out = vec![0u8; pt.len() + 16];
+    let mut out_len: usize = 0;
+    let rc = landrop::landrop_seal(
+        key.as_ptr(),
+        nonce.as_ptr(),
+        pt.as_ptr(),
+        pt.len(),
+        out.as_mut_ptr(),
+        &mut out_len,
+    );
+    if rc != 0 {
+        return Vec::new();
+    }
+    out.truncate(out_len);
+    out
+}
+
+fn ld_open(key: &[u8; 32], nonce: &[u8; 12], ct: &[u8]) -> Option<Vec<u8>> {
+    let mut out = vec![0u8; ct.len()];
+    let mut out_len: usize = 0;
+    let rc = landrop::landrop_open(
+        key.as_ptr(),
+        nonce.as_ptr(),
+        ct.as_ptr(),
+        ct.len(),
+        out.as_mut_ptr(),
+        &mut out_len,
+    );
+    if rc != 0 {
+        return None;
+    }
+    out.truncate(out_len);
+    Some(out)
+}
+
+fn ld_nonce_inc(nonce: &mut [u8; 12]) {
+    landrop::landrop_nonce_increment(nonce.as_mut_ptr());
+}
+
+/// base64 解码（标准字母表 + padding；容忍换行）
+fn b64d(s: &str) -> Option<Vec<u8>> {
+    const T: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut rev = [255u8; 256];
+    for (i, &c) in T.iter().enumerate() {
+        rev[c as usize] = i as u8;
+    }
+    let mut out = Vec::with_capacity(s.len() * 3 / 4);
+    let mut chunk = [0u8; 4];
+    let mut n = 0usize;
+    for &b in s.as_bytes() {
+        if b == b'\n' || b == b'\r' {
+            continue;
+        }
+        if b == b'=' {
+            break;
+        }
+        let v = rev[b as usize];
+        if v == 255 {
+            return None;
+        }
+        chunk[n] = v;
+        n += 1;
+        if n == 4 {
+            out.push((chunk[0] << 2) | (chunk[1] >> 4));
+            out.push((chunk[1] << 4) | (chunk[2] >> 2));
+            out.push((chunk[2] << 6) | chunk[3]);
+            n = 0;
+        }
+    }
+    match n {
+        2 => out.push((chunk[0] << 2) | (chunk[1] >> 4)),
+        3 => {
+            out.push((chunk[0] << 2) | (chunk[1] >> 4));
+            out.push((chunk[1] << 4) | (chunk[2] >> 2));
+        }
+        _ => {}
+    }
+    Some(out)
+}
+
+/// 连接级环境快照（accept 时取，避免会话中途持锁）
+struct LdEnv {
+    docs_dir: String,
+    receive_dir: String,
+    confirm_on: bool,
+    confirm_secs: u32,
+    self_pk_b64: String,
+    self_sk_b64: String,
+    self_name: String,
+}
+
+fn ld_env(pk_b64: &str, sk_b64: &str, name: &str) -> LdEnv {
+    let cfg = CONFIG.lock().unwrap();
+    let c = cfg.as_ref();
+    LdEnv {
+        docs_dir: c.map(|x| x.docs_dir.clone()).unwrap_or_default(),
+        receive_dir: c.map(|x| x.receive_dir.clone()).unwrap_or_default(),
+        confirm_on: c.map(|x| x.untrusted_confirm).unwrap_or(true),
+        confirm_secs: c.map(|x| x.untrusted_confirm_secs).unwrap_or(30),
+        self_pk_b64: pk_b64.to_string(),
+        self_sk_b64: sk_b64.to_string(),
+        self_name: name.to_string(),
+    }
+}
+
+/// LANDrop 会话（服务端角色）：帧层 + 消息层 + 握手。
+struct LdSession {
+    stream: TcpStream,
+    buf: Vec<u8>,
+    rx_key: [u8; 32],
+    tx_key: [u8; 32],
+    rx_nonce: [u8; 12],
+    tx_nonce: [u8; 12],
+    peer_pk_b64: String,
+    peer_name: String,
+    verif_code: String,
+    /// v1.2.20：本次 file_send_request 确认框里用户勾的「接收后打开文件夹」
+    dialog_open_dir: bool,
+}
+
+impl LdSession {
+    fn new(stream: TcpStream) -> Self {
+        LdSession {
+            stream,
+            buf: Vec::new(),
+            rx_key: [0u8; 32],
+            tx_key: [0u8; 32],
+            rx_nonce: [0u8; 12],
+            tx_nonce: [0u8; 12],
+            peer_pk_b64: String::new(),
+            peer_name: "LANDrop 设备".to_string(),
+            verif_code: String::new(),
+            dialog_open_dir: false,
+        }
+    }
+
+    // ---------- 帧层：[2B 大端长度][密文] ----------
+
+    fn fill(&mut self) -> bool {
+        let mut tmp = [0u8; 65536];
+        match self.stream.read(&mut tmp) {
+            Ok(0) => false,
+            Ok(n) => {
+                self.buf.extend_from_slice(&tmp[..n]);
+                true
+            }
+            Err(_) => false,
+        }
+    }
+
+    fn write_raw(&mut self, data: &[u8]) -> std::io::Result<()> {
+        if data.len() > 65535 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "frame too long",
+            ));
+        }
+        let hdr = [(data.len() >> 8) as u8, data.len() as u8];
+        self.stream.write_all(&hdr)?;
+        self.stream.write_all(data)?;
+        self.stream.flush()
+    }
+
+    /// 读一个完整记录。None = 对端关闭或协议违例。
+    fn read_raw(&mut self) -> Option<Vec<u8>> {
+        loop {
+            if self.buf.len() >= 2 {
+                let len = ((self.buf[0] as usize) << 8) | self.buf[1] as usize;
+                if len > LD_MAX_BLOCK + 17 {
+                    return None; // 单记录明文 1B push + ≤65518 + 16 tag
+                }
+                if self.buf.len() >= len + 2 {
+                    let out = self.buf[2..2 + len].to_vec();
+                    self.buf.drain(..2 + len);
+                    return Some(out);
+                }
+            }
+            if !self.fill() {
+                return None;
+            }
+        }
+    }
+
+    // ---------- 消息层：AEAD 记录 + push 分片 ----------
+
+    fn send_bytes(&mut self, data: &[u8]) -> std::io::Result<()> {
+        let mut off = 0usize;
+        loop {
+            let end = (off + LD_MAX_BLOCK).min(data.len());
+            let last = end >= data.len();
+            let mut plain = Vec::with_capacity(1 + (end - off));
+            plain.push(if last { 1u8 } else { 0u8 });
+            plain.extend_from_slice(&data[off..end]);
+            let ct = ld_seal(&self.tx_key, &self.tx_nonce, &plain);
+            if ct.is_empty() {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::Other,
+                    "aead seal failed",
+                ));
+            }
+            self.write_raw(&ct)?;
+            ld_nonce_inc(&mut self.tx_nonce);
+            off = end;
+            if off >= data.len() {
+                break;
+            }
+        }
+        Ok(())
+    }
+
+    /// 收一条完整消息（跨记录累积到 push=1）。None = 关闭/解密失败。
+    fn recv_bytes(&mut self) -> Option<Vec<u8>> {
+        let mut out = Vec::new();
+        loop {
+            let ct = self.read_raw()?;
+            let pt = ld_open(&self.rx_key, &self.rx_nonce, &ct)?;
+            ld_nonce_inc(&mut self.rx_nonce);
+            if pt.is_empty() {
+                return None; // 异常空记录
+            }
+            let push = pt[0];
+            out.extend_from_slice(&pt[1..]);
+            if push == 1 {
+                return Some(out);
+            }
+        }
+    }
+
+    fn send_json(&mut self, v: &serde_json::Value) -> std::io::Result<()> {
+        let bytes = serde_json::to_vec(v)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))?;
+        self.send_bytes(&bytes)
+    }
+
+    fn recv_json(&mut self) -> Option<serde_json::Value> {
+        let bytes = self.recv_bytes()?;
+        serde_json::from_slice(&bytes).ok()
+    }
+
+    // ---------- 握手（服务端） ----------
+
+    fn handshake_server(&mut self, my_pk_b64: &str, my_sk_b64: &str) -> Result<(), String> {
+        let hello_bytes = self
+            .read_raw()
+            .ok_or_else(|| "ClientHello 未到达".to_string())?;
+        let hello: serde_json::Value = serde_json::from_slice(&hello_bytes)
+            .map_err(|e| format!("ClientHello 解析失败: {}", e))?;
+        let versions = hello
+            .get("supported_versions")
+            .and_then(|v| v.as_array())
+            .ok_or_else(|| "ClientHello 缺 supported_versions".to_string())?;
+        if !versions.iter().any(|v| v.as_str() == Some("v2")) {
+            return Err("对端不支持 v2".to_string());
+        }
+        let peer_pk_b64 = hello
+            .get("public_key")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        if peer_pk_b64.is_empty() {
+            return Err("ClientHello 缺 public_key".to_string());
+        }
+        let peer_pk = b64d(peer_pk_b64).ok_or_else(|| "public_key base64 损坏".to_string())?;
+        let peer_pk: [u8; 33] = peer_pk
+            .try_into()
+            .map_err(|_| "public_key 长度异常".to_string())?;
+        let ecdhe = hello
+            .get("ecdhe")
+            .ok_or_else(|| "ClientHello 缺 ecdhe".to_string())?;
+        let peer_ecdhe_pk =
+            b64d(ecdhe.get("public_key").and_then(|v| v.as_str()).unwrap_or(""))
+                .ok_or_else(|| "ecdhe.public_key base64 损坏".to_string())?;
+        let sig = b64d(ecdhe.get("sig").and_then(|v| v.as_str()).unwrap_or(""))
+            .ok_or_else(|| "ecdhe.sig base64 损坏".to_string())?;
+        let peer_ecdhe_pk: [u8; 32] = peer_ecdhe_pk
+            .try_into()
+            .map_err(|_| "ecdhe.public_key 长度异常".to_string())?;
+        let sig: [u8; 64] = sig
+            .try_into()
+            .map_err(|_| "ecdhe.sig 长度异常".to_string())?;
+        // 验签：sig = secp256k1_sign(blake2b-256(ecdhe.pk), 对端 sk)
+        if !ld_secp_verify(&sig, &peer_ecdhe_pk, &peer_pk) {
+            return Err("ClientHello 验签失败".to_string());
+        }
+        // 我方 kx 密钥对 + 签名
+        let (kx_pk, kx_sk) = ld_kx_keypair();
+        let my_sk = b64d(my_sk_b64).ok_or_else(|| "身份 sk base64 损坏".to_string())?;
+        let my_sk: [u8; 32] = my_sk
+            .try_into()
+            .map_err(|_| "身份 sk 长度异常".to_string())?;
+        let my_sig =
+            ld_secp_sign(&kx_pk, &my_sk).ok_or_else(|| "ServerHello 签名失败".to_string())?;
+        let server_hello = serde_json::json!({
+            "version": "v2",
+            "public_key": my_pk_b64,
+            "ecdhe": {
+                "public_key": b64(&kx_pk),
+                "sig": b64(&my_sig),
+            },
+        });
+        let bytes = serde_json::to_vec(&server_hello)
+            .map_err(|e| format!("ServerHello 序列化失败: {}", e))?;
+        self.write_raw(&bytes)
+            .map_err(|e| format!("ServerHello 发送失败: {}", e))?;
+        // 派生会话密钥（server 角色）
+        let (rx, tx) = ld_kx_session_keys(false, &kx_sk, &kx_pk, &peer_ecdhe_pk)
+            .ok_or_else(|| "会话密钥派生失败（弱公钥）".to_string())?;
+        self.rx_key = rx;
+        self.tx_key = tx;
+        self.peer_pk_b64 = peer_pk_b64.to_string();
+        // server 角色：kSc=tx, kCs=rx（与 Dart landrop_service 一致）
+        self.verif_code = ld_verif_code(&self.tx_key, &self.rx_key);
+        Ok(())
+    }
+
+    // ---------- 消息循环 ----------
+
+    fn listen(&mut self, env: &LdEnv) {
+        loop {
+            let Some(msg) = self.recv_json() else { return };
+            let ty = msg.get("type").and_then(|v| v.as_str()).unwrap_or("");
+            let data = msg.get("data").cloned().unwrap_or(serde_json::Value::Null);
+            match ty {
+                "supported_message_types" => {
+                    let _ = self.send_json(&serde_json::json!({
+                        "type": "supported_message_types",
+                        "data": {"types": LD_MSG_TYPES},
+                    }));
+                }
+                "device_info" => {
+                    self.peer_name = data
+                        .get("name")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("LANDrop 设备")
+                        .to_string();
+                    let _ = self.send_json(&serde_json::json!({
+                        "type": "device_info",
+                        "data": {"name": env.self_name, "type": "pc"},
+                    }));
+                }
+                "file_send_request" => {
+                    let files = data
+                        .get("files")
+                        .and_then(|v| v.as_array())
+                        .cloned()
+                        .unwrap_or_default();
+                    self.handle_file_send_request(env, &files);
+                }
+                "text_send" => {
+                    let text = data.get("text").and_then(|v| v.as_str()).unwrap_or("");
+                    self.handle_text_send(env, text);
+                }
+                _ => {
+                    let _ = self.send_json(&serde_json::json!({"type": "ack", "data": {"ack": false}}));
+                }
+            }
+        }
+    }
+
+    // ---------- 接收决策 / 落盘 ----------
+
+    fn reply_file_send_request(&mut self, accept: bool) -> std::io::Result<()> {
+        self.send_json(&serde_json::json!({
+            "type": "file_send_request_reply",
+            "data": {"accept": accept, "compression": "none"},
+        }))?;
+        if !accept {
+            // LANDrop 拒收后关闭连接（先 flush 保 reply 到达）
+            self.stream.flush()?;
+            let _ = self.stream.shutdown(std::net::Shutdown::Both);
+        }
+        Ok(())
+    }
+
+    fn handle_file_send_request(&mut self, env: &LdEnv, files: &[serde_json::Value]) {
+        if files.is_empty() {
+            let _ = self.reply_file_send_request(false);
+            return;
+        }
+        let total: u64 = files
+            .iter()
+            .map(|f| f.get("size").and_then(|v| v.as_u64()).unwrap_or(0))
+            .sum();
+        // 信任设备免确认直收（与 Dart/网页版同一个 trusted_devices.json）
+        let trusted = trusted_ids(&env.docs_dir).contains(&self.peer_pk_b64);
+        let accept = if trusted {
+            true
+        } else if env.confirm_on {
+            let hint = if files.len() == 1 {
+                safe_file_name(
+                    files[0]
+                        .get("filename")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("未命名文件"),
+                )
+            } else {
+                format!("{} 个文件", files.len())
+            };
+            let (a, o) = wait_untrusted_confirm(
+                &self.peer_name,
+                &hint,
+                total,
+                false,
+                env.confirm_secs,
+                &self.verif_code,
+            );
+            // v1.2.20：用户在确认框选的「接收后打开文件夹」传给写盘点
+            self.dialog_open_dir = o;
+            a
+        } else {
+            false
+        };
+        if !accept {
+            let _ = self.reply_file_send_request(false);
+            balloon(
+                "微密飞传",
+                &format!(
+                    "已拒收：{} 未在信任列表\n（{}）",
+                    self.peer_name,
+                    if env.confirm_on {
+                        format!("{}秒未确认，自动拒收", env.confirm_secs.max(5))
+                    } else {
+                        "策略为直接拒绝".to_string()
+                    }
+                ),
+            );
+            for f in files {
+                let name = safe_file_name(
+                    f.get("filename")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("未命名文件"),
+                );
+                let size = f.get("size").and_then(|v| v.as_u64()).unwrap_or(0);
+                record_history(
+                    "file",
+                    &name,
+                    size,
+                    &self.peer_name,
+                    false,
+                    None,
+                    None,
+                    Some(&self.peer_pk_b64),
+                );
+            }
+            return;
+        }
+        let _ = self.reply_file_send_request(true);
+        for f in files {
+            let raw = f
+                .get("filename")
+                .and_then(|v| v.as_str())
+                .unwrap_or("未命名文件");
+            let size = f.get("size").and_then(|v| v.as_u64()).unwrap_or(0);
+            let lm = f.get("last_modified").and_then(|v| v.as_u64()).unwrap_or(0);
+            self.receive_one_file(env, raw, size, lm);
+        }
+    }
+
+    fn receive_one_file(&mut self, env: &LdEnv, raw_name: &str, size: u64, last_modified: u64) {
+        // 路径净化（safe_file_name 会把 '/' 拍平，文件夹传输落为扁平文件）
+        let name = safe_file_name(raw_name);
+        let Some(save) = resolve_save_path(&env.receive_dir, &name) else {
+            balloon(
+                "微密飞传",
+                &format!("接收失败：无法创建保存路径（{}）", name),
+            );
+            record_history(
+                "file",
+                &name,
+                size,
+                &self.peer_name,
+                false,
+                None,
+                None,
+                Some(&self.peer_pk_b64),
+            );
+            return;
+        };
+        let mut ok = true;
+        let mut file = match std::fs::File::create(&save) {
+            Ok(f) => f,
+            Err(e) => {
+                log(&format!("landrop: create {} failed: {}", save.display(), e));
+                ok = false;
+                match std::fs::File::open(std::path::Path::new("NUL")) {
+                    Ok(f) => f, // 占位：走统一的失败收尾（字节仍要排空）
+                    Err(_) => {
+                        record_history(
+                            "file",
+                            &name,
+                            size,
+                            &self.peer_name,
+                            false,
+                            None,
+                            None,
+                            Some(&self.peer_pk_b64),
+                        );
+                        return;
+                    }
+                }
+            }
+        };
+        let mut remaining = size;
+        while remaining > 0 {
+            let Some(chunk) = self.recv_bytes() else {
+                ok = false;
+                break;
+            };
+            if chunk.len() as u64 > remaining {
+                ok = false; // 对端多送：协议违例
+                break;
+            }
+            if file.write_all(&chunk).is_err() {
+                ok = false;
+                break;
+            }
+            remaining -= chunk.len() as u64;
+        }
+        drop(file);
+        if ok {
+            // 恢复 mtime（权限字段 Windows 无意义，忽略）
+            if last_modified > 0 {
+                let t = UNIX_EPOCH + Duration::from_secs(last_modified);
+                if let Ok(f) =
+                    std::fs::OpenOptions::new().write(true).open(&save)
+                {
+                    let _ = f.set_modified(t);
+                }
+            }
+            // v1.2.20：确认框选了「接收并打开文件夹」→ 无视配置强制开；
+            // 否则按配置（设置→接收后自动打开文件夹）
+            if self.dialog_open_dir {
+                open_recv_dir_now(&save);
+            } else {
+                maybe_open_recv_dir(&save);
+            }
+            balloon(
+                "微密飞传",
+                &format!("收到文件：{}\n来自 {}", name, self.peer_name),
+            );
+            record_history(
+                "file",
+                &name,
+                size,
+                &self.peer_name,
+                true,
+                None,
+                Some(&save.to_string_lossy()),
+                Some(&self.peer_pk_b64),
+            );
+        } else {
+            let _ = std::fs::remove_file(&save);
+            balloon(
+                "微密飞传",
+                &format!("接收失败：{}\n来自 {}", name, self.peer_name),
+            );
+            record_history(
+                "file",
+                &name,
+                size,
+                &self.peer_name,
+                false,
+                None,
+                None,
+                Some(&self.peer_pk_b64),
+            );
+        }
+    }
+
+    fn handle_text_send(&mut self, _env: &LdEnv, text: &str) {
+        let _ = self.send_json(&serde_json::json!({"type": "ack", "data": {"ack": true}}));
+        balloon(
+            "微密飞传",
+            &format!("收到文本：{}\n来自 {}", short_text(text), self.peer_name),
+        );
+        record_history(
+            "text",
+            &short_text(text),
+            text.chars().count() as u64,
+            &self.peer_name,
+            true,
+            Some(text),
+            None,
+            Some(&self.peer_pk_b64),
+        );
+    }
+}
+
+/// 单连接处理（握手 + 会话循环）。
+fn handle_landrop_conn(stream: TcpStream, env: LdEnv) {
+    // 监听器是非阻塞的；显式回阻塞 + 读超时（记录间 30s 无数据即断）
+    let _ = stream.set_nonblocking(false);
+    let _ = stream.set_read_timeout(Some(Duration::from_secs(30)));
+    let _ = stream.set_nodelay(true);
+    let peer = stream
+        .peer_addr()
+        .map(|a| a.to_string())
+        .unwrap_or_else(|_| "?".to_string());
+    let mut sess = LdSession::new(stream);
+    if let Err(e) = sess.handshake_server(&env.self_pk_b64, &env.self_sk_b64) {
+        log(&format!("landrop: handshake failed from {}: {}", peer, e));
+        return;
+    }
+    log(&format!(
+        "landrop: session up from {} peer={} verif={}",
+        peer,
+        &sess.peer_pk_b64[..sess.peer_pk_b64.len().min(12)],
+        sess.verif_code
+    ));
+    sess.listen(&env);
+}
+
+/// 托盘模式 LANDrop 传输主循环（v1.2.20）。
+/// - UI 活跃（ui_active=true）：静默并释放 52637，交还 Dart landrop_service
+/// - 否则 bind TCP 52637（被真 LANDrop 占→降级临时端口，发现包报真实端口），
+///   每连接一线程；非阻塞轮询 accept 保证 ~300ms 内响应 ui_active 翻转
+fn landrop_transfer_loop() {
+    let mut listener: Option<TcpListener> = None;
+    let mut degraded = false;
+    let mut last_rebind = std::time::Instant::now();
+    let mut ident_bad_logged = false;
+    loop {
+        let Some((pk_b64, sk_b64, name)) = landrop_active() else {
+            if let Some(l) = listener.take() {
+                log("landrop: ui active, releasing tcp 52637");
+                drop(l);
+                degraded = false;
+                LANDROP_TCP_PORT.store(LANDROP_PORT, Ordering::Relaxed);
+            }
+            ident_bad_logged = false;
+            std::thread::sleep(Duration::from_secs(2));
+            continue;
+        };
+        // sk→pk 自检：身份材料不配套（老 UI 只同步了 pk）时拒绝传输，
+        // 否则占着端口但握手必失败。发现层照常（对方至少能看到设备）。
+        let ident_ok = match (b64d(&sk_b64), b64d(&pk_b64)) {
+            (Some(sk), Some(pk)) if sk.len() == 32 && pk.len() == 33 => {
+                match ld_pk_from_sk(<&[u8; 32]>::try_from(&sk[..]).unwrap()) {
+                    Some(derived) => b64(&derived) == pk_b64,
+                    None => false,
+                }
+            }
+            _ => false,
+        };
+        if !ident_ok {
+            if !ident_bad_logged {
+                log("landrop: identity sk/pk mismatch, transfer disabled");
+                ident_bad_logged = true;
+            }
+            LANDROP_TCP_PORT.store(0, Ordering::Relaxed);
+            std::thread::sleep(Duration::from_secs(5));
+            continue;
+        }
+        if listener.is_none() {
+            match TcpListener::bind(("0.0.0.0", LANDROP_PORT)) {
+                Ok(l) => {
+                    let port = l.local_addr().map(|a| a.port()).unwrap_or(LANDROP_PORT);
+                    LANDROP_TCP_PORT.store(port, Ordering::Relaxed);
+                    log(&format!("landrop: tray-mode transfer active on {}", port));
+                    listener = Some(l);
+                    degraded = false;
+                }
+                Err(e) => {
+                    if !degraded {
+                        degraded = true;
+                        log(&format!(
+                            "landrop: tcp {} bind failed: {} (raw={:?}), degraded to temp port",
+                            LANDROP_PORT,
+                            e,
+                            e.raw_os_error()
+                        ));
+                    }
+                    match TcpListener::bind(("0.0.0.0", 0)) {
+                        Ok(l) => {
+                            let port = l.local_addr().map(|a| a.port()).unwrap_or(0);
+                            LANDROP_TCP_PORT.store(port, Ordering::Relaxed);
+                            listener = Some(l);
+                        }
+                        Err(e) => {
+                            log(&format!("landrop: tcp bind failed: {}", e));
+                            std::thread::sleep(Duration::from_secs(2));
+                            continue;
+                        }
+                    }
+                }
+            }
+        }
+        // degraded（真 LANDrop 占了 52637）时每 5s 抢回
+        if degraded && last_rebind.elapsed() >= Duration::from_secs(5) {
+            last_rebind = std::time::Instant::now();
+            if let Ok(l) = TcpListener::bind(("0.0.0.0", LANDROP_PORT)) {
+                let port = l.local_addr().map(|a| a.port()).unwrap_or(LANDROP_PORT);
+                LANDROP_TCP_PORT.store(port, Ordering::Relaxed);
+                if let Some(old) = listener.replace(l) {
+                    drop(old);
+                }
+                degraded = false;
+                log("landrop: rebind tcp 52637 OK");
+            }
+        }
+        // 非阻塞 accept：无连接即睡 300ms 回头查 ui_active
+        let l = listener.as_ref().unwrap();
+        let _ = l.set_nonblocking(true);
+        match l.accept() {
+            Ok((stream, addr)) => {
+                let env = ld_env(&pk_b64, &sk_b64, &name);
+                log(&format!("landrop: inbound conn from {}", addr));
+                std::thread::spawn(move || handle_landrop_conn(stream, env));
+            }
+            Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                std::thread::sleep(Duration::from_millis(300));
+            }
+            Err(_) => {
+                if let Some(old) = listener.take() {
+                    drop(old);
+                }
+                std::thread::sleep(Duration::from_secs(1));
+            }
+        }
+    }
+}
+
 fn load_app_icon(exe_path: &str) -> HICON {
     unsafe {
         if !exe_path.is_empty() && Path::new(exe_path).exists() {
@@ -1142,13 +1989,17 @@ fn pending_map() -> &'static Mutex<HashMap<String, PendingReq>> {
 /// - UI 活跃：拉起主程序走 UI 确认框（原有路径）
 /// - 托盘模式（UI 未运行）：直接弹**原生 Win32 确认框**，全程不需要主程序；
 ///   超时自动关框=拒收
+/// 未信任设备接收确认。返回 (accept, open_dir)：
+/// - UI 活跃分支：UI 弹窗点「是」(accept, 不开——UI 侧有自己的开目录逻辑)
+/// - 托盘分支：三按钮原生框（是=开文件夹 / 否=仅接收 / 取消=拒收）
 fn wait_untrusted_confirm(
     sender_name: &str,
     name: &str,
     size: u64,
     is_text: bool,
     timeout_secs: u32,
-) -> bool {
+    verif: &str,
+) -> (bool, bool) {
     let timeout_secs: u64 = if timeout_secs < 5 { 5 } else { timeout_secs as u64 };
     let token = format!("p{}-{}", now_ms(), PENDING_SEQ.fetch_add(1, Ordering::Relaxed));
     let entry = PendingReq {
@@ -1171,12 +2022,19 @@ fn wait_untrusted_confirm(
         .unwrap_or(false);
 
     let mut decision = false;
+    // 托盘分支三按钮框的「接收后打开文件夹」选择（UI 分支恒 false）
+    let mut dlg_open = false;
+    let verif_hint = if verif.is_empty() {
+        String::new()
+    } else {
+        format!("\n核对码：{}（请与发送方核对）", verif)
+    };
     if ui_active {
         balloon(
             "微密飞传",
             &format!(
-                "{} 请求发送：{}\n已拉起微密文件，{}秒内未确认将自动拒收",
-                sender_name, name, timeout_secs
+                "{} 请求发送：{}{}\n已拉起微密文件，{}秒内未确认将自动拒收",
+                sender_name, name, verif_hint, timeout_secs
             ),
         );
         launch_ui(None);
@@ -1213,43 +2071,64 @@ fn wait_untrusted_confirm(
         balloon(
             "微密飞传",
             &format!(
-                "{} 请求发送：{}\n请在弹出的确认框里选择，{}秒内未确认将自动拒收",
-                sender_name, name, timeout_secs
+                "{} 请求发送：{}{}\n请在弹出的确认框里选择，{}秒内未确认将自动拒收",
+                sender_name, name, verif_hint, timeout_secs
             ),
         );
-        decision = native_confirm_dialog(sender_name, name, is_text, timeout_secs);
+        let (d, o) = native_confirm_dialog(sender_name, name, is_text, timeout_secs, verif);
+        decision = d;
+        dlg_open = o;
     }
     pending_map().lock().unwrap().remove(&token);
     log(&format!(
-        "untrusted request from {} ({}): decision={}",
-        sender_name, name, decision
+        "untrusted request from {} ({}): decision={} open_dir={}",
+        sender_name, name, decision, dlg_open
     ));
-    decision
+    (decision, dlg_open)
 }
 
-/// 原生 Win32 确认框（托盘模式专用）：是/否 + 超时自动关闭（=拒收）。
+/// 原生 Win32 确认框（托盘模式专用）：三按钮 + 超时自动关闭（=拒收）。
+/// v1.2.20：MB_YESNOCANCEL 让用户当场决定「接收后是否打开目标文件夹」——
+///   [是]     接收并打开文件夹   (accept=true,  open=true)
+///   [否]     仅接收，不开文件夹 (accept=true,  open=false)
+///   [取消]   拒收               (accept=false, open=false)
 fn native_confirm_dialog(
     sender_name: &str,
     name: &str,
     is_text: bool,
     timeout_secs: u64,
-) -> bool {
-    const MB_YESNO: u32 = 0x0000_0004;
+    verif: &str,
+) -> (bool, bool) {
+    const MB_YESNOCANCEL: u32 = 0x0000_0003;
     const MB_ICONQUESTION: u32 = 0x0000_0020;
     const MB_SYSTEMMODAL: u32 = 0x0000_1000;
     const MB_SETFOREGROUND: u32 = 0x0001_0000;
     const MB_TOPMOST: u32 = 0x0004_0000;
     const IDYES: i32 = 6;
+    const IDNO: i32 = 7;
     // WM_CLOSE 已有顶层常量（136 行）
+    let verif_line = if verif.is_empty() {
+        String::new()
+    } else {
+        format!("\n核对码：{}（请与发送方核对）", verif)
+    };
     let body = if is_text {
         format!(
-            "「{}」想发送一条文本消息到本机\n\n是否接收？（{}秒未确认自动拒收）",
-            sender_name, timeout_secs
+            "「{}」想发送一条文本消息到本机{}\n\n\
+             是 = 接收并打开文件夹\n\
+             否 = 仅接收\n\
+             取消 = 拒收\n\n\
+             （{}秒未确认自动拒收）",
+            sender_name, verif_line, timeout_secs
         )
     } else {
         format!(
-            "「{}」想发送文件到本机：\n{}\n\n是否接收？（{}秒未确认自动拒收）",
-            sender_name, name, timeout_secs
+            "「{}」想发送文件到本机：\n{}{}\n\n\
+             是 = 接收并打开文件夹\n\
+             否 = 仅接收\n\
+             取消 = 拒收\n\n\
+             （{}秒未确认自动拒收）",
+            sender_name, name, verif_line, timeout_secs
         )
     };
     let body_w = to_wide(&body);
@@ -1264,14 +2143,14 @@ fn native_confirm_dialog(
             std::ptr::null_mut(),
             body_w.as_ptr(),
             title_w.as_ptr(),
-            MB_YESNO | MB_ICONQUESTION | MB_SYSTEMMODAL | MB_SETFOREGROUND | MB_TOPMOST,
+            MB_YESNOCANCEL | MB_ICONQUESTION | MB_SYSTEMMODAL | MB_SETFOREGROUND | MB_TOPMOST,
         );
         answered2.store(true, Ordering::SeqCst);
         let _ = res_tx.send(r);
     });
     // 拿不到对话框线程 id（异常）直接按拒收处理
     let Ok(tid) = tid_rx.recv_timeout(Duration::from_secs(3)) else {
-        return false;
+        return (false, false);
     };
     // 超时关框线程：到点且用户仍未作答 → PostMessage(WM_CLOSE) 关掉对话框
     let answered3 = answered.clone();
@@ -1282,8 +2161,9 @@ fn native_confirm_dialog(
         }
     });
     match res_rx.recv_timeout(Duration::from_secs(timeout_secs + 10)) {
-        Ok(r) => r == IDYES,
-        Err(_) => false,
+        Ok(r) if r == IDYES => (true, true),
+        Ok(r) if r == IDNO => (true, false),
+        _ => (false, false),
     }
 }
 
@@ -1978,14 +2858,18 @@ fn handle_client(mut stream: TcpStream) {
                     .map(|c| (c.untrusted_confirm, c.untrusted_confirm_secs))
                     .unwrap_or((true, 30));
                 if confirm.0 {
-                    // 等 UI 确认（daemon 会拉起主界面），超时自动拒
+                    // 等 UI 确认（daemon 会拉起主界面），超时自动拒；
+                    // open_dir 分量仅托盘三按钮框会产生，网页流忽略（收完
+                    // 开目录由 UI 侧/配置管）
                     accepted = wait_untrusted_confirm(
                         &sender_name,
                         &hint,
                         fsize,
                         is_text,
                         confirm.1,
-                    );
+                        "",
+                    )
+                    .0;
                 }
                 if !accepted {
                     write_json(
@@ -3823,6 +4707,10 @@ struct PushMsg {
     landrop_on: Option<bool>,
     #[serde(default)]
     landrop_pk: String,
+    /// v1.2.20：LANDrop 身份私钥（托盘收文件 ServerHello 签名用）。
+    /// 空 = 老 UI 没同步 → 不动 daemon 里已有的值（与 landrop_pk 同语义）
+    #[serde(default)]
+    landrop_sk: String,
     #[serde(default)]
     token: String,
     #[serde(default)]
@@ -4146,6 +5034,9 @@ fn config_server() {
                         if !msg.landrop_pk.is_empty() {
                             c.landrop_pk = msg.landrop_pk;
                         }
+                        if !msg.landrop_sk.is_empty() {
+                            c.landrop_sk = msg.landrop_sk;
+                        }
                         log(&format!(
                             "apply: ui_active={} discover={} web={} confirm={} recv_dir={} open_dir={}",
                             c.ui_active,
@@ -4192,6 +5083,7 @@ fn main() {
     std::thread::spawn(config_server);
     std::thread::spawn(transfer_loop);
     std::thread::spawn(landrop_discovery_loop);
+    std::thread::spawn(landrop_transfer_loop);
     hotkey_thread();
 
     unsafe {
@@ -4246,4 +5138,475 @@ fn main() {
     }
     tray_delete();
     log("daemon exited");
+}
+
+// ==================== LANDrop 传输测试（v1.2.20） ====================
+
+#[cfg(test)]
+mod landrop_tests {
+    use super::*;
+
+    // —— 最小 LANDrop v2 测试客户端（与 landrop.rs 原语同源） ——
+
+    pub(super) fn t_write_raw(s: &mut TcpStream, data: &[u8]) {
+        s.write_all(&[(data.len() >> 8) as u8, data.len() as u8])
+            .unwrap();
+        s.write_all(data).unwrap();
+        s.flush().unwrap();
+    }
+
+    pub(super) fn t_read_raw(s: &mut TcpStream) -> Option<Vec<u8>> {
+        let mut hdr = [0u8; 2];
+        if s.read_exact(&mut hdr).is_err() {
+            return None;
+        }
+        let len = ((hdr[0] as usize) << 8) | hdr[1] as usize;
+        let mut buf = vec![0u8; len];
+        if s.read_exact(&mut buf).is_err() {
+            return None;
+        }
+        Some(buf)
+    }
+
+    pub(super) fn t_send_bytes(s: &mut TcpStream, key: &[u8; 32], nonce: &mut [u8; 12], data: &[u8]) {
+        let mut off = 0usize;
+        loop {
+            let end = (off + LD_MAX_BLOCK).min(data.len());
+            let last = end >= data.len();
+            let mut plain = vec![if last { 1u8 } else { 0u8 }];
+            plain.extend_from_slice(&data[off..end]);
+            let ct = ld_seal(key, nonce, &plain);
+            t_write_raw(s, &ct);
+            ld_nonce_inc(nonce);
+            off = end;
+            if off >= data.len() {
+                break;
+            }
+        }
+    }
+
+    pub(super) fn t_recv_bytes(s: &mut TcpStream, key: &[u8; 32], nonce: &mut [u8; 12]) -> Option<Vec<u8>> {
+        let mut out = Vec::new();
+        loop {
+            let ct = t_read_raw(s)?;
+            let pt = ld_open(key, nonce, &ct)?;
+            ld_nonce_inc(nonce);
+            if pt.is_empty() {
+                return None;
+            }
+            let push = pt[0];
+            out.extend_from_slice(&pt[1..]);
+            if push == 1 {
+                return Some(out);
+            }
+        }
+    }
+
+    /// 全链路 duplex：握手（双向验签 + 会话密钥一致）→ device_info 互换 →
+    /// file_send_request（信任免确认）→ 100KB 文件两记录分片 → 落盘校验。
+    /// 另验未信任 + confirm_on=false 的拒收路径。
+    #[test]
+    fn landrop_tray_duplex() {
+        // 身份（客户端/服务端各一把）
+        let (cpk, csk) = ld_secp_keypair().unwrap();
+        let (spk, ssk) = ld_secp_keypair().unwrap();
+        // 临时工作目录：docs（信任表/历史）+ recv（落盘）
+        let tmp = std::env::temp_dir().join(format!("wm_ld_test_{}", now_ms()));
+        let recv = tmp.join("recv");
+        std::fs::create_dir_all(&recv).unwrap();
+        std::fs::write(
+            tmp.join("trusted_devices.json"),
+            serde_json::json!({ b64(&cpk): "test-phone" }).to_string(),
+        )
+        .unwrap();
+        // CONFIG：client pk 已信任；先开确认策略（未信任设备会拒收前的短路）
+        {
+            let mut cfg = CONFIG.lock().unwrap();
+            *cfg = Some(Config {
+                device_name: "test-pc".to_string(),
+                docs_dir: tmp.to_string_lossy().to_string(),
+                receive_dir: recv.to_string_lossy().to_string(),
+                untrusted_confirm: true,
+                untrusted_confirm_secs: 30,
+                ..Default::default()
+            });
+        }
+        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let addr = listener.local_addr().unwrap();
+        let spk_b64 = b64(&spk);
+        let ssk_b64 = b64(&ssk);
+        let server = std::thread::spawn(move || {
+            let (stream, _) = listener.accept().unwrap();
+            let env = LdEnv {
+                docs_dir: {
+                    let cfg = CONFIG.lock().unwrap();
+                    cfg.as_ref().unwrap().docs_dir.clone()
+                },
+                receive_dir: {
+                    let cfg = CONFIG.lock().unwrap();
+                    cfg.as_ref().unwrap().receive_dir.clone()
+                },
+                confirm_on: true,
+                confirm_secs: 30,
+                self_pk_b64: spk_b64,
+                self_sk_b64: ssk_b64,
+                self_name: "test-pc".to_string(),
+            };
+            handle_landrop_conn(stream, env);
+        });
+
+        // —— 客户端连接 + ClientHello ——
+        let mut s = TcpStream::connect(addr).unwrap();
+        s.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
+        let (ckx_pk, ckx_sk) = ld_kx_keypair();
+        let my_sig = ld_secp_sign(&ckx_pk, &csk).unwrap();
+        let hello = serde_json::json!({
+            "supported_versions": ["v2"],
+            "public_key": b64(&cpk),
+            "ecdhe": {"public_key": b64(&ckx_pk), "sig": b64(&my_sig)},
+        });
+        t_write_raw(&mut s, &serde_json::to_vec(&hello).unwrap());
+        // ServerHello：验签 + 派生（client 角色）
+        let sh_bytes = t_read_raw(&mut s).expect("ServerHello");
+        let sh: serde_json::Value = serde_json::from_slice(&sh_bytes).unwrap();
+        assert_eq!(sh["version"], "v2");
+        let s_ecdhe =
+            b64d(sh["ecdhe"]["public_key"].as_str().unwrap()).unwrap();
+        let s_sig = b64d(sh["ecdhe"]["sig"].as_str().unwrap()).unwrap();
+        assert!(ld_secp_verify(
+            s_sig.as_slice().try_into().unwrap(),
+            &s_ecdhe,
+            &spk
+        ));
+        let s_ecdhe: [u8; 32] = s_ecdhe.try_into().unwrap();
+        let (c_rx, c_tx) = ld_kx_session_keys(true, &ckx_sk, &ckx_pk, &s_ecdhe).unwrap();
+        let mut c_rx_nonce = [0u8; 12];
+        let mut c_tx_nonce = [0u8; 12];
+        // device_info 互换（客户端先发）
+        t_send_bytes(
+            &mut s,
+            &c_tx,
+            &mut c_tx_nonce,
+            &serde_json::to_vec(&serde_json::json!({
+                "type": "device_info",
+                "data": {"name": "test-phone", "type": "android"},
+            }))
+            .unwrap(),
+        );
+        let di = t_recv_bytes(&mut s, &c_rx, &mut c_rx_nonce).expect("device_info");
+        let di: serde_json::Value = serde_json::from_slice(&di).unwrap();
+        assert_eq!(di["type"], "device_info");
+        assert_eq!(di["data"]["name"], "test-pc");
+        // file_send_request（信任 → 免确认直收）
+        let content: Vec<u8> = (0..100_000u32).map(|i| (i % 251) as u8).collect();
+        let req = serde_json::json!({
+            "type": "file_send_request",
+            "data": {"files": [{
+                "filename": "test.bin",
+                "size": content.len(),
+                "last_modified": 1700000000,
+                "permissions": "644",
+            }]},
+        });
+        t_send_bytes(
+            &mut s,
+            &c_tx,
+            &mut c_tx_nonce,
+            &serde_json::to_vec(&req).unwrap(),
+        );
+        let reply = t_recv_bytes(&mut s, &c_rx, &mut c_rx_nonce).expect("reply");
+        let reply: serde_json::Value = serde_json::from_slice(&reply).unwrap();
+        assert_eq!(reply["type"], "file_send_request_reply");
+        assert_eq!(reply["data"]["accept"], true);
+        // 文件记录（100KB → 2 条：65518 + 34482，末片 push=1）
+        t_send_bytes(&mut s, &c_tx, &mut c_tx_nonce, &content);
+        // 服务端收完即处理；关连接让会话循环退出
+        drop(s);
+        server.join().unwrap();
+        // 落盘校验
+        let got = std::fs::read(recv.join("test.bin")).unwrap();
+        assert_eq!(got, content);
+        // mtime 恢复校验（秒级）
+        let mt = std::fs::metadata(recv.join("test.bin")).unwrap().modified().unwrap();
+        let want = UNIX_EPOCH + Duration::from_secs(1700000000);
+        let delta = if mt >= want {
+            mt.duration_since(want).unwrap()
+        } else {
+            want.duration_since(mt).unwrap()
+        };
+        assert!(delta < Duration::from_secs(2), "mtime 未恢复: {:?}", delta);
+
+        // —— 未信任 + confirm_on=false → 直接拒收 ——
+        let (cpk2, csk2) = ld_secp_keypair().unwrap();
+        {
+            let mut cfg = CONFIG.lock().unwrap();
+            cfg.as_mut().unwrap().untrusted_confirm = false;
+        }
+        let listener2 = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let addr2 = listener2.local_addr().unwrap();
+        let spk_b64 = b64(&spk);
+        let ssk_b64 = b64(&ssk);
+        let server2 = std::thread::spawn(move || {
+            let (stream, _) = listener2.accept().unwrap();
+            let env = LdEnv {
+                docs_dir: {
+                    let cfg = CONFIG.lock().unwrap();
+                    cfg.as_ref().unwrap().docs_dir.clone()
+                },
+                receive_dir: {
+                    let cfg = CONFIG.lock().unwrap();
+                    cfg.as_ref().unwrap().receive_dir.clone()
+                },
+                confirm_on: false,
+                confirm_secs: 30,
+                self_pk_b64: spk_b64,
+                self_sk_b64: ssk_b64,
+                self_name: "test-pc".to_string(),
+            };
+            handle_landrop_conn(stream, env);
+        });
+        let mut s2 = TcpStream::connect(addr2).unwrap();
+        s2.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
+        let (ckx_pk2, ckx_sk2) = ld_kx_keypair();
+        let my_sig2 = ld_secp_sign(&ckx_pk2, &csk2).unwrap();
+        let hello2 = serde_json::json!({
+            "supported_versions": ["v2"],
+            "public_key": b64(&cpk2),
+            "ecdhe": {"public_key": b64(&ckx_pk2), "sig": b64(&my_sig2)},
+        });
+        t_write_raw(&mut s2, &serde_json::to_vec(&hello2).unwrap());
+        let _sh2_bytes = t_read_raw(&mut s2).expect("ServerHello 2");
+        let sh2: serde_json::Value = serde_json::from_slice(&_sh2_bytes).unwrap();
+        let s_ecdhe2 = b64d(sh2["ecdhe"]["public_key"].as_str().unwrap()).unwrap();
+        assert!(ld_secp_verify(
+            b64d(sh2["ecdhe"]["sig"].as_str().unwrap())
+                .unwrap()
+                .as_slice()
+                .try_into()
+                .unwrap(),
+            &s_ecdhe2,
+            &spk
+        ));
+        let s_ecdhe2: [u8; 32] = s_ecdhe2.try_into().unwrap();
+        let (c_rx2, c_tx2) =
+            ld_kx_session_keys(true, &ckx_sk2, &ckx_pk2, &s_ecdhe2).unwrap();
+        let mut c_rx_nonce2 = [0u8; 12];
+        let mut c_tx_nonce2 = [0u8; 12];
+        let req2 = serde_json::json!({
+            "type": "file_send_request",
+            "data": {"files": [{"filename": "nope.bin", "size": 3, "last_modified": 0, "permissions": "644"}]},
+        });
+        t_send_bytes(
+            &mut s2,
+            &c_tx2,
+            &mut c_tx_nonce2,
+            &serde_json::to_vec(&req2).unwrap(),
+        );
+        let reply2 = t_recv_bytes(&mut s2, &c_rx2, &mut c_rx_nonce2).expect("reply 2");
+        let reply2: serde_json::Value = serde_json::from_slice(&reply2).unwrap();
+        assert_eq!(reply2["type"], "file_send_request_reply");
+        assert_eq!(reply2["data"]["accept"], false);
+        drop(s2);
+        server2.join().unwrap();
+        // 拒收不得落盘
+        assert!(!recv.join("nope.bin").exists());
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+}
+
+// ==================== LANDrop 托盘传输跨进程冒烟（v1.2.20） ====================
+
+#[cfg(all(test, windows))]
+mod landrop_daemon_tests {
+    use super::landrop_tests::{t_read_raw, t_recv_bytes, t_send_bytes, t_write_raw};
+    use super::*;
+    use std::io::{BufRead, BufReader, Write};
+    use std::process::{Child, Command, Stdio};
+
+    /// 起真 daemon 二进制（隔离工作目录）→ apply 托盘配置 → 52637 真实端口
+    /// 收发文件。内存级 duplex 已覆盖协议/信任/落盘，这里专验线程启动 +
+    /// 端口绑定 + 配置 apply 链路。daemon 起不来（如无桌面会话）则跳过不误挂。
+    #[test]
+    fn landrop_tray_real_daemon() {
+        let exe = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("target")
+            .join("release")
+            .join("weimi_daemon.exe");
+        if !exe.exists() {
+            eprintln!("skip: release daemon not built");
+            return;
+        }
+        // 隔离工作目录：daemon 读 current_exe 同目录 daemon_config.json
+        let workdir = std::env::temp_dir().join(format!("wm_ld_dmn_{}", now_ms()));
+        let recv = workdir.join("recv");
+        let docs = workdir.join("docs");
+        std::fs::create_dir_all(&recv).unwrap();
+        std::fs::create_dir_all(&docs).unwrap();
+        // 测试身份：client（手机角色）+ server（daemon 角色）
+        let (cpk, csk) = ld_secp_keypair().unwrap();
+        let (spk, ssk) = ld_secp_keypair().unwrap();
+        std::fs::write(
+            docs.join("trusted_devices.json"),
+            serde_json::json!({ b64(&cpk): "test-phone" }).to_string(),
+        )
+        .unwrap();
+        let local_exe = workdir.join("weimi_daemon.exe");
+        std::fs::copy(&exe, &local_exe).unwrap();
+        // 从 daemon 日志读它实际绑定的端口：52637 空闲时绑 52637；被本机其他
+        // 同口号工具（实测 F:\Tools\weimi\weimi.exe 占 52637）占着时降级临时
+        // 端口——日志方案两种情况都能连通真 daemon，顺带覆盖降级路径。
+        let log_path = std::env::temp_dir().join("weimi_daemon.log");
+        let log_start: usize = std::fs::metadata(&log_path).map(|m| m.len()).unwrap_or(0) as usize;
+        let mut child: Child = Command::new(&local_exe)
+            .current_dir(&workdir)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("spawn daemon");
+        let cleanup = |c: &mut Child| {
+            let _ = c.kill();
+            let _ = c.wait();
+        };
+        // apply：托盘模式（ui_active=false + landrop_on + 身份 sk/pk 配套）
+        let apply = serde_json::json!({
+            "cmd": "apply",
+            "device_id": "test-daemon",
+            "device_name": "test-pc",
+            "ui_active": false,
+            "landrop_on": true,
+            "landrop_pk": b64(&spk),
+            "landrop_sk": b64(&ssk),
+            "docs_dir": docs.to_string_lossy(),
+            "receive_dir": recv.to_string_lossy(),
+            "untrusted_confirm": false,
+            "untrusted_confirm_secs": 30u32,
+        });
+        if !config_send(&serde_json::to_vec(&apply).unwrap()) {
+            eprintln!("skip: daemon config server unreachable");
+            cleanup(&mut child);
+            let _ = std::fs::remove_dir_all(&workdir);
+            return;
+        }
+        // 等 daemon 日志报 "tray-mode transfer active on <port>"（线程 2s 粒度，
+        // 最多 20s；超时说明 daemon 没正常起来——如无桌面会话，跳过不误挂）
+        let mut port: Option<u16> = None;
+        for _ in 0..100 {
+            std::thread::sleep(Duration::from_millis(200));
+            if let Ok(s) = std::fs::read_to_string(&log_path) {
+                let tail = s.get(log_start..).unwrap_or("");
+                for line in tail.lines() {
+                    if let Some(rest) = line.split("transfer active on ").nth(1) {
+                        if let Ok(p) = rest.trim().parse::<u16>() {
+                            port = Some(p);
+                            break;
+                        }
+                    }
+                }
+            }
+            if port.is_some() {
+                break;
+            }
+        }
+        let Some(port) = port else {
+            eprintln!("skip: daemon landrop transfer not active (no log line)");
+            cleanup(&mut child);
+            let _ = std::fs::remove_dir_all(&workdir);
+            return;
+        };
+        // —— 客户端：握手 + 发文件（信任免确认） ——
+        let mut s = TcpStream::connect(("127.0.0.1", port)).unwrap();
+        s.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
+        let (ckx_pk, ckx_sk) = ld_kx_keypair();
+        let my_sig = ld_secp_sign(&ckx_pk, &csk).unwrap();
+        let hello = serde_json::json!({
+            "supported_versions": ["v2"],
+            "public_key": b64(&cpk),
+            "ecdhe": {"public_key": b64(&ckx_pk), "sig": b64(&my_sig)},
+        });
+        t_write_raw(&mut s, &serde_json::to_vec(&hello).unwrap());
+        let sh_bytes = t_read_raw(&mut s).expect("ServerHello");
+        let sh: serde_json::Value = serde_json::from_slice(&sh_bytes).unwrap();
+        let s_ecdhe = b64d(sh["ecdhe"]["public_key"].as_str().unwrap()).unwrap();
+        assert!(ld_secp_verify(
+            b64d(sh["ecdhe"]["sig"].as_str().unwrap())
+                .unwrap()
+                .as_slice()
+                .try_into()
+                .unwrap(),
+            &s_ecdhe,
+            &spk
+        ));
+        let s_ecdhe: [u8; 32] = s_ecdhe.try_into().unwrap();
+        let (c_rx, c_tx) = ld_kx_session_keys(true, &ckx_sk, &ckx_pk, &s_ecdhe).unwrap();
+        let mut c_rx_nonce = [0u8; 12];
+        let mut c_tx_nonce = [0u8; 12];
+        // device_info（客户端先发，服务端也会回）
+        t_send_bytes(
+            &mut s,
+            &c_tx,
+            &mut c_tx_nonce,
+            &serde_json::to_vec(&serde_json::json!({
+                "type": "device_info",
+                "data": {"name": "test-phone", "type": "android"},
+            }))
+            .unwrap(),
+        );
+        let _di = t_recv_bytes(&mut s, &c_rx, &mut c_rx_nonce).expect("device_info");
+        // 文件请求（已信任 → 免确认直收）
+        let content: Vec<u8> = (0..70_000u32).map(|i| (i % 241) as u8).collect();
+        t_send_bytes(
+            &mut s,
+            &c_tx,
+            &mut c_tx_nonce,
+            &serde_json::to_vec(&serde_json::json!({
+                "type": "file_send_request",
+                "data": {"files": [{
+                    "filename": "smoke.bin",
+                    "size": content.len(),
+                    "last_modified": 1700000000,
+                    "permissions": "644",
+                }]},
+            }))
+            .unwrap(),
+        );
+        let reply = t_recv_bytes(&mut s, &c_rx, &mut c_rx_nonce).expect("reply");
+        let reply: serde_json::Value = serde_json::from_slice(&reply).unwrap();
+        assert_eq!(reply["type"], "file_send_request_reply");
+        assert_eq!(reply["data"]["accept"], true);
+        t_send_bytes(&mut s, &c_tx, &mut c_tx_nonce, &content);
+        drop(s);
+        // 落盘校验（daemon 侧异步收尾，轮询 5s）
+        let target = recv.join("smoke.bin");
+        let mut got = Vec::new();
+        for _ in 0..50 {
+            if let Ok(d) = std::fs::read(&target) {
+                if d.len() == content.len() {
+                    got = d;
+                    break;
+                }
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        assert_eq!(got, content, "smoke.bin 落盘内容不符");
+        // 退出 daemon + 清理
+        let _ = config_send(br#"{"cmd":"quit"}"#);
+        std::thread::sleep(Duration::from_millis(500));
+        cleanup(&mut child);
+        let _ = std::fs::remove_dir_all(&workdir);
+    }
+
+    fn config_send(line: &[u8]) -> bool {
+        let mut s = match TcpStream::connect(("127.0.0.1", CONFIG_PORT)) {
+            Ok(s) => s,
+            Err(_) => return false,
+        };
+        if s.write_all(line).is_err() || s.write_all(b"\n").is_err() {
+            return false;
+        }
+        let _ = s.flush();
+        let mut ack = String::new();
+        let mut reader = BufReader::new(s);
+        let _ = reader.read_line(&mut ack);
+        true
+    }
 }

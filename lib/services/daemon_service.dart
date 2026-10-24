@@ -157,6 +157,9 @@ class DaemonService {
         // TOFU 信任列表（按 pk 持久化）失效要重新信任
         'landrop_on': LandropService.enabled,
         'landrop_pk': await _landropIdentityPk(),
+        // v1.2.20：托盘收文件需要 ServerHello 签名（secp256k1 sk），与 pk
+        // 同源于本机 prefs，同一信任级
+        'landrop_sk': await _landropIdentitySk(),
       };
       return _sendLine(jsonEncode(cfg));
     } catch (_) {
@@ -171,6 +174,18 @@ class DaemonService {
       final ld = LandropService.instance;
       await ld.ensureIdentity();
       return ld.identityPkB64;
+    } catch (_) {
+      return '';
+    }
+  }
+
+  /// LANDrop 身份私钥（v1.2.20：daemon 托盘收文件时 ServerHello 签名必需）。
+  /// 拿不到返回空串（托盘传输不激活，发现保活不受影响）。
+  static Future<String> _landropIdentitySk() async {
+    try {
+      final ld = LandropService.instance;
+      await ld.ensureIdentity();
+      return ld.identitySkB64;
     } catch (_) {
       return '';
     }

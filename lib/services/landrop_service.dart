@@ -55,6 +55,13 @@ class LandropService {
   String _identityPkB64 = '';
   String get identityPkB64 => _identityPkB64;
 
+  /// v1.2.20：身份私钥 base64（daemon 托盘收文件时 ServerHello 签名必需）。
+  /// 调用前需 ensureIdentity()。落盘处与 _identityPkB64 同信任级（本机 prefs）。
+  String get identitySkB64 {
+    if (_identitySk.isEmpty) return '';
+    return base64.encode(_identitySk);
+  }
+
   /// 身份私钥字节（握手签名用，仅进程内）
   Uint8List _identitySk = Uint8List(0);
   Uint8List get identitySkBytes => _identitySk;

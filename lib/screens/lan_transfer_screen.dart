@@ -814,13 +814,29 @@ class _LanTransferScreenState extends State<LanTransferScreen> {
     }
   }
 
-  /// 设备点击：有待发内容直接发，否则走选文件流程
-  Future<void> _onDeviceTap(LanPeer d) async {
-    if (_pendingText != null || _pendingFiles.isNotEmpty) {
-      await _sendPendingTo(d);
-    } else {
-      await _startSendFilesTo(d);
+  /// 会话卡点击分发（v1.2.20）：
+  /// - 有待发内容（系统分享直达）+ 设备在线 → 直接发送（LANDrop/微密/
+  ///   网页客户端统一走 _sendPendingTo，sendFile/sendText 内部按 peer.id 分流）
+  /// - 有待发内容但设备离线 → 提示无法直达
+  /// - 无待发内容 → 打开聊天页
+  Future<void> _onConvTileTap(_ConvItem item) async {
+    final hasPending = _pendingText != null || _pendingFiles.isNotEmpty;
+    if (!hasPending) {
+      _openChat(item);
+      return;
     }
+    final peer = item.peer;
+    if (peer == null) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+          content: Text('该设备当前离线，无法直接发送；可手动添加 IP 或等待其上线'),
+          backgroundColor: Colors.orange,
+          duration: const Duration(seconds: 4),
+        ));
+      }
+      return;
+    }
+    await _sendPendingTo(peer);
   }
 
   // ============ 网页客户端（WS 房间） ============
@@ -1279,7 +1295,10 @@ class _LanTransferScreenState extends State<LanTransferScreen> {
                 ),
             ],
           ),
-          onTap: () => _openChat(item),
+          // 有待发内容（系统分享直达）时，点设备卡=直接发送，与待发送卡文案
+          // 「点击下方设备即发送」一致（v1.2.20 修复：v1.2.2 聊天式改版后
+          // 这里变成了只打开聊天页，_onDeviceTap 成死代码，分享内容发不出）
+          onTap: () => _onConvTileTap(item),
         ),
       ),
     );
@@ -1829,46 +1848,6 @@ class _LanTransferScreenState extends State<LanTransferScreen> {
         '${t.hour.toString().padLeft(2, '0')}:${t.minute.toString().padLeft(2, '0')}';
     if (sameDay) return hm;
     return '${t.month}/${t.day} $hm';
-  }
-
-  Future<void> _startSendFilesTo(LanPeer peer) async {
-    if (!mounted) return;
-    final result = await FilePicker.platform.pickFiles(
-      type: FileType.any,
-      allowMultiple: true,
-    );
-    if (result == null || result.files.isEmpty || !mounted) return;
-    final files =
-        result.files.where((f) => f.path != null).map((f) => f.path!).toList();
-    if (files.isEmpty) return;
-    await _sendFilesTo(peer, files);
-  }
-
-  Future<void> _startSendTextTo(LanPeer peer) async {
-    final controller = TextEditingController();
-    if (!mounted) return;
-    final text = await showDialog<String>(
-      context: context,
-      builder: (ctx) => AlertDialog(
-        title: Text('发送文本给「${peer.name}」'),
-        content: TextField(
-          controller: controller,
-          maxLines: 6,
-          autofocus: true,
-          maxLength: 10000,
-          decoration: const InputDecoration(hintText: '输入要发送的文本内容'),
-        ),
-        actions: [
-          TextButton(
-              onPressed: () => Navigator.pop(ctx), child: const Text('取消')),
-          TextButton(
-              onPressed: () => Navigator.pop(ctx, controller.text),
-              child: const Text('发送')),
-        ],
-      ),
-    );
-    if (text == null || text.trim().isEmpty || !mounted) return;
-    await _sendTextTo(peer, text);
   }
 }
 
