@@ -35,10 +35,16 @@ class _ExcludeSettingsScreenState extends State<ExcludeSettingsScreen> {
   @override
   void dispose() {
     _inputCtrl.dispose();
-    // 离开页面：有过修改则重建索引（后台执行，不阻塞）
+    // 离开页面：有过修改则**强制全量重建**索引（用最新排除列表）。
+    // 不能走 prepareIndex——它会优先 loadIndex 加载带旧排除规则的旧落盘索引并
+    // 直接返回，导致「改了排除却搜不到」的假象（误以为默认项删不掉）。
+    // v1.2.22 修复：freeIndex 丢内存后直接 buildIndex 全量重扫。
     if (_dirty) {
       DiskIndexService.freeIndex()
-          .then((_) => DiskIndexService.prepareIndex())
+          .then((_) => DiskIndexService.buildIndex(
+                DiskIndexService.defaultRoots(),
+                persist: true,
+              ))
           .catchError((_) {});
     }
     super.dispose();
@@ -92,7 +98,8 @@ class _ExcludeSettingsScreenState extends State<ExcludeSettingsScreen> {
                   child: const Text(
                     '命中的文件夹和文件将被跳过、不扫描不索引（全盘搜索搜不到）。'
                     '支持通配符：* 匹配任意字符，? 匹配单个字符；不区分大小写，匹配完整路径。\n'
-                    '例：*\\temp\\*　*.tmp　*/android/data/*',
+                    '例：*\\temp\\*　*.tmp　*/android/data/*\n'
+                    '默认列表只是初始值，每条都可点 ✕ 删除，也可全部清空（清空=不排除任何文件夹）。',
                     style: TextStyle(fontSize: 13),
                   ),
                 ),

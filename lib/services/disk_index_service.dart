@@ -567,7 +567,8 @@ class DiskIndexService {
   /// 返回刷新后条数并落盘；负数为错误（-1 roots 无效 / -2 索引未建立 / -5 撞上限）
   static Future<int> refreshIndex({bool persist = true}) async {
     final roots = defaultRoots();
-    final n = await Isolate.run(() => _refreshSync(List<String>.of(roots)));
+    final excludes = await ExcludeService.load();
+    final n = await Isolate.run(() => _refreshSync(List<String>.of(roots), excludes));
     if (n >= 0) {
       _cachedCount = n;
       if (persist) await saveIndex();
@@ -632,25 +633,24 @@ class DiskIndexService {
     if (roots.isEmpty) return -2;
     final lib = RustCrypto.ensureLib();
 
-    // 下发排除列表（空列表=清除），index_build 遍历时生效
-    if (excludes.isNotEmpty) {
-      final setFn = lib.lookupFunction<
-          ffi.Int32 Function(
-              ffi.Pointer<ffi.Pointer<ffi.Char>>, ffi.Size),
-          int Function(ffi.Pointer<ffi.Pointer<ffi.Char>>, int)>(
-          'index_set_excludes');
-      final exPtrs = calloc<ffi.Pointer<ffi.Char>>(excludes.length);
+    // 下发排除列表（含空列表=清除旧排除），index_build 遍历时生效。
+    // 注意：必须无条件下发——旧代码仅在 isNotEmpty 时才发，导致清空列表时
+    // Rust 侧 INDEX_EXCLUDES 残留旧值，被排除的文件夹删不掉（v1.2.22 修复）
+    final setFn = lib.lookupFunction<
+        ffi.Int32 Function(ffi.Pointer<ffi.Pointer<ffi.Char>>, ffi.Size),
+        int Function(ffi.Pointer<ffi.Pointer<ffi.Char>>, int)>(
+        'index_set_excludes');
+    final exPtrs = calloc<ffi.Pointer<ffi.Char>>(excludes.length);
+    for (var i = 0; i < excludes.length; i++) {
+      exPtrs[i] = excludes[i].toNativeUtf8().cast<ffi.Char>();
+    }
+    try {
+      setFn(exPtrs, excludes.length);
+    } finally {
       for (var i = 0; i < excludes.length; i++) {
-        exPtrs[i] = excludes[i].toNativeUtf8().cast<ffi.Char>();
+        calloc.free(exPtrs[i]);
       }
-      try {
-        setFn(exPtrs, excludes.length);
-      } finally {
-        for (var i = 0; i < excludes.length; i++) {
-          calloc.free(exPtrs[i]);
-        }
-        calloc.free(exPtrs);
-      }
+      calloc.free(exPtrs);
     }
 
     final buildFn = lib.lookupFunction<
@@ -696,8 +696,27 @@ class DiskIndexService {
     }
   }
 
-  static int _refreshSync(List<String> roots) {
+  static int _refreshSync(List<String> roots, List<String> excludes) {
     final lib = RustCrypto.ensureLib();
+    // 增量刷新前先下发当前排除列表（空=清除），否则启动若只 loadIndex 没 buildIndex，
+    // Rust 侧 INDEX_EXCLUDES 为 None→空，增量刷新就不排除，被排除文件夹改动后
+    // 又会被刷回索引（v1.2.22 修复）
+    final setFn = lib.lookupFunction<
+        ffi.Int32 Function(ffi.Pointer<ffi.Pointer<ffi.Char>>, ffi.Size),
+        int Function(ffi.Pointer<ffi.Pointer<ffi.Char>>, int)>(
+        'index_set_excludes');
+    final exPtrs = calloc<ffi.Pointer<ffi.Char>>(excludes.length);
+    for (var i = 0; i < excludes.length; i++) {
+      exPtrs[i] = excludes[i].toNativeUtf8().cast<ffi.Char>();
+    }
+    try {
+      setFn(exPtrs, excludes.length);
+    } finally {
+      for (var i = 0; i < excludes.length; i++) {
+        calloc.free(exPtrs[i]);
+      }
+      calloc.free(exPtrs);
+    }
     final fn = lib.lookupFunction<
         ffi.Int64 Function(ffi.Pointer<ffi.Pointer<ffi.Char>>, ffi.Size),
         int Function(ffi.Pointer<ffi.Pointer<ffi.Char>>, int)>('index_refresh');

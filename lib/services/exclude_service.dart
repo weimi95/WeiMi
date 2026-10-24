@@ -39,13 +39,22 @@ class ExcludeService {
     ];
   }
 
-  /// 读取当前排除列表（内存缓存，未设置过返回平台默认）
+  /// 读取当前排除列表。
+  /// - 首次运行（从未保存过）：把平台默认列表**落盘为可编辑条目**，让默认项也能被
+  ///   用户逐条删除或整体清空——默认可以，但不能固化住不让删（v1.2.22 修复）
+  /// - 已保存过（含显式空列表）：原样返回；空列表 = 不排除任何文件夹
   static Future<List<String>> load() async {
     if (_cache != null) return List<String>.of(_cache!);
     try {
       final prefs = await SharedPreferences.getInstance();
       final list = prefs.getStringList(prefsKey);
-      _cache = (list == null || list.isEmpty) ? defaults() : List<String>.of(list);
+      if (list == null) {
+        // 首次：把默认落盘，之后就和用户手加的条目一样可删
+        _cache = List<String>.of(defaults());
+        await prefs.setStringList(prefsKey, _cache!);
+      } else {
+        _cache = List<String>.of(list);
+      }
     } catch (_) {
       _cache = defaults();
     }
