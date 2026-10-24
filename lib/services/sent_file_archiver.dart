@@ -88,9 +88,9 @@ class SentFileArchiver {
     try {
       final prefs = await SharedPreferences.getInstance();
       final dir = (prefs.getString(_receiveDirKey) ?? '').trim();
-      if (dir.isEmpty) return;
+      if (dir.isEmpty) return 0;
       final sentDir = Directory(p.join(dir, sentDirName));
-      if (!await sentDir.exists()) return;
+      if (!await sentDir.exists()) return 0;
       final deadline = DateTime.now().subtract(Duration(days: days));
       await for (final e in sentDir.list()) {
         if (e is! File) continue;

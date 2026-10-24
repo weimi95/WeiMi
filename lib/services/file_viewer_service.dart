@@ -20,7 +20,7 @@ class FileViewerService {
     try {
       final bytes = await File(path).readAsBytes();
       final codec = await ui.instantiateImageCodec(bytes);
-      await codec.dispose();
+      codec.dispose(); // dart:ui Codec.dispose 返回 void，不能 await
       return true;
     } catch (_) {
       return false;
