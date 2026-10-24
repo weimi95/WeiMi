@@ -53,25 +53,33 @@ class FilterMeta {
   static bool refinable(FileCategory c) => refinableExts.containsKey(c);
 }
 
-/// 筛选面板：单选分类 + 可细化到具体格式（多选）。
-/// 用法：final r = await FileFilterSheet.show(context, cat, exts);
-/// 返回 null = 取消；否则 (cat, exts) 为新筛选（cat 为 null 表示全部）。
+/// 筛选面板：单选分类 + 可细化到具体格式（多选）+ 排序方式（v1.2.25 并入，
+/// 老板拍板方案 A：筛选+排序同族语义，一个入口，AppBar 不再放独立排序按钮）。
+/// 用法：final r = await FileFilterSheet.show(context, cat, exts, sortMode, sortAsc);
+/// 返回 null = 取消；否则 (cat, exts, sortMode, sortAsc)。
+/// cat 为 null 表示全部；sortMode: smart/name/size/type/time。
 class FileFilterSheet extends StatefulWidget {
   const FileFilterSheet({
     super.key,
     required this.initialCat,
     required this.initialExts,
+    this.initialSortMode = 'smart',
+    this.initialSortAsc = true,
   });
 
   final FileCategory? initialCat;
   final Set<String> initialExts;
+  final String initialSortMode;
+  final bool initialSortAsc;
 
-  static Future<(FileCategory?, Set<String>)?> show(
+  static Future<(FileCategory?, Set<String>, String, bool)?> show(
     BuildContext context,
     FileCategory? cat,
-    Set<String> exts,
-  ) {
-    return showModalBottomSheet<(FileCategory?, Set<String>)>(
+    Set<String> exts, [
+    String sortMode = 'smart',
+    bool sortAsc = true,
+  ]) {
+    return showModalBottomSheet<(FileCategory?, Set<String>, String, bool)>(
       context: context,
       isScrollControlled: true,
       shape: const RoundedRectangleBorder(
@@ -80,6 +88,8 @@ class FileFilterSheet extends StatefulWidget {
       builder: (_) => FileFilterSheet(
         initialCat: cat,
         initialExts: Set.of(exts),
+        initialSortMode: sortMode,
+        initialSortAsc: sortAsc,
       ),
     );
   }
@@ -91,12 +101,25 @@ class FileFilterSheet extends StatefulWidget {
 class _FileFilterSheetState extends State<FileFilterSheet> {
   FileCategory? _cat;
   late Set<String> _exts;
+  late String _sortMode;
+  late bool _sortAsc;
+
+  /// 排序选项（与排序语义一致：智能=常用格式优先，升降只影响同权重内名称）
+  static const List<(String, String)> _sortOptions = [
+    ('smart', '智能排序（常用格式优先）'),
+    ('name', '按名称'),
+    ('size', '按大小'),
+    ('type', '按类型'),
+    ('time', '按修改时间'),
+  ];
 
   @override
   void initState() {
     super.initState();
     _cat = widget.initialCat;
     _exts = Set.of(widget.initialExts);
+    _sortMode = widget.initialSortMode;
+    _sortAsc = widget.initialSortAsc;
   }
 
   void _pick(FileCategory? c) {
@@ -130,11 +153,12 @@ class _FileFilterSheetState extends State<FileFilterSheet> {
                 const SizedBox(width: 16),
                 const Icon(Icons.filter_list, size: 20),
                 const SizedBox(width: 8),
-                const Text('按类型筛选',
+                const Text('筛选与排序',
                     style: TextStyle(fontWeight: FontWeight.w600)),
                 const Spacer(),
                 TextButton(
-                  onPressed: () => Navigator.pop(context, (null, <String>{})),
+                  onPressed: () =>
+                      Navigator.pop(context, (null, <String>{}, _sortMode, _sortAsc)),
                   child: const Text('清除'),
                 ),
                 const SizedBox(width: 4),
@@ -194,6 +218,49 @@ class _FileFilterSheetState extends State<FileFilterSheet> {
                         ),
                       ),
                     ],
+                    // 排序方式（v1.2.25 并入）：智能=常用格式优先，
+                    // 升降开关对智能排序只影响同权重内的名称
+                    const Divider(height: 1),
+                    Padding(
+                      padding: const EdgeInsets.fromLTRB(16, 10, 16, 0),
+                      child: Row(
+                        children: [
+                          const Icon(Icons.sort, size: 18),
+                          const SizedBox(width: 8),
+                          const Text('排序方式',
+                              style: TextStyle(
+                                  fontWeight: FontWeight.w600, fontSize: 13)),
+                          const Spacer(),
+                          SizedBox(
+                            height: 32,
+                            child: SegmentedButton<bool>(
+                              showSelectedIcon: false,
+                              segments: const [
+                                ButtonSegment(
+                                    value: true, label: Text('升序',
+                                        style: TextStyle(fontSize: 12))),
+                                ButtonSegment(
+                                    value: false, label: Text('降序',
+                                        style: TextStyle(fontSize: 12))),
+                              ],
+                              selected: {_sortAsc},
+                              onSelectionChanged: (s) =>
+                                  setState(() => _sortAsc = s.first),
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                    for (final opt in _sortOptions)
+                      ListTile(
+                        dense: true,
+                        visualDensity: VisualDensity.compact,
+                        title: Text(opt.$2, style: const TextStyle(fontSize: 14)),
+                        trailing: _sortMode == opt.$1
+                            ? const Icon(Icons.check, color: Colors.blue)
+                            : null,
+                        onTap: () => setState(() => _sortMode = opt.$1),
+                      ),
                     const SizedBox(height: 8),
                   ],
                 ),
@@ -203,7 +270,8 @@ class _FileFilterSheetState extends State<FileFilterSheet> {
             Padding(
               padding: const EdgeInsets.fromLTRB(16, 8, 16, 0),
               child: FilledButton(
-                onPressed: () => Navigator.pop(context, (_cat, Set.of(_exts))),
+                onPressed: () => Navigator.pop(
+                    context, (_cat, Set.of(_exts), _sortMode, _sortAsc)),
                 child: const Text('完成'),
               ),
             ),

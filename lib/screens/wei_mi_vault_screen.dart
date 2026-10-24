@@ -155,12 +155,19 @@ class WeiMiVaultScreenState extends State<WeiMiVaultScreen> {
   }
 
   Future<void> _showFilterSheet() async {
+    // v1.2.25：筛选+排序并入同一面板（老板拍板方案 A），完成一并生效
     final r = await FileFilterSheet.show(
-        context, _filterCat, _filterExts);
+        context, _filterCat, _filterExts, _sortMode, _sortAsc);
     if (r == null || !mounted) return;
     setState(() {
       _filterCat = r.$1;
       _filterExts = r.$2;
+      if (r.$3 != _sortMode || r.$4 != _sortAsc) {
+        _sortMode = r.$3;
+        _sortAsc = r.$4;
+        unawaited(SettingStore.set('weimi_file_sort_mode', _sortMode));
+        unawaited(SettingStore.set('weimi_file_sort_asc', _sortAsc));
+      }
     });
   }
 
@@ -770,54 +777,11 @@ class WeiMiVaultScreenState extends State<WeiMiVaultScreen> {
 
   // ============ 排序（浏览视图，文件夹优先，状态持久化） ============
   // v1.2.25：默认 smart——常见格式（图片/视频/音频/文档…）排前，.dat 哈希
-  // 等无名杂类垫底；旧默认 name 会把哈希文件按字母序顶到最前（老板报障）
+  // 等无名杂类垫底；旧默认 name 会把哈希文件按字母序顶到最前（老板报障）。
+  // 排序入口并入筛选面板（FileFilterSheet「筛选与排序」，老板拍板方案 A），
+  // AppBar 独立排序按钮已删。
   String _sortMode = 'smart'; // smart / name / size / type / time
   bool _sortAsc = true;
-
-  Future<void> _showSortSheet() async {
-    final r = await showModalBottomSheet<(String, bool)>(
-      context: context,
-      builder: (ctx) => SafeArea(
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            _sortRadio(ctx, 'smart', '智能排序（常用格式优先）'),
-            _sortRadio(ctx, 'name', '名称'),
-            _sortRadio(ctx, 'size', '大小'),
-            _sortRadio(ctx, 'type', '类型'),
-            _sortRadio(ctx, 'time', '修改时间'),
-            const Divider(height: 1),
-            SwitchListTile(
-              dense: true,
-              title: Text(_sortAsc ? '升序' : '降序'),
-              secondary: Icon(
-                  _sortAsc ? Icons.arrow_upward : Icons.arrow_downward),
-              value: _sortAsc,
-              onChanged: (v) => Navigator.pop(ctx, (_sortMode, v)),
-            ),
-          ],
-        ),
-      ),
-    );
-    if (r == null || !mounted) return;
-    if (r.$1 == _sortMode && r.$2 == _sortAsc) return;
-    setState(() {
-      _sortMode = r.$1;
-      _sortAsc = r.$2;
-    });
-    await SettingStore.set('weimi_file_sort_mode', _sortMode);
-    await SettingStore.set('weimi_file_sort_asc', _sortAsc);
-  }
-
-  Widget _sortRadio(BuildContext ctx, String mode, String label) {
-    return RadioListTile<String>(
-      dense: true,
-      value: mode,
-      groupValue: _sortMode,
-      onChanged: (v) => Navigator.pop(ctx, (v ?? mode, _sortAsc)),
-      title: Text(label),
-    );
-  }
 
   // ============ 桌面快捷键（F2 重命名 / F5 刷新；Ctrl+A、Delete 已有） ============
 
@@ -1791,11 +1755,6 @@ class WeiMiVaultScreenState extends State<WeiMiVaultScreen> {
                       IconButton(
                           icon: const Icon(Icons.arrow_forward),
                           onPressed: _goForward),
-                    IconButton(
-                      icon: const Icon(Icons.sort),
-                      tooltip: '排序',
-                      onPressed: _showSortSheet,
-                    ),
                   ],
                 )),
       body: _loading
