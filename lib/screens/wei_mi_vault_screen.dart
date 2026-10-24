@@ -177,8 +177,9 @@ class WeiMiVaultScreenState extends State<WeiMiVaultScreen> {
     }
     // 有输入即收起历史面板
     if (_showSearchHistory) setState(() => _showSearchHistory = false);
+    // v1.2.25：默认 300→120ms——索引查询本身毫秒级，Everything 式跟手
     final delayMs =
-        int.tryParse(SettingStore.get<String>('qs_search_delay', '300')) ?? 300;
+        int.tryParse(SettingStore.get<String>('qs_search_delay', '120')) ?? 120;
     _fileDebounce = Timer(Duration(milliseconds: delayMs), _runFileGlobalSearch);
   }
 
@@ -312,8 +313,10 @@ class WeiMiVaultScreenState extends State<WeiMiVaultScreen> {
           }
         }());
       }
-      setState(() {
-        _globalResults = paths.map((path) {
+      // v1.2.25：stat 采集移后台 isolate——主线程不再被同步 stat 循环
+      // 冻结（结果上千条时 UI 卡数秒，老板误以为假死）
+      final items = await Isolate.run(() {
+        return paths.map((path) {
           final name = p.basename(path);
           var modified = DateTime.fromMillisecondsSinceEpoch(0);
           var size = 0;
@@ -332,6 +335,9 @@ class WeiMiVaultScreenState extends State<WeiMiVaultScreen> {
             modified: modified,
           );
         }).toList();
+      });
+      setState(() {
+        _globalResults = items;
         _globalSearching = false;
       });
     } catch (_) {
@@ -349,7 +355,7 @@ class WeiMiVaultScreenState extends State<WeiMiVaultScreen> {
   @override
   void initState() {
     super.initState();
-    _sortMode = SettingStore.get<String>('weimi_file_sort_mode', 'name');
+    _sortMode = SettingStore.get<String>('weimi_file_sort_mode', 'smart');
     _sortAsc = SettingStore.get<bool>('weimi_file_sort_asc', true);
     // 浮窗「打开主界面 / 去主界面展示全部结果」带过来的搜索词：
     // 写入搜索框并立即触发全盘搜索（不要像新开窗口一样丢掉关键词）。
@@ -763,7 +769,9 @@ class WeiMiVaultScreenState extends State<WeiMiVaultScreen> {
   }
 
   // ============ 排序（浏览视图，文件夹优先，状态持久化） ============
-  String _sortMode = 'name'; // name / size / type / time
+  // v1.2.25：默认 smart——常见格式（图片/视频/音频/文档…）排前，.dat 哈希
+  // 等无名杂类垫底；旧默认 name 会把哈希文件按字母序顶到最前（老板报障）
+  String _sortMode = 'smart'; // smart / name / size / type / time
   bool _sortAsc = true;
 
   Future<void> _showSortSheet() async {
@@ -773,6 +781,7 @@ class WeiMiVaultScreenState extends State<WeiMiVaultScreen> {
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
+            _sortRadio(ctx, 'smart', '智能排序（常用格式优先）'),
             _sortRadio(ctx, 'name', '名称'),
             _sortRadio(ctx, 'size', '大小'),
             _sortRadio(ctx, 'type', '类型'),
@@ -1831,6 +1840,8 @@ class WeiMiVaultScreenState extends State<WeiMiVaultScreen> {
                     // 当前类型筛选提示（点击 × 清除）
                     if (!_selecting && _filterCat != null)
                       _buildActiveFilterChip(),
+                    // 重建进度条幅（v1.2.25）：重建期间旧索引照常可搜，条幅只让等待看得见
+                    if (!_selecting) _buildRebuildBanner(),
                     Expanded(
                       child: _globalResults != null
                           ? _buildFileList()
@@ -2449,6 +2460,15 @@ class WeiMiVaultScreenState extends State<WeiMiVaultScreen> {
     final sorted = [...src];
     sorted.sort((a, b) {
       if (a.isDirectory != b.isDirectory) return a.isDirectory ? -1 : 1;
+      final invert = _sortAsc ? 1 : -1;
+      // 智能排序：类型权重恒升序（升降开关只影响同权重内的名称）
+      if (_sortMode == 'smart') {
+        final ra = FileThumbs.smartRank(a.name);
+        final rb = FileThumbs.smartRank(b.name);
+        if (ra != rb) return ra.compareTo(rb);
+        return invert *
+            a.name.toLowerCase().compareTo(b.name.toLowerCase());
+      }
       int c;
       switch (_sortMode) {
         case 'size':
@@ -2469,9 +2489,43 @@ class WeiMiVaultScreenState extends State<WeiMiVaultScreen> {
     return sorted;
   }
 
+  /// 重建进度条幅（v1.2.25）：全量重建/增量刷新进行中显示「已扫 XX 万条」。
+  /// 期间旧索引照常可搜（Everything 式），条幅只是让等待「看得见」，不拦搜索。
+  Widget _buildRebuildBanner() {
+    return ValueListenableBuilder<int>(
+      valueListenable: DiskIndexService.scanProgressNotifier,
+      builder: (context, n, _) {
+        if (n < 0) return const SizedBox.shrink();
+        final s = n >= 10000
+            ? '${(n / 10000).toStringAsFixed(n >= 1000000 ? 0 : 1)} 万条'
+            : '$n 条';
+        return Container(
+          width: double.infinity,
+          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+          color: Colors.orange.withValues(alpha: 0.12),
+          child: Row(
+            children: [
+              const SizedBox(
+                width: 14,
+                height: 14,
+                child: CircularProgressIndicator(strokeWidth: 2),
+              ),
+              const SizedBox(width: 8),
+              Expanded(
+                child: Text(
+                  '正在重建索引，已扫 $s（期间旧索引结果仍可用）',
+                  style: TextStyle(fontSize: 12.5, color: Colors.orange.shade800),
+                ),
+              ),
+            ],
+          ),
+        );
+      },
+    );
+  }
+
   Widget _buildFileList() {
-    final items = _browseItems;
-    if (items.isEmpty && _fileQuery.isNotEmpty) {
+    final items = _browseItems;    if (items.isEmpty && _fileQuery.isNotEmpty) {
       return Center(
         child: Text(
             _indexBuilding

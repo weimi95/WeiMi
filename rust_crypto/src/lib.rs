@@ -1040,6 +1040,13 @@ static INDEX_EXCLUDES: std::sync::Mutex<Option<Vec<String>>> = std::sync::Mutex:
 /// 最近一次 scan 是否撞上限被截断（v1.2.21：截断时 index_build 返回 -5 告知上层）
 static INDEX_TRUNCATED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
+/// 扫描进度（v1.2.25）：-1 = 空闲，>=0 = 本次扫描/刷新已收条数。
+/// scan_roots 在 worker flush 时递增，refresh_incremental 按访问目录数递增；
+/// index_build / index_refresh 返回前统一置回 -1。Dart 侧经 index_progress 轮询
+/// 展示「已扫 XX 万条」，根治全量重建时 UI 无反馈的假死错觉。
+static INDEX_SCAN_PROGRESS: std::sync::atomic::AtomicI64 =
+    std::sync::atomic::AtomicI64::new(-1);
+
 /// 无依赖通配符匹配：`*` 匹配任意字符（含路径分隔符），`?` 匹配单个字符
 pub(crate) fn wildcard_match(pat: &[u8], text: &[u8]) -> bool {
     let (mut pi, mut ti) = (0usize, 0usize);
@@ -1124,6 +1131,8 @@ pub(crate) fn norm_dir_key(p: &std::path::Path) -> String {
 /// INDEX_TRUNCATED，index_build 据此返回 -5 让上层知晓而非静默丢数据。
 pub(crate) fn scan_roots(roots: &[std::path::PathBuf]) -> (Vec<String>, HashMap<String, i64>) {
     let max_entries: usize = 5_000_000;
+    // 进度归零（index_build 结束时统一置回 -1 空闲）
+    INDEX_SCAN_PROGRESS.store(0, std::sync::atomic::Ordering::Relaxed);
     let queue: Arc<std::sync::Mutex<Vec<std::path::PathBuf>>> =
         Arc::new(std::sync::Mutex::new(roots.to_vec()));
     let paths: Arc<std::sync::Mutex<Vec<String>>> = Arc::new(std::sync::Mutex::new(Vec::new()));
@@ -1218,6 +1227,8 @@ pub(crate) fn scan_roots(roots: &[std::path::PathBuf]) -> (Vec<String>, HashMap<
                                     let n = local.len();
                                     lock_or_recover(&paths).extend(local.drain(..));
                                     total.fetch_add(n, std::sync::atomic::Ordering::Relaxed);
+                                    INDEX_SCAN_PROGRESS
+                                        .fetch_add(n as i64, std::sync::atomic::Ordering::Relaxed);
                                 }
                             }
                         }
@@ -1228,7 +1239,9 @@ pub(crate) fn scan_roots(roots: &[std::path::PathBuf]) -> (Vec<String>, HashMap<
             if !local.is_empty()
                 && total.load(std::sync::atomic::Ordering::Relaxed) < max_entries
             {
+                let n = local.len();
                 lock_or_recover(&paths).extend(local);
+                INDEX_SCAN_PROGRESS.fetch_add(n as i64, std::sync::atomic::Ordering::Relaxed);
             }
             {
                 let mut dm = lock_or_recover(&dir_mtimes);
@@ -1299,6 +1312,8 @@ pub extern "C" fn index_build(roots_ptr: *const *const c_char, num_roots: usize)
     let root_strs: Vec<String> = roots.iter().map(|p| p.to_string_lossy().to_string()).collect();
     *lock_or_recover(&INDEX_DIR_MTIMES) = Some(final_dirs);
     *lock_or_recover(&INDEX_ROOTS) = Some(root_strs);
+    // 扫描结束：进度回空闲（截断 -5 路径同样生效）
+    INDEX_SCAN_PROGRESS.store(-1, std::sync::atomic::Ordering::Relaxed);
     if INDEX_TRUNCATED.load(std::sync::atomic::Ordering::Relaxed) {
         // 撞上限截断：返回 -5（上层记日志/提示），条数放 _COUNT 已由 replace 生效
         return -5;
@@ -1315,6 +1330,13 @@ pub extern "C" fn index_count() -> i64 {
         None => -1,
     }
 })
+}
+
+/// 扫描进度（v1.2.25）：-1 空闲，>=0 本次全量重建/增量刷新已收条数。
+/// Dart 侧 UI 重建期间 300ms 轮询展示「已扫 XX 万条」。
+#[no_mangle]
+pub extern "C" fn index_progress() -> i64 {
+    INDEX_SCAN_PROGRESS.load(std::sync::atomic::Ordering::Relaxed)
 }
 
 /// 释放全盘索引内存（全部置回 None：路径 Vec + 目录 MTIMES 表 + 根列表）。
@@ -1717,6 +1739,8 @@ pub extern "C" fn index_refresh(
         }
     }
     let truncated = refresh_incremental(&roots);
+    // 刷新结束：进度回空闲
+    INDEX_SCAN_PROGRESS.store(-1, std::sync::atomic::Ordering::Relaxed);
     let g = lock_or_recover(&INDEX_PATHS);
     match g.as_ref() {
         Some(v) => {
@@ -1748,10 +1772,13 @@ pub(crate) fn refresh_incremental(roots: &[std::path::PathBuf]) -> bool {
     let mut rescanned: std::collections::HashMap<String, Vec<String>> =
         std::collections::HashMap::new();
     let mut gone_prefixes: Vec<String> = Vec::new();
+    // 进度归零（index_refresh 返回前统一置回 -1）：按访问目录数 + 新文件数递增
+    INDEX_SCAN_PROGRESS.store(0, std::sync::atomic::Ordering::Relaxed);
     for r in roots {
         queue.push(r.clone());
     }
     while let Some(dir) = queue.pop() {
+        INDEX_SCAN_PROGRESS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let key = norm_dir_key(&dir);
         let cur = dir_mtime_ns(&dir);
         let prev = {
@@ -1811,6 +1838,12 @@ pub(crate) fn refresh_incremental(roots: &[std::path::PathBuf]) -> bool {
                 if let Some(m) = rmt.as_mut() {
                     m.insert(key.clone(), cur);
                 }
+            }
+            if !new_files.is_empty() {
+                INDEX_SCAN_PROGRESS.fetch_add(
+                    new_files.len() as i64,
+                    std::sync::atomic::Ordering::Relaxed,
+                );
             }
             rescanned.insert(key.clone(), new_files);
             // 消失的直接子目录：旧快照里记录过、本次 read_dir 已看不到——

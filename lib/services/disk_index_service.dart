@@ -30,6 +30,37 @@ class DiskIndexService {
   static const Duration _persistMaxAge = Duration(minutes: 30);
   static bool _building = false; // 防重入：全量构建进行中时不再叠加
 
+  /// 扫描进度（v1.2.25）：-1 = 空闲，>=0 = 本次重建/刷新已收条数。
+  /// buildIndex/refreshIndex 进行期间由 300ms 轮询更新，UI 监听展示
+  /// 「已扫 XX 万条」——根治全量重建时界面无反馈的假死错觉。
+  static final ValueNotifier<int> scanProgressNotifier = ValueNotifier(-1);
+  static Timer? _progressTimer;
+  static void _startProgressPoll() {
+    _progressTimer?.cancel();
+    _progressTimer =
+        Timer.periodic(const Duration(milliseconds: 300), (_) {
+      scanProgressNotifier.value = _progressSync();
+    });
+  }
+
+  static void _stopProgressPoll() {
+    _progressTimer?.cancel();
+    _progressTimer = null;
+    scanProgressNotifier.value = -1;
+  }
+
+  /// 读 Rust 全局扫描进度（FFI，读原子，极轻，可直接在 UI 线程调）
+  static int _progressSync() {
+    try {
+      final lib = RustCrypto.ensureLib();
+      final fn = lib
+          .lookupFunction<ffi.Int64 Function(), int Function()>('index_progress');
+      return fn();
+    } catch (_) {
+      return -1;
+    }
+  }
+
   /// 是否把移动设备（U盘/移动硬盘，DRIVE_REMOVABLE）纳入索引（仅 Windows 有意义）。
   /// 注意：Isolate.run 出去的 isolate 不继承静态字段，跨 isolate 一律传 roots 值。
   static bool? _includeRemovable;
@@ -518,6 +549,7 @@ class DiskIndexService {
       {bool persist = true}) async {
     if (_building) return _cachedCount ?? 0;
     _building = true;
+    _startProgressPoll();
     try {
       final excludes = await ExcludeService.load();
       final n =
@@ -531,6 +563,7 @@ class DiskIndexService {
       }
       return n;
     } finally {
+      _stopProgressPoll();
       _building = false;
     }
   }
@@ -568,7 +601,14 @@ class DiskIndexService {
   static Future<int> refreshIndex({bool persist = true}) async {
     final roots = defaultRoots();
     final excludes = await ExcludeService.load();
-    final n = await Isolate.run(() => _refreshSync(List<String>.of(roots), excludes));
+    _startProgressPoll();
+    int n;
+    try {
+      n = await Isolate.run(
+          () => _refreshSync(List<String>.of(roots), excludes));
+    } finally {
+      _stopProgressPoll();
+    }
     if (n >= 0) {
       _cachedCount = n;
       if (persist) await saveIndex();
@@ -749,7 +789,16 @@ class DiskIndexService {
   /// 结果按用户排除列表兜底过滤（覆盖从旧落盘索引加载、排除规则后改的场景）
   static Future<List<String>> search(String query, {int limit = 300}) async {
     var q = query.trim();
-    if (q.isEmpty || !isBuilt) return const [];
+    // v1.2.25：收托盘 freeIndex（省内存）后首次搜索——先把落盘索引恢复回
+    // 内存（1~2 秒一次性成本）再查，不再空转一轮等自愈；全量重建进行中
+    // 不并发加载（重建完成时原子换表，期间旧表照常可搜）
+    if (q.isEmpty) return const [];
+    if (!isBuilt && !_building && await hasSavedIndex()) {
+      try {
+        await loadIndex();
+      } catch (_) {}
+    }
+    if (!isBuilt) return const [];
     // size:/dm:/dc: 需要 stat 文件元数据，设置开关默认关闭（关闭时剔除这些条件）
     final statOn = SettingStore.get<bool>('search_stat_filters', false);
     if (!statOn) {
@@ -765,6 +814,9 @@ class DiskIndexService {
     // 或旧版落盘 0 条空索引被当就绪。核对 Rust 真实条数，不符则
     // 加载/重建后重搜一次，避免「文件明明存在却搜不到」。
     if (res.isEmpty) {
+      // v1.2.25：全量重建进行中不再并发 loadIndex/buildIndex 搅局——
+      // 重建完成时新表原子替换，期间旧表照常可搜（本函数开头已恢复）
+      if (_building) return res;
       try {
         final realCount = await count();
         if (realCount <= 0) {

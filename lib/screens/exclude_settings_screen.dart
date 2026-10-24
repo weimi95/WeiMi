@@ -38,14 +38,14 @@ class _ExcludeSettingsScreenState extends State<ExcludeSettingsScreen> {
     // 离开页面：有过修改则**强制全量重建**索引（用最新排除列表）。
     // 不能走 prepareIndex——它会优先 loadIndex 加载带旧排除规则的旧落盘索引并
     // 直接返回，导致「改了排除却搜不到」的假象（误以为默认项删不掉）。
-    // v1.2.22 修复：freeIndex 丢内存后直接 buildIndex 全量重扫。
+    // v1.2.25：不再 freeIndex——Rust index_build 本就不清旧表（扫描在本地
+    // Vec 完成后原子写回），重建期间旧索引照常可搜（Everything 同款体验）。
+    // 旧版先 freeIndex 清表，全量重扫几分钟内索引真空，搜索恒 0 结果干等。
     if (_dirty) {
-      DiskIndexService.freeIndex()
-          .then((_) => DiskIndexService.buildIndex(
-                DiskIndexService.defaultRoots(),
-                persist: true,
-              ))
-          .catchError((_) {});
+      DiskIndexService.buildIndex(
+        DiskIndexService.defaultRoots(),
+        persist: true,
+      ).catchError((_) {});
     }
     super.dispose();
   }
@@ -70,6 +70,32 @@ class _ExcludeSettingsScreenState extends State<ExcludeSettingsScreen> {
   }
 
   Future<void> _removeAt(int i) async {
+    // v1.2.25：删到空 = 清空排除——系统目录将全部纳入索引，返回时全量重建
+    // 耗时数分钟（v1.2.24 老板实测被误认为假死）。删除前先确认。
+    if (_patterns.length == 1) {
+      final ok = await showDialog<bool>(
+        context: context,
+        builder: (ctx) => AlertDialog(
+          title: const Text('清空排除列表？'),
+          content: const Text(
+            '清空后所有文件夹（含系统目录）都将纳入全盘索引，返回上一页时'
+            '需要全量重建（约 1~3 分钟）。重建期间搜索不受影响，仍用旧索引结果。',
+            style: TextStyle(fontSize: 13.5),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(ctx, false),
+              child: const Text('取消'),
+            ),
+            FilledButton(
+              onPressed: () => Navigator.pop(ctx, true),
+              child: const Text('清空'),
+            ),
+          ],
+        ),
+      );
+      if (ok != true) return;
+    }
     setState(() => _patterns.removeAt(i));
     await _persist();
   }

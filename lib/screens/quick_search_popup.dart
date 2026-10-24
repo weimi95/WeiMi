@@ -430,7 +430,7 @@ class _QuickSearchPopupState extends State<QuickSearchPopup> {
   void _onQueryChanged() {
     _debounce?.cancel();
     final delayMs =
-        int.tryParse(SettingStore.get<String>('qs_search_delay', '300')) ?? 300;
+        int.tryParse(SettingStore.get<String>('qs_search_delay', '120')) ?? 120;
     _debounce = Timer(Duration(milliseconds: delayMs), _runSearch);
     setState(() {});
     _syncWindowSize();
@@ -463,8 +463,18 @@ class _QuickSearchPopupState extends State<QuickSearchPopup> {
         SearchOpts.load().apply(q),
         limit: limit);
     if (!mounted) return;
+    // v1.2.25：智能排序——常见格式（图片/视频/音频/文档…）排前，
+    // .dat 哈希等无名杂类垫底；同权重按名称
+    final sorted = [...paths]..sort((a, b) {
+      final na = p.basename(a).toLowerCase();
+      final nb = p.basename(b).toLowerCase();
+      final ra = FileThumbs.smartRank(na);
+      final rb = FileThumbs.smartRank(nb);
+      if (ra != rb) return ra.compareTo(rb);
+      return na.compareTo(nb);
+    });
     setState(() {
-      _hits = paths.map(_Hit.new).toList();
+      _hits = sorted.map(_Hit.new).toList();
       _selected = _hits.isEmpty ? -1 : 0;
       _page = 0;
       _searching = false;
@@ -706,6 +716,39 @@ class _QuickSearchPopupState extends State<QuickSearchPopup> {
                   ),
                 ],
               ),
+            ),
+            // 重建进度细条（v1.2.25）：全量重建期间旧索引照常可搜，细条只让等待看得见
+            ValueListenableBuilder<int>(
+              valueListenable: DiskIndexService.scanProgressNotifier,
+              builder: (context, n, _) {
+                if (n < 0) return const SizedBox.shrink();
+                final s = n >= 10000
+                    ? '${(n / 10000).toStringAsFixed(n >= 1000000 ? 0 : 1)} 万条'
+                    : '$n 条';
+                return Container(
+                  width: double.infinity,
+                  padding:
+                      const EdgeInsets.symmetric(horizontal: 14, vertical: 4),
+                  color: Colors.orange.withValues(alpha: 0.12),
+                  child: Row(
+                    children: [
+                      const SizedBox(
+                        width: 12,
+                        height: 12,
+                        child: CircularProgressIndicator(strokeWidth: 2),
+                      ),
+                      const SizedBox(width: 8),
+                      Expanded(
+                        child: Text(
+                          '正在重建索引，已扫 $s（不影响当前搜索）',
+                          style: TextStyle(
+                              fontSize: 11.5, color: Colors.orange.shade800),
+                        ),
+                      ),
+                    ],
+                  ),
+                );
+              },
             ),
             // 主体：搜索视图（历史/结果）或常用软件/网址网格（空态）
             Expanded(
