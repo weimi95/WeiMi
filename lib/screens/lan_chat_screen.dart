@@ -9,6 +9,7 @@ import 'package:file_picker/file_picker.dart';
 import 'package:desktop_drop/desktop_drop.dart';
 import 'package:cross_file/cross_file.dart';
 import 'package:path/path.dart' as p;
+import 'package:path_provider/path_provider.dart';
 import '../framework/setting_store.dart';
 import '../services/file_viewer_service.dart';
 import '../services/lan_transfer_service.dart';

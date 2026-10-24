@@ -1276,8 +1276,7 @@ class _LandropSession {
               ._handleFileSendRequest(this, files);
           break;
         case 'text_send':
-          await LandropService.instance._handleTextSend(
-              this, (data['text'] as String?) ?? '');
+          await _handleTextSend(this, (data['text'] as String?) ?? '');
           break;
         default:
           // ack / 未知：回 ack:false（LANDrop 同行为）

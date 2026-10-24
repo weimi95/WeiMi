@@ -21,6 +21,15 @@ import 'vault_service.dart';
 ///   关窗 = UI 进程直接退出（Flutter 引擎内存归零）；UI 运行期间守护进程让出端口。
 /// - 自托管模式（守护进程缺失/被关）：维持 v1.0.37 单进程方案——关窗收托盘，
 ///   进程常驻（收托盘时释放索引+图片缓存瘦身）。
+/// daemon 待确认轮询定时器（v1.2.21）：UI 运行期间 daemon 收到的未信任请求
+/// 挂在它的 pending 表里，UI 必须持续拉取才能弹确认框——原来只在 daemon
+/// 模式启动时拉一次，UI 已开着时新到的请求没人拉 → 30s 超时拒收（老板
+/// 实测：手机系统分享选电脑端只弹气球不弹确认框）。_checkDaemonPending
+/// 是顶层函数，这两个状态放文件级私有。
+Timer? _pendingTimer;
+/// 正在弹/已弹过的 token（防止轮询重复弹同一个请求）
+final Set<String> _confirmingTokens = <String>{};
+
 class TrayService {
   TrayService._();
   static final TrayService instance = TrayService._();
@@ -29,14 +38,6 @@ class TrayService {
   bool _lean = false;
   bool _daemonMode = false; // 守护进程接管托盘+飞传
   final SystemTray _tray = SystemTray();
-
-  /// daemon 待确认轮询定时器（v1.2.21）：UI 运行期间 daemon 收到的未信任
-  /// 请求挂在它的 pending 表里，UI 必须持续拉取才能弹确认框——原来只在
-  /// daemon 模式启动时拉一次，UI 已开着时新到的请求没人拉 → 30s 超时拒收
-  /// （老板实测：手机系统分享选电脑端只弹气球不弹确认框）。
-  Timer? _pendingTimer;
-  /// 正在弹/已弹过的 token（防止轮询重复弹同一个请求）
-  final Set<String> _confirmingTokens = <String>{};
 
   /// 是否处于守护进程模式（诊断/设置页展示用）。
   bool get daemonMode => _daemonMode;
@@ -144,8 +145,7 @@ class TrayService {
         _pendingTimer?.cancel();
         _pendingTimer = Timer.periodic(
             const Duration(milliseconds: 1500), (_) => _checkDaemonPending());
-      }
-    }
+      }    }
 
     // 全局接收确认：无论飞传页是否打开，非信任设备发来均弹窗提示（收托盘时也弹）。
     // 必须在 applyDiscoverSetting 启动 HTTP 服务**之前**挂上——否则启动竞态期内
