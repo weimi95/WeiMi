@@ -941,6 +941,77 @@ mod tests {
         decrypted.truncate(decrypted_len);
         assert_eq!(decrypted, data);
     }
+
+    /// v1.2.21 真增量刷新：深层新建/删除/删子树/根层新建/无变化不误删。
+    /// 单函数顺序执行（INDEX_PATHS 是进程级全局，避免并行测试互踩）。
+    #[test]
+    fn test_index_refresh_incremental() {
+        fn idx_contains(name: &str) -> bool {
+            lock_or_recover(&INDEX_PATHS)
+                .as_ref()
+                .map(|v| v.iter().any(|p| p.contains(name)))
+                .unwrap_or(false)
+        }
+        let tmp = std::env::temp_dir().join(format!(
+            "wm_idx_inc_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let root = tmp.join("root");
+        let deep = root.join("a").join("b").join("c");
+        std::fs::create_dir_all(&deep).unwrap();
+        std::fs::write(root.join("f1.txt"), b"x").unwrap();
+        std::fs::write(deep.join("old.bin"), b"y").unwrap();
+        let roots = vec![root.clone()];
+        // 模拟 index_build 的结果（扫描 + 快照目录 mtime）
+        let (paths, dirs) = scan_roots(&roots);
+        *lock_or_recover(&INDEX_PATHS) = Some(paths);
+        *lock_or_recover(&INDEX_DIR_MTIMES) = Some(dirs);
+        *lock_or_recover(&INDEX_ROOTS) = Some(vec![norm_dir_key(&root)]);
+        assert!(idx_contains("f1.txt"), "初始应有 f1.txt");
+        assert!(idx_contains("old.bin"), "初始应有 old.bin");
+
+        // ① 深层新建文件（旧版只比根 mtime，此处永远发现不了）
+        std::fs::write(deep.join("new.txt"), b"z").unwrap();
+        assert!(!refresh_incremental(&roots), "不该截断");
+        assert!(
+            idx_contains("new.txt"),
+            "深层新建文件应进索引（v1.2.21 核心场景）"
+        );
+        assert!(idx_contains("old.bin"), "未变文件不应被误删");
+
+        // ② 删除文件
+        std::fs::remove_file(deep.join("old.bin")).unwrap();
+        refresh_incremental(&roots);
+        assert!(!idx_contains("old.bin"), "删除的文件应移除");
+        assert!(idx_contains("new.txt"), "同目录其他文件应保留");
+
+        // ③ 删除整个子树目录
+        let victim = root.join("a").join("b");
+        std::fs::remove_dir_all(&victim).unwrap();
+        refresh_incremental(&roots);
+        assert!(!idx_contains("new.txt"), "删子树后其文件应全部移除");
+        assert!(idx_contains("f1.txt"), "根层文件不受影响");
+
+        // ④ 根层直接新建
+        std::fs::write(root.join("top.dat"), b"w").unwrap();
+        refresh_incremental(&roots);
+        assert!(idx_contains("top.dat"), "根层新建应进索引");
+
+        // ⑤ 无变化再刷一次：不得误删（prev==cur 跳过路径）
+        refresh_incremental(&roots);
+        assert!(idx_contains("f1.txt") && idx_contains("top.dat"), "无变化不得误删");
+
+        // ⑥ 目录 key 规范化：卷根 "E:\" 形态与 "E:" 等价
+        assert_eq!(norm_dir_key(std::path::Path::new("E:\\")), "E:");
+        assert_eq!(norm_dir_key(std::path::Path::new("E:\\Ai\\")), "E:\\Ai");
+        assert_eq!(norm_dir_key(std::path::Path::new("E:\\Ai")), "E:\\Ai");
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
 }
 
 // ==================== 全盘文件名索引（方案A：多线程遍历 + 内存索引） ====================
@@ -966,6 +1037,8 @@ static INDEX_DIR_MTIMES: std::sync::Mutex<Option<HashMap<String, i64>>> =
 static INDEX_ROOTS: std::sync::Mutex<Option<Vec<String>>> = std::sync::Mutex::new(None);
 /// 用户排除模式（通配符，匹配完整路径小写）。由 index_set_excludes 设置，index_build/refresh 遍历时生效
 static INDEX_EXCLUDES: std::sync::Mutex<Option<Vec<String>>> = std::sync::Mutex::new(None);
+/// 最近一次 scan 是否撞上限被截断（v1.2.21：截断时 index_build 返回 -5 告知上层）
+static INDEX_TRUNCATED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 /// 无依赖通配符匹配：`*` 匹配任意字符（含路径分隔符），`?` 匹配单个字符
 pub(crate) fn wildcard_match(pat: &[u8], text: &[u8]) -> bool {
@@ -1031,9 +1104,26 @@ pub(crate) fn dir_mtime_ns(path: &std::path::Path) -> Option<i64> {
     None
 }
 
-/// 多线程遍历 roots，收集文件路径 + 各目录 mtime，返回容器（不替换外部状态）
+/// 目录 key 规范化（v1.2.21 增量刷新用）：Windows 卷根 PathBuf 显示为 "E:\"
+/// （带尾分隔符），子目录是 "E:\Ai"——直接拼前缀会拼出 "E:\\Ai" 匹配不上。
+/// 统一去掉尾部分隔符（"E:\"→"E:"），卷根名保留。
+pub(crate) fn norm_dir_key(p: &std::path::Path) -> String {
+    let s = p.to_string_lossy().to_string();
+    let trimmed = s.trim_end_matches(['\\', '/']);
+    if trimmed.is_empty() {
+        s
+    } else {
+        trimmed.to_string()
+    }
+}
+
+/// 多线程遍历 roots，收集文件路径 + 各目录 mtime，返回容器（不替换外部状态）。
+/// v1.2.21：上限 100 万→500 万（老板机器实测 96.9 万逼近旧顶，新目录整个漏扫）。
+/// 参照：Everything 不设条目上限、内存按需增长；这里的安全阀只是内存护栏
+/// （每条约 100-200B，500 万≈0.5-1GB，16G 民用机无压力），撞上限置
+/// INDEX_TRUNCATED，index_build 据此返回 -5 让上层知晓而非静默丢数据。
 pub(crate) fn scan_roots(roots: &[std::path::PathBuf]) -> (Vec<String>, HashMap<String, i64>) {
-    let max_entries: usize = 1_000_000;
+    let max_entries: usize = 5_000_000;
     let queue: Arc<std::sync::Mutex<Vec<std::path::PathBuf>>> =
         Arc::new(std::sync::Mutex::new(roots.to_vec()));
     let paths: Arc<std::sync::Mutex<Vec<String>>> = Arc::new(std::sync::Mutex::new(Vec::new()));
@@ -1090,7 +1180,7 @@ pub(crate) fn scan_roots(roots: &[std::path::PathBuf]) -> (Vec<String>, HashMap<
                     }
                 };
                 if let Some(mt) = dir_mtime_ns(&dir) {
-                    local_dirs.insert(dir.to_string_lossy().to_string(), mt);
+                    local_dirs.insert(norm_dir_key(&dir), mt);
                 }
                 if let Ok(rd) = std::fs::read_dir(&dir) {
                     for e in rd.flatten() {
@@ -1120,6 +1210,7 @@ pub(crate) fn scan_roots(roots: &[std::path::PathBuf]) -> (Vec<String>, HashMap<
                             q.push(e.path());
                         } else {
                             if total.load(std::sync::atomic::Ordering::Relaxed) >= max_entries {
+                                INDEX_TRUNCATED.store(true, std::sync::atomic::Ordering::Relaxed);
                                 stop.store(true, std::sync::atomic::Ordering::Relaxed);
                             } else {
                                 local.push(e.path().to_string_lossy().to_string());
@@ -1201,12 +1292,17 @@ pub extern "C" fn index_build(roots_ptr: *const *const c_char, num_roots: usize)
         return -2;
     }
 
+    INDEX_TRUNCATED.store(false, std::sync::atomic::Ordering::Relaxed);
     let (final_paths, final_dirs) = scan_roots(&roots);
     let n = final_paths.len() as i64;
     *lock_or_recover(&INDEX_PATHS) = Some(final_paths);
     let root_strs: Vec<String> = roots.iter().map(|p| p.to_string_lossy().to_string()).collect();
     *lock_or_recover(&INDEX_DIR_MTIMES) = Some(final_dirs);
     *lock_or_recover(&INDEX_ROOTS) = Some(root_strs);
+    if INDEX_TRUNCATED.load(std::sync::atomic::Ordering::Relaxed) {
+        // 撞上限截断：返回 -5（上层记日志/提示），条数放 _COUNT 已由 replace 生效
+        return -5;
+    }
     n
 })
 }
@@ -1442,7 +1538,10 @@ fn parse_index_body<R: std::io::Read>(
         let mut mb = [0u8; 8];
         rb(r, &mut mb)?;
         let mt = i64::from_le_bytes(mb);
-        rmt.insert(key, mt);
+        // v1.2.21：旧版落盘的 key 未去尾分隔符（"E:\" 形态），加载时统一
+        // norm 化，保证与增量刷新的 norm_dir_key 查表一致
+        let nk = norm_dir_key(std::path::Path::new(&key));
+        rmt.insert(nk, mt);
     }
     rb(r, &mut nbuf)?;
     let rc = u64::from_le_bytes(nbuf);
@@ -1583,6 +1682,11 @@ pub extern "C" fn index_load(file_ptr: *const c_char) -> i32 {
 
 /// 增量刷新：比对各根目录 mtime，未变跳过重扫，仅重扫变化的盘/目录。
 /// 索引未建立（未 load 也未 build）时返回 -3，调用方应先 buildIndex。
+/// v1.2.21：重写为**真增量**——旧版只比根目录 mtime，深层新建文件不改根
+/// mtime 导致永远判定「没变」跳过（老板实测 v1220 资产目录整个漏扫）。
+/// 新实现递归比对各目录 mtime（build/load 时快照全量目录表），未变的目录
+/// 整棵子树跳过，变化的目录只重扫其直接子文件，消失的目录按前缀删子树。
+/// 返回条数；撞上限截断返回 -5；索引未建立 -3。
 #[no_mangle]
 pub extern "C" fn index_refresh(
     roots_ptr: *const *const c_char,
@@ -1599,7 +1703,7 @@ pub extern "C" fn index_refresh(
             let cs = CStr::from_ptr(rp);
             let s = cs.to_string_lossy().to_string();
             if !s.is_empty() && std::path::Path::new(&s).exists() {
-                roots.push(std::path::PathBuf::from(s));
+                roots.push(std::path::PathBuf::from(&s));
             }
         }
     }
@@ -1612,53 +1716,177 @@ pub extern "C" fn index_refresh(
             return -3;
         }
     }
+    let truncated = refresh_incremental(&roots);
+    let g = lock_or_recover(&INDEX_PATHS);
+    match g.as_ref() {
+        Some(v) => {
+            if truncated {
+                -5
+            } else {
+                v.len() as i64
+            }
+        }
+        None => -3,
+    }
+})
+}
+
+/// 真增量刷新实现（见 index_refresh 文档）。返回是否撞上限截断。
+/// 三阶段：① 遍历目录树收集「重扫目录的新文件清单 + 消失目录前缀」；
+/// ② 一轮 retain 删旧条目（重扫目录的直接子文件 + 消失目录子树）；
+/// ③ 再把新文件并入。删必须先于加，否则新条目父目录同样命中重扫集合被误删。
+pub(crate) fn refresh_incremental(roots: &[std::path::PathBuf]) -> bool {
+    const MAX_ENTRIES: usize = 5_000_000;
     let sep = std::path::MAIN_SEPARATOR;
-    for root in &roots {
-        let rkey = root.to_string_lossy().to_string();
-        let cur = dir_mtime_ns(root);
+    let excludes: Vec<String> = lock_or_recover(&INDEX_EXCLUDES)
+        .as_ref()
+        .cloned()
+        .unwrap_or_default();
+    // BFS 目录队列
+    let mut queue: Vec<std::path::PathBuf> = Vec::new();
+    // ① 收集：重扫目录 key → 新直接子文件；消失目录前缀列表
+    let mut rescanned: std::collections::HashMap<String, Vec<String>> =
+        std::collections::HashMap::new();
+    let mut gone_prefixes: Vec<String> = Vec::new();
+    for r in roots {
+        queue.push(r.clone());
+    }
+    while let Some(dir) = queue.pop() {
+        let key = norm_dir_key(&dir);
+        let cur = dir_mtime_ns(&dir);
         let prev = {
             let rmt = lock_or_recover(&INDEX_DIR_MTIMES);
-            rmt.as_ref().and_then(|m| m.get(&rkey).copied())
+            rmt.as_ref().and_then(|m| m.get(&key).copied())
         };
-        let unchanged = root.exists() && prev.is_some() && cur == prev;
-        if unchanged {
+        if cur.is_none() {
+            // 目录消失（或元信息读不到）：整棵子树从索引移除
+            if prev.is_some() {
+                gone_prefixes.push(format!("{}{}", key, sep));
+                let mut rmt = lock_or_recover(&INDEX_DIR_MTIMES);
+                if let Some(m) = rmt.as_mut() {
+                    let prefix = format!("{}{}", key, sep);
+                    m.retain(|k, _| {
+                        k.as_str() != key.as_str() && !k.starts_with(prefix.as_str())
+                    });
+                }
+            }
             continue;
         }
-        // 移除该根旧条目
-        {
-            let mut pg = lock_or_recover(&INDEX_PATHS);
-            if let Some(v) = pg.as_mut() {
-                let prefix = format!("{}{}", rkey, sep);
-                v.retain(|p| p.as_str() != rkey.as_str() && !p.starts_with(prefix.as_str()));
-            }
-            let mut rmt = lock_or_recover(&INDEX_DIR_MTIMES);
-            if let Some(m) = rmt.as_mut() {
-                let prefix = format!("{}{}", rkey, sep);
-                m.retain(|k, _| k.as_str() != rkey.as_str() && !k.starts_with(prefix.as_str()));
+        let cur = cur.unwrap();
+        // v1.2.21 修正：目录 mtime 只反映**直接子项**的增删改名——深层新建
+        // 文件只改最深目录 mtime，中间层都不变。旧算法「未变跳过子树」会
+        // 整棵丢掉含变化的分支（老板实测资产目录整个漏扫的根因之一）。
+        // 正确做法：未变的目录也要递归（只收子目录、不碰文件条目），
+        // 仅对 mtime 变化的目录重扫其直接子文件。
+        let changed = prev != Some(cur);
+        let mut new_files: Vec<String> = Vec::new();
+        let mut subdirs: Vec<std::path::PathBuf> = Vec::new();
+        if let Ok(rd) = std::fs::read_dir(&dir) {
+            for e in rd.flatten() {
+                let Ok(ft) = e.file_type() else { continue };
+                if ft.is_symlink() {
+                    continue;
+                }
+                let path_lower = e.path().to_string_lossy().to_lowercase();
+                if excludes
+                    .iter()
+                    .any(|pat| wildcard_match(pat.as_bytes(), path_lower.as_bytes()))
+                {
+                    continue;
+                }
+                if ft.is_dir() {
+                    let name = e.file_name().to_string_lossy().to_string();
+                    if index_skip_dir(&name) {
+                        continue;
+                    }
+                    subdirs.push(e.path());
+                } else if changed {
+                    new_files.push(e.path().to_string_lossy().to_string());
+                }
             }
         }
-        // 重扫该根并并入
-        let (local_paths, local_dirs) = scan_roots(&[root.clone()]);
-        if !local_paths.is_empty() {
-            let mut pg = lock_or_recover(&INDEX_PATHS);
-            if let Some(v) = pg.as_mut() {
-                v.extend(local_paths);
+        if changed {
+            {
+                let mut rmt = lock_or_recover(&INDEX_DIR_MTIMES);
+                if let Some(m) = rmt.as_mut() {
+                    m.insert(key.clone(), cur);
+                }
+            }
+            rescanned.insert(key.clone(), new_files);
+            // 消失的直接子目录：旧快照里记录过、本次 read_dir 已看不到——
+            // 它不会入队被访问，子树条目会成孤儿，必须在这里按前缀删掉
+            let subdir_keys: std::collections::HashSet<String> =
+                subdirs.iter().map(|s| norm_dir_key(s)).collect();
+            let prefix = format!("{}{}", key, sep);
+            let gone_children: Vec<String> = {
+                let rmt = lock_or_recover(&INDEX_DIR_MTIMES);
+                rmt.as_ref()
+                    .map(|m| {
+                        m.keys()
+                            .filter(|k| {
+                                k.starts_with(prefix.as_str())
+                                    && !k[prefix.len()..].contains(sep)
+                            })
+                            .cloned()
+                            .collect()
+                    })
+                    .unwrap_or_default()
+            };
+            for g in gone_children {
+                if subdir_keys.contains(&g) {
+                    continue; // 还在，只是 mtime 变，入队继续比对
+                }
+                gone_prefixes.push(format!("{}{}", g, sep));
+                let mut rmt = lock_or_recover(&INDEX_DIR_MTIMES);
+                if let Some(m) = rmt.as_mut() {
+                    let gpre = format!("{}{}", g, sep);
+                    m.retain(|k, _| {
+                        k.as_str() != g.as_str() && !k.starts_with(gpre.as_str())
+                    });
+                }
             }
         }
-        {
-            let mut rmt = lock_or_recover(&INDEX_DIR_MTIMES);
-            if let Some(m) = rmt.as_mut() {
-                m.insert(rkey.clone(), cur.unwrap_or(0));
-                for (k, v) in local_dirs {
-                    m.insert(k, v);
+        for sd in subdirs {
+            queue.push(sd);
+        }
+    }
+    // ② 删：一轮 retain——父目录被重扫的直接子文件旧条目 + 消失目录子树。
+    // 每条路径只做一次 rfind(sep) + HashMap 查找，与变化目录数量无关。
+    if !rescanned.is_empty() || !gone_prefixes.is_empty() {
+        let mut pg = lock_or_recover(&INDEX_PATHS);
+        if let Some(v) = pg.as_mut() {
+            v.retain(|p| {
+                if gone_prefixes
+                    .iter()
+                    .any(|pre| p.starts_with(pre.as_str()))
+                {
+                    return false;
+                }
+                if let Some(i) = p.rfind(sep) {
+                    let parent = &p[..i];
+                    if rescanned.contains_key(parent) {
+                        return false;
+                    }
+                }
+                true
+            });
+        }
+    }
+    // ③ 加：并入新文件（受上限约束，撞顶截断）
+    let mut truncated = false;
+    {
+        let mut pg = lock_or_recover(&INDEX_PATHS);
+        if let Some(v) = pg.as_mut() {
+            'outer: for (_, files) in rescanned.iter() {
+                for f in files {
+                    if v.len() >= MAX_ENTRIES {
+                        truncated = true;
+                        break 'outer;
+                    }
+                    v.push(f.clone());
                 }
             }
         }
     }
-    let g = lock_or_recover(&INDEX_PATHS);
-    match g.as_ref() {
-        Some(v) => v.len() as i64,
-        None => -3,
-    }
-})
+    truncated
 }

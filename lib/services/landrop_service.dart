@@ -1276,7 +1276,8 @@ class _LandropSession {
               ._handleFileSendRequest(this, files);
           break;
         case 'text_send':
-          await _handleTextSend((data['text'] as String?) ?? '');
+          await LandropService.instance._handleTextSend(
+              this, (data['text'] as String?) ?? '');
           break;
         default:
           // ack / 未知：回 ack:false（LANDrop 同行为）
@@ -1286,18 +1287,61 @@ class _LandropSession {
     }
   }
 
-  Future<void> _handleTextSend(String text) async {
-    await sendJson({'type': 'ack', 'data': {'ack': true}});
-    ReceiveNotifyService.instance.textDone(peerDeviceName, text);
+  Future<void> _handleTextSend(_LandropSession session, String text) async {
+    final pk = session.peerPkB64;
+    final senderName = session.peerDeviceName;
+    // v1.2.21：未信任设备的文本也要确认（原来直接收，与文件路径不对称）。
+    // 信任设备免确认直收；其余走 decideAcceptDecision（single-flight +
+    // batchDefault 勾选缓存，与文件路径同一套语义）。
+    final trusted = TrustedDevices.instance.isTrustedSync(pk);
+    IncomingDecision decision;
+    if (trusted) {
+      decision = const IncomingDecision(accepted: true, batchDefault: false);
+    } else {
+      decision = await LanTransferService.instance.decideAcceptDecision(
+        senderId: pk,
+        ask: () => LanTransferService.instance.handlerAsk(IncomingRequest(
+              senderId: pk,
+              senderName: senderName,
+              fileName: '一条文本消息',
+              fileSize: text.length,
+              trustable: true,
+              verifCode: session.verifCode,
+            )),
+      );
+      if (decision.accepted && decision.trust) {
+        await TrustedDevices.instance.add(pk, senderName);
+      }
+    }
+    if (!decision.accepted) {
+      // 拒收：回 ack=false + 留痕（不记内容）
+      await session.sendJson({'type': 'ack', 'data': {'ack': false}});
+      ReceiveNotifyService.instance.rejected('一条文本消息', senderName);
+      await TransferHistoryService.instance.add(TransferRecord(
+        id: '${DateTime.now().microsecondsSinceEpoch}_ldtxtr',
+        kind: 'text',
+        direction: 'in',
+        name: '（已拒收）一条文本',
+        size: text.length,
+        peerName: senderName,
+        peerKey: pk,
+        time: DateTime.now(),
+        ok: false,
+        note: '未信任，已拒收',
+      ));
+      return;
+    }
+    await session.sendJson({'type': 'ack', 'data': {'ack': true}});
+    ReceiveNotifyService.instance.textDone(senderName, text);
     await TransferHistoryService.instance.add(TransferRecord(
       id: '${DateTime.now().microsecondsSinceEpoch}_ldtxt',
       kind: 'text',
       direction: 'in',
-      name: '来自 $peerDeviceName 的文本',
+      name: '来自 $senderName 的文本',
       text: text.length > 2000 ? '${text.substring(0, 2000)}…' : text,
       size: text.length,
-      peerName: peerDeviceName,
-      peerKey: peerPkB64,
+      peerName: senderName,
+      peerKey: pk,
       time: DateTime.now(),
       ok: true,
     ));

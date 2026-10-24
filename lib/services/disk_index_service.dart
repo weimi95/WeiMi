@@ -367,6 +367,16 @@ class DiskIndexService {
     // 每次重启都丢一批 watcher 启动前新建的文件）。
     final needPersist = _lastPersistAt == null ||
         now.difference(_lastPersistAt!) >= _persistMaxAge;
+    // v1.2.21：先走**真增量**（Rust index_refresh 递归比对各目录 mtime，只重扫
+    // 变化的目录，日常秒级），失败（索引未建立/roots 无效/撞上限）才全量兜底。
+    // 旧版这里直接全量重建——老板机器 97 万条全量扫 75 秒，且重建期间旧结果
+    // 照旧返回，新文件要等下一次。
+    final inc = await refreshIndex(persist: needPersist);
+    if (inc >= 0) {
+      _lastBuiltAt = now;
+      if (needPersist) _lastPersistAt = now;
+      return inc;
+    }
     return buildIndex(defaultRoots(), persist: needPersist);
   }
 
@@ -552,13 +562,15 @@ class DiskIndexService {
     return Isolate.run(() => _saveSync(path));
   }
 
-  /// 增量刷新（比对根 mtime，仅重扫变化盘），返回刷新后条数并落盘
-  static Future<int> refreshIndex() async {
+  /// 增量刷新（Rust index_refresh：递归目录 mtime 比对，只重扫变化目录）。
+  /// persist=false 时只更新内存索引不落盘（30s 定时器防频繁写 100MB 文件）。
+  /// 返回刷新后条数并落盘；负数为错误（-1 roots 无效 / -2 索引未建立 / -5 撞上限）
+  static Future<int> refreshIndex({bool persist = true}) async {
     final roots = defaultRoots();
     final n = await Isolate.run(() => _refreshSync(List<String>.of(roots)));
     if (n >= 0) {
       _cachedCount = n;
-      await saveIndex();
+      if (persist) await saveIndex();
     }
     return n;
   }

@@ -30,6 +30,14 @@ class TrayService {
   bool _daemonMode = false; // 守护进程接管托盘+飞传
   final SystemTray _tray = SystemTray();
 
+  /// daemon 待确认轮询定时器（v1.2.21）：UI 运行期间 daemon 收到的未信任
+  /// 请求挂在它的 pending 表里，UI 必须持续拉取才能弹确认框——原来只在
+  /// daemon 模式启动时拉一次，UI 已开着时新到的请求没人拉 → 30s 超时拒收
+  /// （老板实测：手机系统分享选电脑端只弹气球不弹确认框）。
+  Timer? _pendingTimer;
+  /// 正在弹/已弹过的 token（防止轮询重复弹同一个请求）
+  final Set<String> _confirmingTokens = <String>{};
+
   /// 是否处于守护进程模式（诊断/设置页展示用）。
   bool get daemonMode => _daemonMode;
 
@@ -129,9 +137,13 @@ class TrayService {
       if (_daemonMode) {
         await DaemonService.pushConfig(uiActive: true);
         // 守护进程可能正挂着未信任设备的待确认请求（它为此拉起了主界面）：
-        // 等窗口就绪后拉取并逐个弹确认框
+        // 首次 2.5s 后拉取，随后每 1.5s 持续轮询（v1.2.21：UI 运行期间
+        // 新到达的未信任请求也要能弹框，不能只响应启动那一刻）
         unawaited(Future.delayed(
             const Duration(milliseconds: 2500), _checkDaemonPending));
+        _pendingTimer?.cancel();
+        _pendingTimer = Timer.periodic(
+            const Duration(milliseconds: 1500), (_) => _checkDaemonPending());
       }
     }
 
@@ -688,26 +700,32 @@ Future<void> _checkDaemonPending() async {
     for (final j in pending) {
       final token = j['token'] as String?;
       if (token == null || token.isEmpty) continue;
-      final d = await showIncomingConfirmDialog(
-        ctx,
-        senderName: (j['from'] as String?) ?? '未知设备',
-        content: (j['name'] as String?) ?? '',
-        sizeBytes: (j['size'] as num?)?.toInt() ?? 0,
-        isText: j['isText'] == true,
-        countdownSec: LanTransferService.confirmTimeoutSecs(),
-      );
-      final ok = d.accepted;
-      final found = await DaemonService.sendConfirm(token, ok);
-      if (!found) {
-        final sctx = ShareReceiveService.navigatorKey.currentContext;
-        if (sctx != null && sctx.mounted) {
-          ScaffoldMessenger.of(sctx).showSnackBar(const SnackBar(
-            content: Text('该请求已超时自动拒收，请让对方重新发送'),
-            backgroundColor: Colors.orange,
-          ));
+      // 轮询去重：同一请求只弹一次（弹完/已弹过都跳过）
+      if (!_confirmingTokens.add(token)) continue;
+      try {
+        final d = await showIncomingConfirmDialog(
+          ctx,
+          senderName: (j['from'] as String?) ?? '未知设备',
+          content: (j['name'] as String?) ?? '',
+          sizeBytes: (j['size'] as num?)?.toInt() ?? 0,
+          isText: j['isText'] == true,
+          countdownSec: LanTransferService.confirmTimeoutSecs(),
+        );
+        final ok = d.accepted;
+        final found = await DaemonService.sendConfirm(token, ok);
+        if (!found) {
+          final sctx = ShareReceiveService.navigatorKey.currentContext;
+          if (sctx != null && sctx.mounted) {
+            ScaffoldMessenger.of(sctx).showSnackBar(const SnackBar(
+              content: Text('该请求已超时自动拒收，请让对方重新发送'),
+              backgroundColor: Colors.orange,
+            ));
+          }
         }
+        if (!ok) break; // 拒了一个，剩下的（同一设备连发）不再逐个打扰
+      } finally {
+        _confirmingTokens.remove(token);
       }
-      if (!ok) break; // 拒了一个，剩下的（同一设备连发）不再逐个打扰
     }
   } catch (_) {}
 }

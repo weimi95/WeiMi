@@ -96,18 +96,49 @@ class _LanChatScreenState extends State<LanChatScreen> {
 
   /// 滚到消息底部（最新一条）。仅在「本就贴近底部」或首次加载时自动滚，
   /// 不打断用户往上翻历史。700ms 轮询刷新同理。
+  ///
+  /// v1.2.21：ListView.builder 懒加载 + 气泡高度不一，首帧 maxScrollExtent
+  /// 尚未稳定（只布局了 viewport 附近项），setState 后立即 animateTo 会落到
+  /// 偏小的 extent——消息多了就「停在半中腰」，之后 extent 更新却无新滚动
+  /// 指令，卡住不动。改为逐帧观测 extent，连续两帧不变（稳定）才滚；
+  /// 首帧 extent=0（列表未布局）自然跳过，由后续帧补上。
   void _scrollToBottom({bool force = false}) {
-    if (!_scrollCtl.hasClients) return;
-    final pos = _scrollCtl.position;
-    final atBottom = pos.pixels >= pos.maxScrollExtent - 60;
-    if (!force && !atBottom) return;
-    WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (!_scrollCtl.hasClients) return;
-      final target = _scrollCtl.position.maxScrollExtent;
-      if (target <= 0) return;
-      _scrollCtl.animateTo(target,
-          duration: const Duration(milliseconds: 150), curve: Curves.easeOut);
-    });
+    // atBottom 判断需要 clients；无 clients（空列表→有历史首次切换时
+    // controller 还没 attach）时跳过判断，由 attempt 循环等 attach 再滚
+    if (_scrollCtl.hasClients) {
+      final pos = _scrollCtl.position;
+      final atBottom = pos.pixels >= pos.maxScrollExtent - 60;
+      if (!force && !atBottom) return;
+    } else if (!force) {
+      return;
+    }
+    double lastExtent = -1;
+    void attempt(int triesLeft) {
+      if (triesLeft <= 0) return;
+      if (!_scrollCtl.hasClients) {
+        WidgetsBinding.instance
+            .addPostFrameCallback((_) => attempt(triesLeft - 1));
+        return;
+      }
+      final t = _scrollCtl.position.maxScrollExtent;
+      if (t > 0 && (t - lastExtent).abs() < 0.5) {
+        // extent 已稳定：force 直接跳（无动画，避免动画中途 extent 再变），
+        // 非 force（新消息到达）用短动画保持顺滑
+        if (force) {
+          _scrollCtl.jumpTo(t);
+        } else {
+          _scrollCtl.animateTo(t,
+              duration: const Duration(milliseconds: 150),
+              curve: Curves.easeOut);
+        }
+        return;
+      }
+      lastExtent = t;
+      WidgetsBinding.instance
+          .addPostFrameCallback((_) => attempt(triesLeft - 1));
+    }
+
+    WidgetsBinding.instance.addPostFrameCallback((_) => attempt(15));
   }
 
   /// 按会话 key 找活设备。必须走 LandropService.mergeInto 合并口径——
@@ -1455,6 +1486,124 @@ List<_ChatItem> _buildChatItems(List<TransferRecord> recs, bool stack) {
   return items;
 }
 
+/// 聊天列表行首小缩略图（v1.2.21）：图片/视频类有本地文件的显示真缩略图
+/// （36dp 限解码，防大图吃内存），其余（或文件已不在）按类型显示图标。
+/// 分类复用 FileThumbs（单一权威源）；视频帧走 WindowsThumbnailProvider
+/// （explorer 缩略图）/ FileThumbs.videoFrame（Android 抽帧，带缓存）。
+class _RecThumb extends StatefulWidget {
+  final TransferRecord rec;
+  const _RecThumb({required this.rec});
+
+  @override
+  State<_RecThumb> createState() => _RecThumbState();
+}
+
+class _RecThumbState extends State<_RecThumb> {
+  String? _videoFrame; // 视频抽帧得到的临时图片路径
+
+  @override
+  void initState() {
+    super.initState();
+    _resolveVideo();
+  }
+
+  @override
+  void didUpdateWidget(covariant _RecThumb old) {
+    super.didUpdateWidget(old);
+    if (old.rec.path != widget.rec.path || old.rec.name != widget.rec.name) {
+      _videoFrame = null;
+      _resolveVideo();
+    }
+  }
+
+  Future<void> _resolveVideo() async {
+    final path = widget.rec.path;
+    if (path == null || path.isEmpty || !FileThumbs.isVideo(widget.rec.name)) {
+      return;
+    }
+    try {
+      if (Platform.isWindows) {
+        final tp = await WindowsThumbnailProvider.getThumbnailFile(path);
+        if (tp != null && File(tp).existsSync() && mounted) {
+          setState(() => _videoFrame = tp);
+        }
+      } else {
+        final data = await FileThumbs.videoFrame(path);
+        if (data != null && mounted) {
+          final dir = await getTemporaryDirectory();
+          final f = File('${dir.path}/wm_vthumb_${path.hashCode}.jpg');
+          await f.writeAsBytes(data, flush: true);
+          if (mounted) setState(() => _videoFrame = f.path);
+        }
+      }
+    } catch (_) {}
+  }
+
+  static IconData _iconFor(String name) {
+    switch (FileThumbs.categoryOf(name)) {
+      case FileCategory.image:
+        return Icons.image_outlined;
+      case FileCategory.video:
+        return Icons.movie_outlined;
+      case FileCategory.audio:
+        return Icons.music_note_outlined;
+      case FileCategory.archive:
+        return Icons.folder_zip_outlined;
+      case FileCategory.doc:
+        return Icons.description_outlined;
+      case FileCategory.installer:
+        return Icons.android_outlined;
+      case FileCategory.encrypted:
+        return Icons.lock_outline;
+      case FileCategory.all:
+      case FileCategory.other:
+        return Icons.insert_drive_file_outlined;
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final path = widget.rec.path;
+    final isImg = FileThumbs.isImage(widget.rec.name);
+    final fallback = Icon(
+      _iconFor(widget.rec.name),
+      size: 18,
+      color: Colors.grey.shade700,
+    );
+    Widget content = fallback;
+    if (isImg && path != null && path.isNotEmpty) {
+      content = Image.file(
+        File(path),
+        width: 36,
+        height: 36,
+        fit: BoxFit.cover,
+        // 限解码宽度：列表里几十张也不吃内存（约 2x DPR）
+        cacheWidth: 96,
+        errorBuilder: (_, __, ___) => fallback,
+      );
+    } else if (_videoFrame != null) {
+      content = Image.file(
+        File(_videoFrame!),
+        width: 36,
+        height: 36,
+        fit: BoxFit.cover,
+        cacheWidth: 96,
+        errorBuilder: (_, __, ___) => fallback,
+      );
+    }
+    return ClipRRect(
+      borderRadius: BorderRadius.circular(6),
+      child: Container(
+        width: 36,
+        height: 36,
+        color: Colors.grey.shade300,
+        alignment: Alignment.center,
+        child: content,
+      ),
+    );
+  }
+}
+
 class _StackBubble extends StatefulWidget {
   final List<TransferRecord> recs;
   final bool selecting;
@@ -1527,6 +1676,8 @@ class _StackBubbleState extends State<_StackBubble> {
                       ),
                       child: Row(
                         children: [
+                          _RecThumb(rec: r),
+                          const SizedBox(width: 8),
                           Expanded(
                             child: Text(r.name,
                                 style: const TextStyle(fontSize: 13))),

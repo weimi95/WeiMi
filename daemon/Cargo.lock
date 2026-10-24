@@ -417,7 +417,7 @@ checksum = "ccf3ec651a847eb01de73ccad15eb7d99f80485de043efb2f370cd654f4ea44b"
 
 [[package]]
 name = "weimi_daemon"
-version = "1.2.20"
+version = "1.2.21"
 dependencies = [
  "blake2",
  "chacha20poly1305",
