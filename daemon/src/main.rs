@@ -357,10 +357,19 @@ struct IP_ADAPTER_ADDRESSES_LH {
 #[link(name = "user32")]
 extern "system" {
     fn RegisterClassW(lpwcx: *const WNDCLASSW) -> u16;
+    fn SendMessageW(hwnd: HWND, msg: u32, wp: usize, lp: isize) -> isize;
     fn SetWindowLongPtrW(hwnd: HWND, index: i32, value: isize) -> isize;
     fn GetWindowLongPtrW(hwnd: HWND, index: i32) -> isize;
     fn GetDlgItem(hwnd: HWND, id: usize) -> HWND;
-    fn SendMessageW(hwnd: HWND, msg: u32, wp: usize, lp: isize) -> isize;
+    fn EndDialog(hwnd: HWND, result: isize) -> i32;
+    fn KillTimer(hwnd: HWND, id: usize) -> i32;
+    fn DialogBoxIndirectParamW(
+        inst: HINSTANCE,
+        tmpl: *const core::ffi::c_void,
+        parent: HWND,
+        proc_: DLGPROC,
+        init: isize,
+    ) -> i32;
     fn LoadCursorW(inst: HINSTANCE, name: usize) -> HCURSOR;
     fn GetSysColorBrush(index: i32) -> HBRUSH;
     fn ShowWindow(hwnd: HWND, cmd: i32) -> i32;
@@ -413,13 +422,6 @@ extern "system" {
     fn GetAsyncKeyState(vk: i32) -> i16;
     fn GetModuleHandleW(name: *const u16) -> HINSTANCE;
     fn SetTimer(hwnd: HWND, id: usize, ms: u32, proc_: usize) -> usize;
-    fn MessageBoxW(hwnd: HWND, text: *const u16, caption: *const u16, typ: u32) -> i32;
-    fn EnumThreadWindows(
-        tid: u32,
-        proc_: unsafe extern "system" fn(HWND, isize) -> i32,
-        lparam: isize,
-    ) -> i32;
-    fn PostMessageW(hwnd: HWND, msg: u32, wp: usize, lp: isize) -> i32;
 }
 
 #[link(name = "shell32")]
@@ -452,6 +454,8 @@ extern "system" {
         pi: *mut core::ffi::c_void,
     ) -> i32;
     fn GetCurrentThreadId() -> u32;
+    fn LoadLibraryW(name: *const u16) -> HINSTANCE;
+    fn GetProcAddress(module: HINSTANCE, name: *const u8) -> *mut core::ffi::c_void;
 }
 
 #[link(name = "iphlpapi")]
@@ -2208,14 +2212,113 @@ fn wait_untrusted_confirm(
     (decision, dlg_open)
 }
 
-/// 原生 Win32 确认框（托盘模式专用）：三按钮 + 批量勾选 + 超时自动关闭（=拒收）。
-/// v1.2.20：MB_YESNOCANCEL 让用户当场决定「接收后是否打开目标文件夹」——
-///   [是]     接收并打开文件夹   (accept=true,  open=true)
-///   [否]     仅接收，不开文件夹 (accept=true,  open=false)
-///   [取消]   拒收               (accept=false, open=false)
-/// v1.2.21：MessageBoxW 没有 checkbox，多文件逐个确认（微密协议每文件一次
-/// 请求）时老板要求「勾一次，同批后面都按这次」。改为标准控件手绘对话框
-/// （正文 + checkbox + 三按钮），返回 (accept, open_dir, batch)。
+// ==================== 接收确认对话框（v1.2.23）====================
+// v1.2.20–1.2.22 手绘 CreateWindowExW 消息循环在实机上稳定崩溃（WER 三次
+// 记录 0xc0000005 @ USER32+0x81ed：气泡弹出后确认窗未现、进程直接消失）。
+// v1.2.23 改用 Windows 标准对话框管理器 DialogBoxIndirectParam + 内存
+// DLGTEMPLATE：三按钮 + 批量勾选框 + WM_TIMER 超时自动拒收。消息循环、
+// 焦点、默认按钮全由系统对话框管理器接管，不再手写消息泵。
+//   是 = 接收并打开文件夹 (accept=true,  open=true)
+//   否 = 仅接收           (accept=true,  open=false)
+//   取消 = 拒收           (accept=false, open=false)
+// 返回 (accept, open_dir, batch)。
+
+const WM_INITDIALOG: u32 = 0x0110;
+const IDC_CONFIRM_YES: usize = 1001;
+const IDC_CONFIRM_NO: usize = 1002;
+const IDC_CONFIRM_CANCEL: usize = 1003;
+const IDC_CONFIRM_BATCH: usize = 1004;
+
+type DLGPROC = Option<unsafe extern "system" fn(HWND, u32, usize, isize) -> isize>;
+
+struct ConfirmState {
+    accept: std::cell::Cell<bool>,
+    open: std::cell::Cell<bool>,
+    timeout_ms: u32,
+}
+
+/// 编码内存 DLGTEMPLATE（+ 5 个 DLGITEMTEMPLATE），全部按 WORD 流写、
+/// 每个 item 起始 DWORD 对齐。控件：正文 Static + 批量勾选 Checkbox +
+/// 是/否/取消 三按钮（取消为默认回车键，宁拒勿收）。
+fn build_confirm_template(title: &str, body: &str, batch: &str) -> Vec<u16> {
+    let mut w: Vec<u16> = Vec::new();
+    let mut push_w = |v: &mut Vec<u16>, x: u16| v.push(x);
+    let _ = &mut push_w;
+    // ---- 头：style, extStyle, cdit, x, y, cx, cy ----
+    let dlg_style: u32 = 0x8000_0000 // WS_POPUP
+        | 0x00C0_0000 // WS_CAPTION
+        | 0x0008_0000 // WS_SYSMENU
+        | 0x0000_0080 // DS_MODALFRAME
+        | 0x0000_0800 // DS_CENTER（屏幕居中）
+        | 0x0000_0040; // DS_SETFONT
+    w.push((dlg_style & 0xffff) as u16);
+    w.push((dlg_style >> 16) as u16);
+    let ext: u32 = 0x0000_0008; // WS_EX_TOPMOST
+    w.push((ext & 0xffff) as u16);
+    w.push((ext >> 16) as u16);
+    w.push(5); // cdit：正文 + 勾选框 + 3 按钮
+    for v in [0i16, 0, 190, 116] {
+        w.push(v as u16);
+    }
+    w.push(0x0000); // menu: 无
+    w.push(0x0000); // class: 默认对话框类
+    for c in title.encode_utf16() {
+        w.push(c);
+    }
+    w.push(0);
+    w.push(9); // 字号 pt
+    for c in "Microsoft YaHei UI".encode_utf16() {
+        w.push(c);
+    }
+    w.push(0);
+
+    // ---- item 编码 helper（起始 DWORD 对齐）----
+    fn align4(w: &mut Vec<u16>) {
+        if w.len() % 2 != 0 {
+            w.push(0);
+        }
+    }
+    fn item(w: &mut Vec<u16>, style: u32, x: i16, y: i16, cx: i16, cy: i16, id: u16,
+            cls_atom: u16, text: &str) {
+        align4(w);
+        w.push((style & 0xffff) as u16);
+        w.push((style >> 16) as u16);
+        w.push(0); // extStyle lo
+        w.push(0); // extStyle hi
+        for v in [x, y, cx, cy] {
+            w.push(v as u16);
+        }
+        w.push(id);
+        w.push(0xFFFF);
+        w.push(cls_atom);
+        for c in text.encode_utf16() {
+            w.push(c);
+        }
+        w.push(0);
+        w.push(0x0000); // 无 creation data
+    }
+    const WS_CHILD: u32 = 0x4000_0000;
+    const WS_VISIBLE: u32 = 0x1000_0000;
+    const WS_TABSTOP: u32 = 0x0001_0000;
+    const WS_GROUP: u32 = 0x0002_0000;
+    // 1) 正文 Static
+    item(&mut w, WS_CHILD | WS_VISIBLE | WS_GROUP | 0, 12, 8, 166, 46,
+         0, 0x0082, body); // 0x82 = Static
+    // 2) 批量勾选
+    item(&mut w, WS_CHILD | WS_VISIBLE | WS_TABSTOP | 0x0000_0003, 12, 60, 166, 10,
+         IDC_CONFIRM_BATCH as u16, 0x0080, batch); // 0x80 = Button（BS_AUTOCHECKBOX）
+    // 3) 是 = 接收并打开文件夹
+    item(&mut w, WS_CHILD | WS_VISIBLE | WS_TABSTOP | 0x0000_0000, 30, 88, 40, 14,
+         IDC_CONFIRM_YES as u16, 0x0080, "是(Y)");
+    // 4) 否 = 仅接收
+    item(&mut w, WS_CHILD | WS_VISIBLE | WS_TABSTOP | 0x0000_0000, 75, 88, 40, 14,
+         IDC_CONFIRM_NO as u16, 0x0080, "否(N)");
+    // 5) 取消 = 拒收（默认回车键）
+    item(&mut w, WS_CHILD | WS_VISIBLE | WS_TABSTOP | 0x0000_0001, 120, 88, 40, 14,
+         IDC_CONFIRM_CANCEL as u16, 0x0080, "取消(C)");
+    w
+}
+
 fn native_confirm_dialog(
     sender_name: &str,
     name: &str,
@@ -2230,250 +2333,110 @@ fn native_confirm_dialog(
     };
     let body = if is_text {
         format!(
-            "「{}」想发送一条文本消息到本机{}\n\n             是 = 接收并打开文件夹\n             否 = 仅接收\n             取消 = 拒收\n\n             （{}秒未确认自动拒收）",
-            sender_name, verif_line, timeout_secs
+            "「{}」想发送一条文本消息到本机{}\n\n是 = 接收并打开文件夹\n否 = 仅接收\n取消 = 拒收\n\n（{} 秒未确认自动拒收）",
+            sender_name, verif_line, timeout_secs.max(5)
         )
     } else {
         format!(
-            "「{}」想发送文件到本机：\n{}{}\n\n             是 = 接收并打开文件夹\n             否 = 仅接收\n             取消 = 拒收\n\n             （{}秒未确认自动拒收）",
-            sender_name, name, verif_line, timeout_secs
+            "「{}」想发送文件到本机：\n{}{}\n\n是 = 接收并打开文件夹\n否 = 仅接收\n取消 = 拒收\n\n（{} 秒未确认自动拒收）",
+            sender_name, name, verif_line, timeout_secs.max(5)
         )
     };
-    let batch_hint = "同批后续文件都按此次选择（不再逐个询问）".to_string();
-    let out: Arc<Mutex<Option<(bool, bool, bool)>>> = Arc::new(Mutex::new(None));
-    let answered = Arc::new(AtomicBool::new(false));
-    let (res_tx, res_rx) = std::sync::mpsc::channel::<(bool, bool, bool)>();
-    let (tid_tx, tid_rx) = std::sync::mpsc::channel::<u32>();
-    let out2 = out.clone();
-    let answered2 = answered.clone();
-    let body_w = to_wide(&body);
-    let batch_w = to_wide(&batch_hint);
-    let title_w = to_wide("微密飞传 - 接收确认");
-    std::thread::spawn(move || unsafe {
-        let _ = tid_tx.send(GetCurrentThreadId());
-        let inst = GetModuleHandleW(std::ptr::null());
-        let cls = to_wide("WeimiConfirmDlg");
-        let wc = WNDCLASSW {
-            style: 0,
-            lpfnWndProc: Some(confirm_wnd_proc),
-            cbClsExtra: 0,
-            cbWndExtra: 0,
-            hInstance: inst,
-            hIcon: std::ptr::null_mut(),
-            hCursor: LoadCursorW(std::ptr::null_mut(), IDC_ARROW),
-            hbrBackground: GetSysColorBrush(COLOR_3DFACE),
-            lpszMenuName: std::ptr::null(),
-            lpszClassName: cls.as_ptr(),
-        };
-        RegisterClassW(&wc); // 重复注册失败无碍（ERROR_CLASS_ALREADY_EXISTS）
-        // out 指针经 CreateWindowExW.param 传入，WM_CREATE 里挂到 GWLP_USERDATA
-        let out_ptr: *const Mutex<Option<(bool, bool, bool)>> = &*out2;
-        let hwnd = CreateWindowExW(
-            WS_EX_TOPMOST | WS_EX_DLGMODALFRAME,
-            cls.as_ptr(),
-            title_w.as_ptr(),
-            WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU,
-            200,
-            150,
-            420,
-            260,
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-            inst,
-            out_ptr as *mut core::ffi::c_void,
-        );
-        if hwnd.is_null() {
-            // 窗口创建失败：退化为直接拒收（不静默丢——气球已由调用方先弹）
-            let _ = res_tx.send((false, false, false));
-            return;
-        }
-        // 正文 + checkbox + 三按钮在 WM_CREATE 里按 USERDATA 之外的需要创建，
-        // 这里把 body/batch 文本经线程局部传递（每线程一个框，无并发冲突）
-        CONFIRM_BODY.with(|c| *c.borrow_mut() = Some(body_w));
-        CONFIRM_BATCH.with(|c| *c.borrow_mut() = Some(batch_w));
-        ShowWindow(hwnd, SW_SHOW);
-        UpdateWindow(hwnd);
-        SetForegroundWindow(hwnd);
-        let mut msg: MSG = std::mem::zeroed();
-        while GetMessageW(&mut msg, std::ptr::null_mut(), 0, 0) > 0 {
-            TranslateMessage(&msg);
-            DispatchMessageW(&msg);
-        }
-        let r = out2.lock().unwrap().unwrap_or((false, false, false));
-        answered2.store(true, Ordering::SeqCst);
-        let _ = res_tx.send(r);
-    });
-    // 拿不到对话框线程 id（异常）直接按拒收处理
-    let Ok(tid) = tid_rx.recv_timeout(Duration::from_secs(3)) else {
-        return (false, false, false);
+    let batch_hint = if is_text {
+        "同批后续消息都按此次选择（不再逐个询问）"
+    } else {
+        "同批后续文件都按此次选择（不再逐个询问）"
     };
-    // 超时关框线程：到点且用户仍未作答 → PostMessage(WM_CLOSE) 关掉对话框
-    let answered3 = answered.clone();
-    std::thread::spawn(move || unsafe {
-        std::thread::sleep(Duration::from_secs(timeout_secs));
-        if !answered3.load(Ordering::SeqCst) {
-            EnumThreadWindows(tid, close_dialog_cb, 0);
-        }
-    });
-    match res_rx.recv_timeout(Duration::from_secs(timeout_secs + 10)) {
-        Ok(r) => r,
-        Err(_) => (false, false, false),
+    let title_w = "微密飞传 - 接收确认".to_string();
+
+    let tmpl = build_confirm_template(&title_w, &body, batch_hint);
+    let state = ConfirmState {
+        accept: std::cell::Cell::new(false),
+        open: std::cell::Cell::new(false),
+        timeout_ms: (timeout_secs.max(5).min(3600) as u32).saturating_mul(1000),
+    };
+    let inst = unsafe { GetModuleHandleW(std::ptr::null()) };
+    let id = unsafe {
+        DialogBoxIndirectParamW(
+            inst,
+            tmpl.as_ptr() as *const core::ffi::c_void,
+            std::ptr::null_mut(),
+            Some(confirm_dlg_proc),
+            &state as *const ConfirmState as isize,
+        )
+    };
+    if id == 0 || id == -1 {
+        // 模板/创建失败：宁拒勿收
+        return (false, false, false);
     }
+    let batch = unsafe {
+        // 对话框已销毁后不能查控件勾选态——在 WM_COMMAND 里已写入 open/accept；
+        // batch 由 dlg_proc 经静态 thread_local 传出
+        CONFIRM_BATCH_TAKEN.with(|c| c.get())
+    };
+    (state.accept.get(), state.open.get(), batch)
 }
 
-/// 手绘确认框的正文/batch 文案（每线程一个框，线程局部传递无冲突）
 thread_local! {
-    static CONFIRM_BODY: std::cell::RefCell<Option<Vec<u16>>> = const { std::cell::RefCell::new(None) };
-    static CONFIRM_BATCH: std::cell::RefCell<Option<Vec<u16>>> = const { std::cell::RefCell::new(None) };
+    static CONFIRM_BATCH_TAKEN: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
-unsafe extern "system" fn confirm_wnd_proc(hwnd: HWND, msg: u32, wp: usize, lp: isize) -> isize {
+unsafe extern "system" fn confirm_dlg_proc(hwnd: HWND, msg: u32, wp: usize, lp: isize) -> isize {
     match msg {
-        WM_CREATE => {
-            // lp 是 CREATESTRUCTW*，第一个字段即 lpCreateParams
-            let cs = &*(lp as *const CreateStructW);
-            let out_ptr = cs.lpCreateParams as *const Mutex<Option<(bool, bool, bool)>>;
-            SetWindowLongPtrW(hwnd, GWLP_USERDATA, out_ptr as isize);
-            let inst = GetModuleHandleW(std::ptr::null());
-            let cls = to_wide("static");
-            let icon = LoadIconW(std::ptr::null_mut(), IDI_QUESTION as *const u16);
-            CreateWindowExW(
-                0,
-                cls.as_ptr(),
-                std::ptr::null(),
-                WS_CHILD | WS_VISIBLE | SS_ICON,
-                14,
-                14,
-                32,
-                32,
-                hwnd,
-                std::ptr::null_mut(),
-                inst,
-                std::ptr::null_mut(),
-            );
-            let _ = icon;
-            let body = CONFIRM_BODY.with(|c| c.borrow().clone()).unwrap_or_default();
-            CreateWindowExW(
-                0,
-                cls.as_ptr(),
-                body.as_ptr(),
-                WS_CHILD | WS_VISIBLE | SS_LEFT,
-                56,
-                12,
-                340,
-                110,
-                hwnd,
-                std::ptr::null_mut(),
-                inst,
-                std::ptr::null_mut(),
-            );
-            let batch = CONFIRM_BATCH.with(|c| c.borrow().clone()).unwrap_or_default();
-            CreateWindowExW(
-                0,
-                to_wide("button").as_ptr(),
-                batch.as_ptr(),
-                WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX,
-                56,
-                128,
-                340,
-                22,
-                hwnd,
-                IDC_BATCH as HMENU,
-                inst,
-                std::ptr::null_mut(),
-            );
-            // 三个按钮：是 / 否 / 取消
-            let btn_cls = to_wide("button");
-            CreateWindowExW(
-                0,
-                btn_cls.as_ptr(),
-                to_wide("是(Y)").as_ptr(),
-                WS_CHILD | WS_VISIBLE | BS_DEFPUSHBUTTON,
-                50,
-                172,
-                92,
-                30,
-                hwnd,
-                IDC_YES as HMENU,
-                inst,
-                std::ptr::null_mut(),
-            );
-            CreateWindowExW(
-                0,
-                btn_cls.as_ptr(),
-                to_wide("否(N)").as_ptr(),
-                WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
-                158,
-                172,
-                92,
-                30,
-                hwnd,
-                IDC_NO as HMENU,
-                inst,
-                std::ptr::null_mut(),
-            );
-            CreateWindowExW(
-                0,
-                btn_cls.as_ptr(),
-                to_wide("取消").as_ptr(),
-                WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
-                266,
-                172,
-                92,
-                30,
-                hwnd,
-                IDC_CANCEL as HMENU,
-                inst,
-                std::ptr::null_mut(),
-            );
-            0
+        WM_INITDIALOG => {
+            SetWindowLongPtrW(hwnd, GWLP_USERDATA, lp);
+            let st = &*(lp as *const ConfirmState);
+            SetTimer(hwnd, 1, st.timeout_ms, 0);
+            SetForegroundWindow(hwnd);
+            1
+        }
+        WM_TIMER => {
+            // 超时未决：自动拒收（等同点「取消」）
+            KillTimer(hwnd, 1);
+            EndDialog(hwnd, IDC_CONFIRM_CANCEL as isize);
+            1
         }
         WM_COMMAND => {
             let id = wp & 0xffff;
-            let (accept, open) = match id {
-                IDC_YES => (true, true),
-                IDC_NO => (true, false),
-                IDC_CANCEL => (false, false),
-                _ => return DefWindowProcW(hwnd, msg, wp, lp),
-            };
-            let batch = SendMessageW(GetDlgItem(hwnd, IDC_BATCH), BM_GETCHECK, 0, 0) as u32
-                == BST_CHECKED;
-            let p = GetWindowLongPtrW(hwnd, GWLP_USERDATA)
-                as *const Mutex<Option<(bool, bool, bool)>>;
-            if !p.is_null() {
-                *(*p).lock().unwrap() = Some((accept, open, batch));
+            match id {
+                x if x == IDC_CONFIRM_YES as usize
+                    || x == IDC_CONFIRM_NO as usize
+                    || x == IDC_CONFIRM_CANCEL as usize =>
+                {
+                    KillTimer(hwnd, 1);
+                    let p = GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *const ConfirmState;
+                    let batch = SendMessageW(
+                        GetDlgItem(hwnd, IDC_CONFIRM_BATCH),
+                        BM_GETCHECK,
+                        0,
+                        0,
+                    ) as u32
+                        == BST_CHECKED;
+                    CONFIRM_BATCH_TAKEN.with(|c| c.set(batch));
+                    if !p.is_null() {
+                        let st = &*p;
+                        if x == IDC_CONFIRM_YES as usize {
+                            st.accept.set(true);
+                            st.open.set(true);
+                        } else if x == IDC_CONFIRM_NO as usize {
+                            st.accept.set(true);
+                            st.open.set(false);
+                        }
+                    }
+                    EndDialog(hwnd, x as isize);
+                    1
+                }
+                _ => 0,
             }
-            DestroyWindow(hwnd);
-            0
         }
         WM_CLOSE => {
-            // 超时/Alt+F4：按拒收
-            let p = GetWindowLongPtrW(hwnd, GWLP_USERDATA)
-                as *const Mutex<Option<(bool, bool, bool)>>;
-            if !p.is_null() {
-                *(*p).lock().unwrap() = Some((false, false, false));
-            }
-            DestroyWindow(hwnd);
-            0
+            // Alt+F4 / 关闭按钮：按拒收
+            KillTimer(hwnd, 1);
+            EndDialog(hwnd, IDC_CONFIRM_CANCEL as isize);
+            1
         }
-        WM_DESTROY => {
-            PostQuitMessage(0);
-            0
-        }
-        _ => DefWindowProcW(hwnd, msg, wp, lp),
+        _ => 0,
     }
-}
-
-/// CREATESTRUCTW 最小布局（lpCreateParams 为首字段）
-#[repr(C)]
-struct CreateStructW {
-    lpCreateParams: *mut core::ffi::c_void,
-}
-
-/// EnumThreadWindows 回调：给对话框发 WM_CLOSE（返回 0 停止枚举）。
-unsafe extern "system" fn close_dialog_cb(hwnd: HWND, _l: isize) -> i32 {
-    PostMessageW(hwnd, WM_CLOSE, 0, 0);
-    0
 }
 
 // ==================== save path / history ====================
@@ -3045,6 +3008,60 @@ fn handle_client(mut stream: TcpStream) {
             } else {
                 &head.query_name
             });
+            // v1.2.23：网页端与微密/LANDrop 同一套信任确认；本机浏览器
+            // (127.0.0.1) 免确认，远程浏览器按 IP 弹确认框（勾选同批 5 分钟免打扰）
+            if remote_ip != "127.0.0.1" {
+                let confirm = CONFIG
+                    .lock()
+                    .unwrap()
+                    .as_ref()
+                    .map(|c| (c.untrusted_confirm, c.untrusted_confirm_secs))
+                    .unwrap_or((true, 30));
+                let accepted = if confirm.0 {
+                    wait_untrusted_confirm(
+                        &from,
+                        &format!("web-{}", remote_ip),
+                        &name,
+                        content_length.unwrap_or(0),
+                        false,
+                        confirm.1,
+                        "",
+                    )
+                    .0
+                } else {
+                    false
+                };
+                if !accepted {
+                    write_json(
+                        &mut stream,
+                        403,
+                        &serde_json::json!({"ok": false, "error": "rejected"}),
+                    );
+                    balloon(
+                        "微密飞传",
+                        &format!(
+                            "已拒收：{} 未在信任列表\n（{}）",
+                            from,
+                            if confirm.0 {
+                                format!("{}秒未确认，自动拒收", confirm.1.max(5))
+                            } else {
+                                "策略为直接拒绝".to_string()
+                            }
+                        ),
+                    );
+                    record_history(
+                        "file",
+                        &name,
+                        content_length.unwrap_or(0),
+                        &from,
+                        false,
+                        None,
+                        None,
+                        Some("web"),
+                    );
+                    return;
+                }
+            }
             let Some(save) = resolve_save_path(&recv_dir, &name) else {
                 write_json(
                     &mut stream,
@@ -3097,6 +3114,60 @@ fn handle_client(mut stream: TcpStream) {
                 return;
             }
             let from = format!("网页客户端({})", remote_ip);
+            // v1.2.23：网页端与微密/LANDrop 同一套信任确认；本机浏览器
+            // (127.0.0.1) 免确认，远程浏览器按 IP 弹确认框（勾选同批 5 分钟免打扰）
+            if remote_ip != "127.0.0.1" {
+                let confirm = CONFIG
+                    .lock()
+                    .unwrap()
+                    .as_ref()
+                    .map(|c| (c.untrusted_confirm, c.untrusted_confirm_secs))
+                    .unwrap_or((true, 30));
+                let accepted = if confirm.0 {
+                    wait_untrusted_confirm(
+                        &from,
+                        &format!("web-{}", remote_ip),
+                        "一条文本消息",
+                        0,
+                        true,
+                        confirm.1,
+                        "",
+                    )
+                    .0
+                } else {
+                    false
+                };
+                if !accepted {
+                    write_json(
+                        &mut stream,
+                        403,
+                        &serde_json::json!({"ok": false, "error": "rejected"}),
+                    );
+                    balloon(
+                        "微密飞传",
+                        &format!(
+                            "已拒收：{} 未在信任列表\n（{}）",
+                            from,
+                            if confirm.0 {
+                                format!("{}秒未确认，自动拒收", confirm.1.max(5))
+                            } else {
+                                "策略为直接拒绝".to_string()
+                            }
+                        ),
+                    );
+                    record_history(
+                        "text",
+                        "（已拒收）一条文本",
+                        0,
+                        &from,
+                        false,
+                        None,
+                        None,
+                        Some("web"),
+                    );
+                    return;
+                }
+            }
             let body = read_body_all(&mut stream, leftover, content_length, chunked);
             let text = String::from_utf8_lossy(&body).to_string();
             write_json(&mut stream, 200, &serde_json::json!({"ok": true}));

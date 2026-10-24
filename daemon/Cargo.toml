@@ -23,3 +23,9 @@ rand = "0.8"
 opt-level = "s"
 lto = true
 strip = true
+
+[build-dependencies]
+# v1.2.23：TaskDialogIndirect 需 comctl32 v6——exe 必须内嵌声明
+# Common-Controls v6 依赖的 manifest，否则 LoadLibrary 只拿到 v5.82
+# （该版本无 TaskDialog 导出，WER 崩溃修复方案的前置条件）
+embed-manifest = "1"

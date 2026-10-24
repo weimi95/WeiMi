@@ -138,6 +138,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "embed-manifest"
+version = "1.5.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ba92c8f4591bf29f89716b45e5f5f56577adbb81426e5620c6e994da7c88bb7a"
+
+[[package]]
 name = "fiat-crypto"
 version = "0.2.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -421,6 +427,7 @@ version = "1.2.21"
 dependencies = [
  "blake2",
  "chacha20poly1305",
+ "embed-manifest",
  "rand",
  "secp256k1",
  "serde",
