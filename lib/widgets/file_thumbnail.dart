@@ -39,6 +39,10 @@ class FileThumbs {
   static const image = {
     'jpg', 'jpeg', 'png', 'gif', 'bmp', 'webp', 'heic', 'heif',
     'tiff', 'tif', 'svg', 'ico',
+    // v1.2.25：设计软件源文件与相机 raw 归图片类（排序/筛选同口径）
+    'psd', 'ai', 'cdr', 'xcf', 'sketch', 'fig', 'afdesign', 'afphoto',
+    'eps', 'cr2', 'cr3', 'nef', 'arw', 'dng', 'rw2', 'orf', 'raf',
+    'srw', 'pef',
   };
   static const audio = {
     'mp3', 'wav', 'flac', 'aac', 'm4a', 'ogg', 'wma', 'ape', 'opus',
@@ -101,6 +105,29 @@ class FileThumbs {
     if (archive.contains(e)) return FileCategory.archive;
     if (installer.contains(e)) return FileCategory.installer;
     return FileCategory.other;
+  }
+
+  /// 智能排序权重（v1.2.25）：常见格式排前，无名杂类（.dat 哈希等）垫底。
+  /// 同权重由调用方按名称排。目录权重调用方另行处理（恒最前）。
+  static int smartRank(String name) {
+    switch (categoryOf(name)) {
+      case FileCategory.image:
+        return 1;
+      case FileCategory.video:
+        return 2;
+      case FileCategory.audio:
+        return 3;
+      case FileCategory.doc:
+        return 4;
+      case FileCategory.archive:
+        return 5;
+      case FileCategory.installer:
+        return 6;
+      case FileCategory.encrypted:
+        return 7;
+      default:
+        return 9;
+    }
   }
 
   /// Android 原生视频抽帧（返回 JPEG 字节；不支持时返回 null）
