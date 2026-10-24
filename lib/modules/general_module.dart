@@ -7,6 +7,7 @@ import 'package:path_provider/path_provider.dart';
 import '../framework/module_registry.dart';
 import '../framework/setting_store.dart';
 import '../services/autostart_service.dart';
+import '../services/file_operations_service.dart';
 import '../services/tray_service.dart';
 
 /// 通用模块：清理缓存（全平台）+ 桌面端子组（开机自启 / 关闭按钮行为）。
@@ -35,6 +36,15 @@ class GeneralModule extends FeatureModule {
           type: SettingType.custom,
           customTile: (ctx) => const _ClearCacheTile(),
         ),
+        // v1.2.24：Android「所有文件访问」授权引导——未授权时删除
+        // 相册等公共目录的他 app 文件会静默失败（永久删除原文件失效根因）
+        if (Platform.isAndroid)
+          SettingDef(
+            key: 'general_all_files_access',
+            title: '所有文件访问权限',
+            type: SettingType.custom,
+            customTile: (ctx) => const _AllFilesAccessTile(),
+          ),
         // 搜索历史条数：主界面搜索框与 PC 快捷浮窗共用（key 未变，prefs 兼容）
         SettingDef(
           key: 'qs_history_limit',
@@ -102,6 +112,59 @@ class GeneralModule extends FeatureModule {
 }
 
 /// 清理缓存（临时目录 + file_picker 缓存）。
+/// v1.2.24：Android「所有文件访问」授权状态 tile。
+/// 未授权时删除/移动公共目录里的他 app 文件会静默失败。
+class _AllFilesAccessTile extends StatefulWidget {
+  const _AllFilesAccessTile();
+
+  @override
+  State<_AllFilesAccessTile> createState() => _AllFilesAccessTileState();
+}
+
+class _AllFilesAccessTileState extends State<_AllFilesAccessTile> {
+  bool? _granted;
+
+  @override
+  void initState() {
+    super.initState();
+    _refresh();
+  }
+
+  Future<void> _refresh() async {
+    final g = await FileOperationsService.isAllFilesAccessGranted();
+    if (mounted) setState(() => _granted = g);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final granted = _granted == true;
+    return ListTile(
+      leading: Icon(
+        granted ? Icons.verified_user_outlined : Icons.folder_off_outlined,
+        size: 20,
+        color: granted ? Colors.green : Colors.orange,
+      ),
+      title: const Text('所有文件访问权限', style: TextStyle(fontSize: 14)),
+      subtitle: Text(
+        granted
+            ? '已授权：可直接删除/移动外部文件'
+            : '未授权：删除相册等公共目录的原文件会失败。点击前往授权',
+        style: const TextStyle(fontSize: 12),
+      ),
+      trailing: granted
+          ? const Icon(Icons.check_circle, color: Colors.green, size: 20)
+          : const Icon(Icons.chevron_right, size: 20),
+      onTap: granted
+          ? null
+          : () async {
+              await FileOperationsService.openAllFilesAccessSettings();
+              // 从授权页回来后刷新状态（延迟等页面切换）
+              Future.delayed(const Duration(seconds: 2), _refresh);
+            },
+    );
+  }
+}
+
 class _ClearCacheTile extends StatelessWidget {
   const _ClearCacheTile();
 

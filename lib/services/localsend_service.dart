@@ -9,6 +9,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 import '../framework/setting_store.dart';
 import 'lan_transfer_service.dart';
 import 'receive_notify_service.dart';
+import 'sent_file_archiver.dart';
 import 'transfer_history_service.dart';
 
 /// LocalSend v2 协议兼容层（与微密自研飞传平行叠加，互不影响）。
@@ -832,12 +833,14 @@ class LocalSendService {
         await upResp.drain<void>();
         if (upResp.statusCode == 200) {
           ok++;
+          // v1.2.24：file_picker 临时拷贝归档进「已发送」，聊天记录永久有效
+          final archived = await SentFileArchiver.archive(file.path);
           await TransferHistoryService.instance.add(TransferRecord(
             id: '${DateTime.now().microsecondsSinceEpoch}_lsout',
             kind: 'file',
             direction: 'out',
             name: fileName,
-            path: file.path,
+            path: archived,
             size: total,
             peerName: peer.name,
             peerKey: peer.id,

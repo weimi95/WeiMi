@@ -35,6 +35,7 @@ import 'services/lan_transfer_service.dart';
 import 'services/view_prefs_service.dart';
 import 'services/share_receive_service.dart';
 import 'services/receive_notify_service.dart';
+import 'services/sent_file_archiver.dart';
 import 'services/daemon_service.dart';
 import 'screens/lan_transfer_screen.dart';
 import 'widgets/file_thumbnail.dart';
@@ -150,6 +151,9 @@ void main(List<String> args) async {
 
     // 接收完成通知（PC 系统通知 / 安卓应用内横幅）
     await ReceiveNotifyService.instance.init();
+
+    // 已发送副本过期清理（v1.2.24，Android；后台跑不阻塞启动）
+    unawaited(SentFileArchiver.cleanupExpired());
 
     if (Platform.isWindows) {
       await FileAssociationService.registerFileAssociation();
@@ -720,6 +724,16 @@ class _HomePageState extends State<HomePage>
     }
     if (deletedCount > 0 && mounted) {
       _showMessage('${t('deletedFiles')}: $deletedCount');
+    }
+    // v1.2.24：失败明确提示（旧版静默，老板误以为已删）
+    if (deletedCount < encryptResults.length && mounted) {
+      final failed = encryptResults.length - deletedCount;
+      final granted = await FileOperationsService.isAllFilesAccessGranted();
+      _showMessage(
+        granted
+            ? '$failed 个原文件删除失败（文件可能已不存在或被占用）'
+            : '$failed 个原文件删除失败：请在 设置→应用→微密文件 中授予「所有文件访问」权限',
+      );
     }
   }
 

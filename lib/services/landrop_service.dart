@@ -9,6 +9,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 import '../framework/setting_store.dart';
 import 'lan_transfer_service.dart';
 import 'receive_notify_service.dart';
+import 'sent_file_archiver.dart';
 import 'rust_crypto.dart';
 import 'transfer_history_service.dart';
 import 'trusted_devices_service.dart';
@@ -919,11 +920,16 @@ class LandropService {
       String? note,
       required String peerName,
       required String peerKey}) async {
+    // v1.2.24：发送成功时把 file_picker 临时拷贝归档进「已发送」，
+    // 聊天记录点开/缩略图从此有稳定本地路径（旧版 LANDrop 记录无 path）
+    final String? archived =
+        ok ? await SentFileArchiver.archive(m.path) : null;
     await TransferHistoryService.instance.add(TransferRecord(
       id: '${DateTime.now().microsecondsSinceEpoch}_ldout',
       kind: 'file',
       direction: 'out',
       name: m.filename,
+      path: archived,
       size: m.size,
       peerName: peerName,
       peerKey: peerKey,

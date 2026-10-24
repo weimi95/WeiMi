@@ -70,7 +70,7 @@ class _ImageViewerScreenState extends State<ImageViewerScreen> {
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(
-        title: const Text('Image Viewer'),
+        title: const Text('图片查看'),
         backgroundColor: Colors.black,
         foregroundColor: Colors.white,
       ),

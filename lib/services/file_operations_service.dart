@@ -120,6 +120,26 @@ class FileOperationsService {
   /// 删除原始文件。
   /// Android 上 file_picker 返回的 path 是应用缓存副本，真实文件须通过
   /// 原生 MethodChannel 按 content:// URI 删除；其他平台直接删路径。
+  /// 是否已授予「所有文件访问」（Android 11+；低版本/桌面恒 true）。
+  /// 未授予时删除他 app 创建的公共目录文件会静默失败。
+  static Future<bool> isAllFilesAccessGranted() async {
+    if (!Platform.isAndroid) return true;
+    try {
+      return await _fileOpsChannel.invokeMethod<bool>('hasAllFilesAccess') ??
+          false;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  /// 跳系统「所有文件访问」授权页（Android 11+）。
+  static Future<void> openAllFilesAccessSettings() async {
+    if (!Platform.isAndroid) return;
+    try {
+      await _fileOpsChannel.invokeMethod('openAllFilesAccessSettings');
+    } catch (_) {}
+  }
+
   static Future<bool> deleteOriginal(String path, {String? identifier}) async {
     if (Platform.isAndroid) {
       try {

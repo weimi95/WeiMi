@@ -12,6 +12,7 @@ import 'trusted_devices_service.dart';
 import 'transfer_history_service.dart';
 import 'receive_notify_service.dart';
 import 'daemon_service.dart';
+import 'sent_file_archiver.dart';
 
 /// 微密飞传服务（方案 B：自研轻量协议，对标 Landrop）
 ///
@@ -1902,12 +1903,14 @@ class LanTransferService {
         if (onProgress != null) onProgress(sent, total);
       }
       _safeAdd(peer.socket, json.encode({'t': 'file-done', 'fid': fid}));
+      // v1.2.24：file_picker 临时拷贝归档进「已发送」，聊天记录永久有效
+      final archivedPath = await SentFileArchiver.archive(filePath);
       await TransferHistoryService.instance.add(TransferRecord(
         id: '${DateTime.now().microsecondsSinceEpoch}_wsout',
         kind: 'file',
         direction: 'out',
         name: sendName,
-        path: filePath,
+        path: archivedPath,
         size: total,
         peerName: '网页客户端(${peer.name})',
         peerKey: 'web',
@@ -2319,12 +2322,14 @@ function done(el, text, ok) {
         name: sendName,
       );
       if (ok && recordHistory) {
+        // v1.2.24：file_picker 临时拷贝归档进「已发送」
+        final archivedPath = await SentFileArchiver.archive(filePath);
         await TransferHistoryService.instance.add(TransferRecord(
           id: '${DateTime.now().microsecondsSinceEpoch}_wso',
           kind: 'file',
           direction: 'out',
           name: sendName,
-          path: filePath,
+          path: archivedPath,
           size: total,
           peerName: peer.name,
           // 网页会话统一 key 'web'：peer.id 是 'ws_<WS会话id>'，浏览器每次
@@ -2432,12 +2437,14 @@ function done(el, text, ok) {
             .join();
         if (resp.statusCode == HttpStatus.ok && body.contains('"ok":true')) {
           if (recordHistory) {
+            // v1.2.24：file_picker 临时拷贝归档进「已发送」
+            final archivedPath = await SentFileArchiver.archive(filePath);
             await TransferHistoryService.instance.add(TransferRecord(
               id: '${DateTime.now().microsecondsSinceEpoch}_out',
               kind: 'file',
               direction: 'out',
               name: sendName,
-              path: filePath,
+              path: archivedPath,
               size: total,
               peerName: peer.name,
               // 网页会话统一 key 'web'（浏览器刷新会变房间 id，别拿它落记录）

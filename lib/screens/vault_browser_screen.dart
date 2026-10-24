@@ -1253,6 +1253,15 @@ class _VaultBrowserScreenState extends State<VaultBrowserScreen>
       ScaffoldMessenger.of(context).showSnackBar(SnackBar(
           content: Text('已删除原文件：$deleted 个')));
     }
+    // v1.2.24：失败明确提示（旧版静默）
+    if (deleted < originalPaths.length && mounted) {
+      final failed = originalPaths.length - deleted;
+      final granted = await FileOperationsService.isAllFilesAccessGranted();
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+          content: Text(granted
+              ? '$failed 个原文件删除失败（文件可能已不存在或被占用）'
+              : '$failed 个原文件删除失败：需在系统设置中授予「所有文件访问」权限')));
+    }
   }
 
   Future<bool?> _askUseMasterPassword(String name) {

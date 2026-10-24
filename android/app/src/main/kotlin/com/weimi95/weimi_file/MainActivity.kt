@@ -25,6 +25,8 @@ import javax.crypto.SecretKey
 import javax.crypto.spec.GCMParameterSpec
 import android.security.keystore.KeyGenParameterSpec
 import android.security.keystore.KeyProperties
+import android.os.Environment
+import android.provider.MediaStore
 
 // BiometricPrompt 要求 FragmentActivity（FlutterFragmentActivity 是其子类）
 class MainActivity : FlutterFragmentActivity() {
@@ -53,7 +55,16 @@ class MainActivity : FlutterFragmentActivity() {
                 }
                 "deleteFile" -> {
                     val target = call.argument<String>("path")
-                    result.success(if (target != null) deleteTarget(target) else false)
+                    if (target == null) {
+                        result.success(false)
+                    } else {
+                        deleteTargetAsync(target, result)
+                    }
+                }
+                "hasAllFilesAccess" -> result.success(hasAllFilesAccess())
+                "openAllFilesAccessSettings" -> {
+                    openAllFilesAccessSettings()
+                    result.success(true)
                 }
                 "shareFiles" -> {
                     val paths = call.argument<List<String>>("paths") ?: emptyList()
@@ -387,43 +398,115 @@ class MainActivity : FlutterFragmentActivity() {
 
     /// 删除文件：content:// URI 先解析真实路径（_data 列）再删，
     /// 失败则走 DocumentsContract.deleteDocument；普通路径直接删。
-    private fun deleteTarget(target: String): Boolean {
-        return try {
+    // v1.2.24：MediaStore.createDeleteRequest 是异步（系统确认框），
+    // MethodChannel 结果延迟到 onActivityResult 回填
+    private var pendingDeleteResult: MethodChannel.Result? = null
+    private val REQ_USER_DELETE = 41001
+
+    private fun hasAllFilesAccess(): Boolean =
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R)
+            Environment.isExternalStorageManager()
+        else true // 29 及以下走传统 WRITE 权限，删除本就可用
+
+    private fun openAllFilesAccessSettings() {
+        try {
+            val i = Intent(
+                Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION,
+                Uri.parse("package:$packageName")
+            )
+            i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            startActivity(i)
+        } catch (e: Exception) {
+            try {
+                startActivity(
+                    Intent(Settings.ACTION_MANAGE_ALL_FILES_ACCESS_PERMISSION)
+                        .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                )
+            } catch (_: Exception) {
+            }
+        }
+    }
+
+    /// 删除分发：媒体 URI 且未授予所有文件访问 → 系统删除确认框（异步）；
+    /// 其余走同步路径。Dart 侧拿到的 bool 即最终结果。
+    private fun deleteTargetAsync(target: String, result: MethodChannel.Result) {
+        try {
             if (target.startsWith("content://")) {
                 val uri = Uri.parse(target)
-                var deleted = false
-                try {
-                    val cursor: Cursor? = contentResolver.query(uri, arrayOf("_data"), null, null, null)
-                    cursor?.use {
-                        if (it.moveToFirst()) {
-                            val idx = it.getColumnIndex("_data")
-                            if (idx != -1) {
-                                val p = it.getString(idx)
-                                if (p != null) {
-                                    val f = File(p)
-                                    if (f.exists()) deleted = f.delete()
-                                }
-                            }
-                        }
-                    }
-                } catch (e: Exception) {
-                    // 解析真实路径失败，走下方兜底
-                }
-                if (!deleted) {
-                    deleted = try {
-                        android.provider.DocumentsContract.deleteDocument(contentResolver, uri)
+                // Android 11+：他 app 贡献的媒体文件，File.delete 无权限，
+                // createDeleteRequest 弹系统确认框后才能删（用户点允许即删）
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R &&
+                    !hasAllFilesAccess() &&
+                    uri.authority?.endsWith("media") == true
+                ) {
+                    try {
+                        val pending = MediaStore.createDeleteRequest(
+                            contentResolver, listOf(uri)
+                        )
+                        pendingDeleteResult = result
+                        startIntentSenderForResult(
+                            pending.intentSender, REQ_USER_DELETE, null, 0, 0, 0
+                        )
+                        return
                     } catch (e: Exception) {
-                        false
+                        // createDeleteRequest 失败（如非媒体项），走下面兜底
                     }
                 }
-                deleted
-            } else {
-                val f = File(target)
-                f.exists() && f.delete()
+                result.success(deleteContentUri(uri) || deleteDirectPath(target))
+                return
             }
+            result.success(deleteDirectPath(target))
+        } catch (e: Exception) {
+            result.success(false)
+        }
+    }
+
+    private fun deleteContentUri(uri: Uri): Boolean {
+        var deleted = false
+        try {
+            val cursor: Cursor? =
+                contentResolver.query(uri, arrayOf("_data"), null, null, null)
+            cursor?.use {
+                if (it.moveToFirst()) {
+                    val idx = it.getColumnIndex("_data")
+                    if (idx != -1) {
+                        val p = it.getString(idx)
+                        if (p != null) deleted = deleteDirectPath(p)
+                    }
+                }
+            }
+        } catch (e: Exception) {
+            // 解析真实路径失败，走下方兜底
+        }
+        if (!deleted) {
+            deleted = try {
+                android.provider.DocumentsContract.deleteDocument(contentResolver, uri)
+            } catch (e: Exception) {
+                false
+            }
+        }
+        return deleted
+    }
+
+    private fun deleteDirectPath(target: String): Boolean {
+        return try {
+            val f = File(target)
+            f.exists() && f.delete()
         } catch (e: Exception) {
             false
         }
+    }
+
+    override fun onActivityResult(
+        requestCode: Int, resultCode: Int, data: Intent?
+    ) {
+        if (requestCode == REQ_USER_DELETE) {
+            val r = pendingDeleteResult
+            pendingDeleteResult = null
+            r?.success(resultCode == android.app.Activity.RESULT_OK)
+            return
+        }
+        super.onActivityResult(requestCode, resultCode, data)
     }
 
     /// 用系统默认 App 打开文件（内置查看器不支持的格式兜底，如 apk / heic）。

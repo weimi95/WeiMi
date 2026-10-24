@@ -1455,6 +1455,11 @@ class _StackItem extends _ChatItem {
 }
 
 /// 把记录按「同方向连续文件」分组：连续文件合成一个堆叠气泡。
+/// v1.2.24 加时间断档：相邻两条相差超过 [_stackGap] 即断开——
+/// 只有同一次批量发送（毫秒级连发）才折叠，隔了几分钟重发的同名文件
+/// 不再被并进同一堆。
+const Duration _stackGap = Duration(seconds: 5);
+
 List<_ChatItem> _buildChatItems(List<TransferRecord> recs, bool stack) {
   final items = <_ChatItem>[];
   List<TransferRecord>? run;
@@ -1471,7 +1476,12 @@ List<_ChatItem> _buildChatItems(List<TransferRecord> recs, bool stack) {
   }
 
   for (final r in recs) {
-    if (stack && r.kind == 'file' && runDir == r.direction) {
+    final canStack = stack &&
+        r.kind == 'file' &&
+        run != null &&
+        runDir == r.direction &&
+        r.time.difference(run!.last.time).abs() <= _stackGap;
+    if (canStack) {
       run!.add(r);
     } else {
       flush();

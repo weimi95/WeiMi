@@ -1,4 +1,5 @@
 import 'dart:io';
+import 'dart:ui' as ui;
 
 import 'package:flutter/material.dart';
 import 'package:path/path.dart' as p;
@@ -13,6 +14,19 @@ import '../screens/text_viewer_screen.dart';
 import '../screens/pdf_viewer_screen.dart';
 
 class FileViewerService {
+  /// 试探：Flutter 官方解码器能否解此文件（设备原生支持 heic 时为 true）。
+  /// 仅 unknown 图片扩展名走到这里；失败即回退交系统打开。
+  static Future<bool> _builtinDecodable(String path) async {
+    try {
+      final bytes = await File(path).readAsBytes();
+      final codec = await ui.instantiateImageCodec(bytes);
+      await codec.dispose();
+      return true;
+    } catch (_) {
+      return false;
+    }
+  }
+
   static Future<void> openFile(
     BuildContext context,
     String filePath, {
@@ -37,7 +51,9 @@ class FileViewerService {
     }
 
     if (fileType == FileType.unknown) {
-      // 内置查看器不支持的格式 → 交给系统打开（apk 安装、HEIC 相册等）
+      // v1.2.24：heic/heif/avif 等图片扩展名先试内置解码——设备原生支持时
+      // （新安卓/iOS/macOS）统一走内置查看器，不再跳系统相册（体验割裂）；
+      // 解不动（如桌面端）再交系统打开（apk 安装等）
       String? openTarget = filePath;
       if (isEncrypted && password != null) {
         // 加密文件先解密到临时目录，再交给系统
@@ -54,6 +70,29 @@ class FileViewerService {
       }
       if (openTarget != null &&
           FileSystemEntity.typeSync(openTarget) != FileSystemEntityType.notFound) {
+        final ext = FileOperationsService.getFileExtension(openTarget);
+        if (['heic', 'heif', 'avif', 'hif'].contains(ext) &&
+            await _builtinDecodable(openTarget)) {
+          if (context.mounted) {
+            await Navigator.push(
+              context,
+              MaterialPageRoute(
+                builder: (context) => ImageViewerScreen(
+                  imagePath: openTarget!,
+                  isEncrypted: false,
+                ),
+              ),
+            );
+            if (Platform.isAndroid) {
+              try {
+                await file_picker.FilePicker.platform.clearTemporaryFiles();
+              } catch (e) {
+                debugPrint('Failed to clear file_picker cache: $e');
+              }
+            }
+          }
+          return;
+        }
         final r = await SystemOpenService.open(openTarget);
         if (r.ok) return;
         // 失败按原因兜底（apk 未授权→引导；无应用→打开方式）
